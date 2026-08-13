@@ -46,12 +46,16 @@ class LLMClient:
         max_tokens: int = 4096,
         max_retry_limit: int = 3,
         stream: bool = True,
+        plugins: list[dict[str, Any]] | None = None,
     ) -> str:
         """Send a chat completion request and return the assistant's text reply.
 
         If stream=True, displays real-time output as the LLM generates.
         Retries on transient errors (5xx, timeouts) up to ``max_retry_limit`` times
         with exponential backoff.
+
+        If plugins is provided (e.g. [{"id": "web"}]), enables OpenRouter plugins
+        such as web search.
         """
         payload: dict[str, Any] = {
             "model": model or self._default_model,
@@ -60,6 +64,8 @@ class LLMClient:
             "max_tokens": max_tokens,
             "stream": stream,
         }
+        if plugins:
+            payload["plugins"] = plugins
 
         last_error: Exception | None = None
         for attempt in range(1, max_retry_limit + 1):
@@ -119,6 +125,7 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         max_retry_limit: int = 3,
+        plugins: list[dict[str, Any]] | None = None,
     ):
         """Stream chat completion, yielding chunks. For web SSE."""
         import json
@@ -130,6 +137,8 @@ class LLMClient:
             "max_tokens": max_tokens,
             "stream": True,
         }
+        if plugins:
+            payload["plugins"] = plugins
 
         last_error: Exception | None = None
         for attempt in range(1, max_retry_limit + 1):

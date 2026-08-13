@@ -1801,6 +1801,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .result-modal-close { background: none; border: 1px solid #2a2d3a; color: #888; border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
   .result-modal-close:hover { border-color: #7c8aff; color: #7c8aff; }
   .result-modal-body { color: #ccc; font-size: 14px; line-height: 1.6; }
+  .result-modal-body a { color: #7c8aff; text-decoration: none; }
+  .result-modal-body a:hover { text-decoration: underline; }
   .media-viewer { background: #1c1e2a; border: 1px solid #2a2d3a; border-radius: 12px; max-width: 90vw; max-height: 90vh; overflow: auto; padding: 16px; }
   .media-viewer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; color: #e0e0e0; }
   .media-viewer-header button { background: none; border: none; color: #888; font-size: 18px; cursor: pointer; }
@@ -3616,6 +3618,11 @@ function loadSessionFile(session, filename, el) {
 function renderMarkdown(text) {
   if (!text) return '';
   let html = escapeHtml(text);
+  // Links [text](url) — ต้องทำก่อน escape อื่นๆ เพราะ escapeHtml ทำแล้ว
+  // แต่เนื่องจาก escapeHtml ทำแล้ว ต้องแก้ &amp; กลับใน URL
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(m, label, url) {
+    return '<a href="' + url.replace(/&amp;/g, '&') + '" target="_blank" rel="noopener">' + label + '</a>';
+  });
   // Headers
   html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
   html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');

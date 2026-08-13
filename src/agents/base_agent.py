@@ -224,12 +224,17 @@ class BaseAgent:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
+        # web search plugins — จาก config (agents.yaml: web_search: true)
+        plugins = None
+        if self.config.get("web_search"):
+            plugins = [{"id": "web", "max_results": 5}]
         output = self.llm.chat(
             messages,
             model=self.config.get("model"),
             temperature=self.config.get("temperature", 0.7),
             max_tokens=self.config.get("max_tokens", 4096),
             max_retry_limit=self.config.get("max_retry_limit", 3),
+            plugins=plugins,
         )
 
         # --- Phase 2: Review & Refine ---
