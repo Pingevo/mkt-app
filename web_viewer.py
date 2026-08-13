@@ -1889,11 +1889,28 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .flow-title { font-size: 14px; color: #888; margin-bottom: 12px; }
   .flow-title b { color: #7c8aff; }
   .flow-steps { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-  .flow-step { display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: #1c1e2a; border-radius: 8px; font-size: 13px; }
+  .flow-step { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: #1c1e2a; border: 1px solid #2a2d3a; border-radius: 8px; font-size: 13px; color: #888; transition: all 0.3s ease; }
+  .flow-step.done { background: #1a2a1a; border-color: #22c55e; color: #86efac; }
+  .flow-step.running {
+    background: #1e1b3a;
+    border-color: #7c3aed;
+    color: #c792ea;
+    box-shadow: 0 0 15px rgba(124, 58, 237, 0.4);
+    animation: flow-pulse 1.5s infinite alternate;
+  }
+  @keyframes flow-pulse {
+    0% { box-shadow: 0 0 5px rgba(124, 58, 237, 0.2); }
+    100% { box-shadow: 0 0 25px rgba(124, 58, 237, 0.7); }
+  }
+  .flow-spinner { display: none; width: 14px; height: 14px; border: 2px solid #7c3aed; border-top-color: transparent; border-radius: 50%; animation: flow-spin 1s linear infinite; flex-shrink: 0; }
+  .flow-step.running .flow-spinner { display: block; }
+  @keyframes flow-spin { 100% { transform: rotate(360deg); } }
   .flow-step.auto { border: 1px dashed #4ade80; }
   .flow-step.auto .flow-step-badge { background: #1a3a2a; color: #4ade80; }
   .flow-step-icon { font-size: 18px; }
   .flow-step-name { color: #e0e0e0; }
+  .flow-step.running .flow-step-name { color: #c792ea; }
+  .flow-step.done .flow-step-name { color: #86efac; }
   .flow-step-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #2a2d3a; color: #888; margin-left: 4px; }
   .flow-arrow { color: #555; font-size: 18px; }
   .flow-product { margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #2a2d3a; }
@@ -3050,6 +3067,7 @@ function showFlow(plansArg) {
       const stepId = 'flow-' + planIdx + '-' + i;
       if (i > 0) html += '<span class="flow-arrow">→</span>';
       html += '<div class="flow-step' + (step.isAuto ? ' auto' : '') + '" id="' + stepId + '" data-agent="' + step.key + '" title="' + escapeHtml(step.reason) + '">';
+      html += '<div class="flow-spinner"></div>';
       html += '<span class="flow-step-icon">' + step.icon + '</span>';
       html += '<span class="flow-step-name">' + escapeHtml(step.name) + '</span>';
       if (step.isAuto) html += '<span class="flow-step-badge">อัตโนมัติ</span>';

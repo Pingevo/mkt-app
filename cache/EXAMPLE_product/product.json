@@ -1,8 +1,8 @@
 {
   "product_id": "EXAMPLE_product",
-  "status": "empty",
+  "status": "pending",
   "created_at": "",
-  "updated_at": "",
+  "updated_at": "2026-08-13T15:04:48.166328",
   "ingested_at": null,
   "ingest_progress": 0,
   "files": [
@@ -25,12 +25,21 @@
   },
   "raw_text": "เนื้อหาดิบที่สกัดจากไฟล์ spec ของสินค้า",
   "image_descriptions": [
-    {"file": "image1.jpg", "description": "คำอธิบายภาพจาก vision model"}
+    {
+      "file": "image1.jpg",
+      "description": "คำอธิบายภาพจาก vision model"
+    }
   ],
   "video_transcripts": [
-    {"file": "video1.mp4", "transcript": "transcript จากวิดีโอ"}
+    {
+      "file": "video1.mp4",
+      "transcript": "transcript จากวิดีโอ"
+    }
   ],
   "audio_transcripts": [
-    {"file": "audio1.mp3", "transcript": "transcript จากเสียง"}
+    {
+      "file": "audio1.mp3",
+      "transcript": "transcript จากเสียง"
+    }
   ]
 }
