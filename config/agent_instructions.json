@@ -26,6 +26,7 @@
     }
   },
   "product_spec": {
+    "custom": "ในท้ายสุดของผลลัพธ์ ต้องมีความเห็นส่วนตัวของคุณ เกี่ยวกับราคาที่สมเหตุสมผลสำหรับสินค้าเสมอ",
     "preset": "balanced",
     "focus": [
       "USP",
@@ -43,7 +44,6 @@
       "ห้ามเดาคุณสมบัติสินค้า",
       "ห้ามใช้คำโฆษณาเกินจริง"
     ],
-    "custom": "",
     "data_strictness": "strict"
   },
   "competitor_analysis": {
@@ -93,6 +93,7 @@
     "custom": ""
   },
   "content_creator": {
+    "custom": "",
     "preset": "friendly",
     "tone": [
       "friendly",
@@ -108,8 +109,7 @@
     "rules_forbid": [
       "ห้ามใช้คำหยาบ",
       "ห้ามอ้างสรรพคุณที่ไม่จริง"
-    ],
-    "custom": ""
+    ]
   },
   "_presets": {
     "product_spec": [
@@ -156,11 +156,6 @@
           "differentiation"
         ],
         "detail_level": "standard"
-      },
-      {
-        "key": "custom",
-        "label": "⚙️ Custom",
-        "desc": "ตั้งค่าเองด้วย AI — กดปรับเพิ่มเติม"
       }
     ],
     "competitor_analysis": [
@@ -195,11 +190,6 @@
           "positioning",
           "marketing"
         ]
-      },
-      {
-        "key": "custom",
-        "label": "⚙️ Custom",
-        "desc": "ตั้งค่าเองด้วย AI — กดปรับเพิ่มเติม"
       }
     ],
     "campaign_strategy": [
@@ -257,11 +247,6 @@
           "brand",
           "acquisition"
         ]
-      },
-      {
-        "key": "custom",
-        "label": "⚙️ Custom",
-        "desc": "ตั้งค่าเองด้วย AI — กดปรับเพิ่มเติม"
       }
     ],
     "content_creator": [
@@ -312,103 +297,10 @@
         "hook_style": "emotional",
         "sell_style": "soft",
         "language": "professional"
-      },
-      {
-        "key": "custom",
-        "label": "⚙️ Custom",
-        "desc": "ตั้งค่าเองด้วย AI — กดปรับเพิ่มเติม"
       }
     ]
   },
   "_defaults": {
-    "product_spec": {
-      "preset": "balanced",
-      "focus": [
-        "USP",
-        "differentiation",
-        "sales_info"
-      ],
-      "detail_level": "standard",
-      "rules_must": [
-        "แยก fact กับ assumption ชัดเจน",
-        "ถ้าไม่มีข้อมูลให้ระบุว่าไม่มีข้อมูล",
-        "เน้นประโยชน์ต่อลูกค้า"
-      ],
-      "rules_forbid": [
-        "ห้ามสร้างข้อมูลที่ไม่มีใน source",
-        "ห้ามเดาคุณสมบัติสินค้า",
-        "ห้ามใช้คำโฆษณาเกินจริง"
-      ],
-      "custom": "",
-      "data_strictness": "strict"
-    },
-    "competitor_analysis": {
-      "preset": "standard",
-      "analysis_depth": "standard",
-      "competitor_types": [
-        "direct",
-        "indirect"
-      ],
-      "importance": [
-        "price",
-        "features",
-        "positioning",
-        "marketing"
-      ],
-      "analysis_style": "strategic",
-      "web_search": true,
-      "rules_must": [
-        "ระบุแหล่งที่มาของข้อมูลคู่แข่ง",
-        "แยกข้อมูลที่ค้นหาได้กับที่สันนิษฐาน"
-      ],
-      "rules_forbid": [
-        "ห้ามเดาราคาหรือคุณสมบัติคู่แข่ง",
-        "ห้ามลอกข้อมูลโดยไม่วิเคราะห์"
-      ],
-      "custom": ""
-    },
-    "campaign_strategy": {
-      "preset": "balanced",
-      "campaign_objective": "sales",
-      "risk_level": "balanced",
-      "priority": [
-        "margin",
-        "brand"
-      ],
-      "budget_max": "",
-      "discount_max": "",
-      "forbid_tactics": [],
-      "rules_must": [
-        "ราคาที่แนะนำต้องมีเหตุผล",
-        "แคมเปญต้องเป็นไปได้จริง"
-      ],
-      "rules_forbid": [
-        "ห้ามเสนอแคมเปญที่ขาดทุนชัดเจน",
-        "ห้ามใช้คำโฆษณาเกินจริง"
-      ],
-      "custom": ""
-    },
-    "content_creator": {
-      "preset": "friendly",
-      "tone": [
-        "friendly",
-        "professional"
-      ],
-      "hook_style": "problemsolution",
-      "sell_style": "balanced",
-      "language": "conversational",
-      "rules_must": [
-        "Content ต้องตรงกับแคมเปญที่กำหนด",
-        "Hashtag ต้องเกี่ยวข้องกับสินค้าจริง"
-      ],
-      "rules_forbid": [
-        "ห้ามใช้คำหยาบ",
-        "ห้ามอ้างสรรพคุณที่ไม่จริง"
-      ],
-      "custom": ""
-    }
-  },
-  "_custom_settings": {
     "product_spec": {
       "preset": "balanced",
       "focus": [

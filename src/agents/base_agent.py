@@ -169,10 +169,10 @@ class BaseAgent:
         if rules_forbid:
             parts.append("ห้าม:\n" + "\n".join(f"  ✗ {r}" for r in rules_forbid))
 
-        # Custom instruction
+        # Custom instruction — user override (takes precedence over defaults)
         custom = ins.get("custom", "")
         if custom:
-            parts.append(f"คำแนะนำเพิ่มเติมจากผู้ใช้:\n{custom}")
+            parts.append(f"คำสั่งจากผู้ใช้ (ถ้าขัดแย้งกับค่าเริ่มต้น ให้ทำตามคำสั่งนี้แทน):\n{custom}")
 
         if not parts:
             return ""
