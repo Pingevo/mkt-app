@@ -222,11 +222,28 @@ class Orchestrator:
 
         ถ้ามี product_id ตั้งอยู่และ DB พร้อม → ดึงจาก DB
         ถ้าไม่มี → ใช้ fallback (parameter ที่ส่งมา สำหรับ backward compatible)
+
+        กรณี multi-product (product_id = "K5 + K2"): ดึงแต่ละสินค้าจาก DB มารวมกัน
+        เพราะ DB เก็บแยก per-product ไม่มี combined ID
         """
-        if self.product_id and product_db.is_ready(self.product_id):
-            db_data = get_agent_data(self.product_id)
-            if db_data:
-                return db_data
+        if self.product_id:
+            # กรณี multi-product: product_id = "Lagenio K5 + Lagenio K2"
+            if " + " in self.product_id:
+                parts = self.product_id.split(" + ")
+                combined = []
+                for pid in parts:
+                    pid = pid.strip()
+                    if product_db.is_ready(pid):
+                        data = get_agent_data(pid)
+                        if data:
+                            combined.append(f"=== สินค้า: {pid} ===\n{data}")
+                if combined:
+                    return "\n\n".join(combined)
+            # กรณี single product
+            elif product_db.is_ready(self.product_id):
+                db_data = get_agent_data(self.product_id)
+                if db_data:
+                    return db_data
         return fallback
 
     def run_competitor_analysis(

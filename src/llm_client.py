@@ -46,6 +46,7 @@ class LLMClient:
         max_tokens: int = 4096,
         max_retry_limit: int = 3,
         stream: bool = True,
+        tools: list[dict[str, Any]] | None = None,
         plugins: list[dict[str, Any]] | None = None,
     ) -> str:
         """Send a chat completion request and return the assistant's text reply.
@@ -54,8 +55,10 @@ class LLMClient:
         Retries on transient errors (5xx, timeouts) up to ``max_retry_limit`` times
         with exponential backoff.
 
+        If tools is provided (e.g. [{"type": "openrouter:web_search"}]),
+        enables OpenRouter server tools — model controls when/how often to search.
         If plugins is provided (e.g. [{"id": "web"}]), enables OpenRouter plugins
-        such as web search.
+        (auto-search once per request).
         """
         payload: dict[str, Any] = {
             "model": model or self._default_model,
@@ -64,6 +67,8 @@ class LLMClient:
             "max_tokens": max_tokens,
             "stream": stream,
         }
+        if tools:
+            payload["tools"] = tools
         if plugins:
             payload["plugins"] = plugins
 
@@ -125,6 +130,7 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         max_retry_limit: int = 3,
+        tools: list[dict[str, Any]] | None = None,
         plugins: list[dict[str, Any]] | None = None,
     ):
         """Stream chat completion, yielding chunks. For web SSE."""
@@ -137,6 +143,8 @@ class LLMClient:
             "max_tokens": max_tokens,
             "stream": True,
         }
+        if tools:
+            payload["tools"] = tools
         if plugins:
             payload["plugins"] = plugins
 
