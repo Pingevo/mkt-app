@@ -1,0 +1,42 @@
+# Secrets & environment
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.Python
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs & temp
+*.log
+/tmp/
+
+# Output / generated deliverables
+output/
+
+# Customer data (real product data — keep examples only)
+data/Lagenio*/
+cache/Lagenio*/
+
+# Brand profiles (real customer data — keep .example.md only)
+brand/brand_profile.md
+brand/tone_of_voice.md
+brand/target_audience.md
+brand/visual_guidelines.md
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

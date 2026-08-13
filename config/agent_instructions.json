@@ -1,0 +1,499 @@
+{
+  "_schema": {
+    "_comment": "User-facing agent instructions. Separated from agents.yaml (which holds system_prompt + model params). Backend appends these to system_prompt at run time.",
+    "fields": {
+      "preset": "selected preset key (see presets below)",
+      "custom": "free-text instruction from Advanced tier",
+      "focus": "array of focus areas (product_spec)",
+      "detail_level": "concise | standard | detailed",
+      "rules_must": "array of rules the agent must follow",
+      "rules_forbid": "array of rules the agent must not do",
+      "analysis_depth": "basic | standard | deep",
+      "competitor_types": "array: direct, indirect, premium, lowcost",
+      "importance": "array: price, features, positioning, marketing, distribution",
+      "analysis_style": "objective | strategic | aggressive",
+      "web_search": "true | false",
+      "campaign_objective": "sales | newcustomers | launch | awareness | repeat | clearance",
+      "risk_level": "safe | balanced | aggressive",
+      "priority": "array: margin, brand, volume, acquisition",
+      "budget_max": "number or empty",
+      "discount_max": "number (percent) or empty",
+      "forbid_tactics": "array of tactic keys",
+      "tone": "array of tone chips: friendly, professional, playful, bold, premium",
+      "hook_style": "educational | problemsolution | emotional | storytelling | controversial",
+      "sell_style": "soft | balanced | hard",
+      "language": "professional | conversational | genz | expert"
+    }
+  },
+  "product_spec": {
+    "preset": "balanced",
+    "focus": [
+      "USP",
+      "differentiation",
+      "sales_info"
+    ],
+    "detail_level": "standard",
+    "rules_must": [
+      "แยก fact กับ assumption ชัดเจน",
+      "ถ้าไม่มีข้อมูลให้ระบุว่าไม่มีข้อมูล",
+      "เน้นประโยชน์ต่อลูกค้า"
+    ],
+    "rules_forbid": [
+      "ห้ามสร้างข้อมูลที่ไม่มีใน source",
+      "ห้ามเดาคุณสมบัติสินค้า",
+      "ห้ามใช้คำโฆษณาเกินจริง"
+    ],
+    "custom": "",
+    "data_strictness": "strict"
+  },
+  "competitor_analysis": {
+    "preset": "standard",
+    "analysis_depth": "standard",
+    "competitor_types": [
+      "direct",
+      "indirect"
+    ],
+    "importance": [
+      "price",
+      "features",
+      "positioning",
+      "marketing"
+    ],
+    "analysis_style": "strategic",
+    "web_search": true,
+    "rules_must": [
+      "ระบุแหล่งที่มาของข้อมูลคู่แข่ง",
+      "แยกข้อมูลที่ค้นหาได้กับที่สันนิษฐาน"
+    ],
+    "rules_forbid": [
+      "ห้ามเดาราคาหรือคุณสมบัติคู่แข่ง",
+      "ห้ามลอกข้อมูลโดยไม่วิเคราะห์"
+    ],
+    "custom": ""
+  },
+  "campaign_strategy": {
+    "preset": "balanced",
+    "campaign_objective": "sales",
+    "risk_level": "balanced",
+    "priority": [
+      "margin",
+      "brand"
+    ],
+    "budget_max": "",
+    "discount_max": "",
+    "forbid_tactics": [],
+    "rules_must": [
+      "ราคาที่แนะนำต้องมีเหตุผล",
+      "แคมเปญต้องเป็นไปได้จริง"
+    ],
+    "rules_forbid": [
+      "ห้ามเสนอแคมเปญที่ขาดทุนชัดเจน",
+      "ห้ามใช้คำโฆษณาเกินจริง"
+    ],
+    "custom": ""
+  },
+  "content_creator": {
+    "preset": "friendly",
+    "tone": [
+      "friendly",
+      "professional"
+    ],
+    "hook_style": "problemsolution",
+    "sell_style": "balanced",
+    "language": "conversational",
+    "rules_must": [
+      "Content ต้องตรงกับแคมเปญที่กำหนด",
+      "Hashtag ต้องเกี่ยวข้องกับสินค้าจริง"
+    ],
+    "rules_forbid": [
+      "ห้ามใช้คำหยาบ",
+      "ห้ามอ้างสรรพคุณที่ไม่จริง"
+    ],
+    "custom": ""
+  },
+  "_presets": {
+    "product_spec": [
+      {
+        "key": "balanced",
+        "label": "⚖️ สมดุล",
+        "desc": "ครบทุกด้าน ไม่เน้นพิเศษ",
+        "focus": [
+          "USP",
+          "differentiation",
+          "sales_info",
+          "technical",
+          "customer_benefit"
+        ],
+        "detail_level": "standard"
+      },
+      {
+        "key": "sales_ready",
+        "label": "💼 เน้นฝ่ายขาย",
+        "desc": "ข้อมูลที่ฝ่ายขายใช้ได้เลย",
+        "focus": [
+          "sales_info",
+          "USP",
+          "customer_benefit"
+        ],
+        "detail_level": "standard"
+      },
+      {
+        "key": "technical",
+        "label": "🔧 เน้นเทคนิค",
+        "desc": "สเปคเทคนิคละเอียด",
+        "focus": [
+          "technical",
+          "USP"
+        ],
+        "detail_level": "detailed"
+      },
+      {
+        "key": "positioning",
+        "label": "🎯 เน้นจุดต่าง",
+        "desc": "USP และจุดต่างจากตลาด",
+        "focus": [
+          "USP",
+          "differentiation"
+        ],
+        "detail_level": "standard"
+      },
+      {
+        "key": "custom",
+        "label": "⚙️ Custom",
+        "desc": "ตั้งค่าเองด้วย AI — กดปรับเพิ่มเติม"
+      }
+    ],
+    "competitor_analysis": [
+      {
+        "key": "standard",
+        "label": "📊 มาตรฐาน",
+        "desc": "วิเคราะห์ปกติ + ค้น web",
+        "analysis_depth": "standard",
+        "web_search": true
+      },
+      {
+        "key": "quick",
+        "label": "⚡ เร็ว",
+        "desc": "ใช้ข้อมูลที่มี ไม่ค้นเพิ่ม",
+        "analysis_depth": "basic",
+        "web_search": false
+      },
+      {
+        "key": "deep",
+        "label": "🔬 ลึกล้ำ",
+        "desc": "Deep research ค้นเยอะ",
+        "analysis_depth": "deep",
+        "web_search": true
+      },
+      {
+        "key": "positioning",
+        "label": "🎯 เน้นจุดยืน",
+        "desc": "เน้น positioning และช่องว่างตลาด",
+        "analysis_depth": "standard",
+        "web_search": true,
+        "importance": [
+          "positioning",
+          "marketing"
+        ]
+      },
+      {
+        "key": "custom",
+        "label": "⚙️ Custom",
+        "desc": "ตั้งค่าเองด้วย AI — กดปรับเพิ่มเติม"
+      }
+    ],
+    "campaign_strategy": [
+      {
+        "key": "balanced",
+        "label": "⚖️ สมดุล",
+        "desc": "สมดุลทุกด้าน",
+        "campaign_objective": "sales",
+        "risk_level": "balanced",
+        "priority": [
+          "margin",
+          "brand"
+        ]
+      },
+      {
+        "key": "sales_focus",
+        "label": "💰 เน้นยอดขาย",
+        "desc": "เน้น conversion และยอดขาย",
+        "campaign_objective": "sales",
+        "risk_level": "aggressive",
+        "priority": [
+          "volume",
+          "acquisition"
+        ]
+      },
+      {
+        "key": "brand_focus",
+        "label": "💎 เน้นแบรนด์",
+        "desc": "รักษา positioning และภาพลักษณ์",
+        "campaign_objective": "awareness",
+        "risk_level": "safe",
+        "priority": [
+          "brand",
+          "margin"
+        ]
+      },
+      {
+        "key": "growth_focus",
+        "label": "🚀 เน้นเติบโต",
+        "desc": "เน้นลูกค้าใหม่และ growth",
+        "campaign_objective": "newcustomers",
+        "risk_level": "aggressive",
+        "priority": [
+          "acquisition",
+          "volume"
+        ]
+      },
+      {
+        "key": "creative_focus",
+        "label": "🎨 เน้นสร้างสรรค์",
+        "desc": "แคมเปญที่แตกต่าง",
+        "campaign_objective": "awareness",
+        "risk_level": "balanced",
+        "priority": [
+          "brand",
+          "acquisition"
+        ]
+      },
+      {
+        "key": "custom",
+        "label": "⚙️ Custom",
+        "desc": "ตั้งค่าเองด้วย AI — กดปรับเพิ่มเติม"
+      }
+    ],
+    "content_creator": [
+      {
+        "key": "friendly",
+        "label": "😊 เป็นมิตร",
+        "desc": "เข้าถึงง่าย อบอุ่น",
+        "tone": [
+          "friendly",
+          "professional"
+        ],
+        "hook_style": "problemsolution",
+        "sell_style": "balanced",
+        "language": "conversational"
+      },
+      {
+        "key": "professional",
+        "label": "👔 มืออาชีพ",
+        "desc": "น่าเชื่อถือ ทางการ",
+        "tone": [
+          "professional",
+          "expert"
+        ],
+        "hook_style": "educational",
+        "sell_style": "balanced",
+        "language": "professional"
+      },
+      {
+        "key": "playful",
+        "label": "🎉 สนุก",
+        "desc": "ตื่นเต้น มีชีวิตชีวา",
+        "tone": [
+          "playful",
+          "bold"
+        ],
+        "hook_style": "storytelling",
+        "sell_style": "hard",
+        "language": "conversational"
+      },
+      {
+        "key": "premium",
+        "label": "👑 พรีเมียม",
+        "desc": "หรู มีระดับ",
+        "tone": [
+          "premium",
+          "professional"
+        ],
+        "hook_style": "emotional",
+        "sell_style": "soft",
+        "language": "professional"
+      },
+      {
+        "key": "custom",
+        "label": "⚙️ Custom",
+        "desc": "ตั้งค่าเองด้วย AI — กดปรับเพิ่มเติม"
+      }
+    ]
+  },
+  "_defaults": {
+    "product_spec": {
+      "preset": "balanced",
+      "focus": [
+        "USP",
+        "differentiation",
+        "sales_info"
+      ],
+      "detail_level": "standard",
+      "rules_must": [
+        "แยก fact กับ assumption ชัดเจน",
+        "ถ้าไม่มีข้อมูลให้ระบุว่าไม่มีข้อมูล",
+        "เน้นประโยชน์ต่อลูกค้า"
+      ],
+      "rules_forbid": [
+        "ห้ามสร้างข้อมูลที่ไม่มีใน source",
+        "ห้ามเดาคุณสมบัติสินค้า",
+        "ห้ามใช้คำโฆษณาเกินจริง"
+      ],
+      "custom": "",
+      "data_strictness": "strict"
+    },
+    "competitor_analysis": {
+      "preset": "standard",
+      "analysis_depth": "standard",
+      "competitor_types": [
+        "direct",
+        "indirect"
+      ],
+      "importance": [
+        "price",
+        "features",
+        "positioning",
+        "marketing"
+      ],
+      "analysis_style": "strategic",
+      "web_search": true,
+      "rules_must": [
+        "ระบุแหล่งที่มาของข้อมูลคู่แข่ง",
+        "แยกข้อมูลที่ค้นหาได้กับที่สันนิษฐาน"
+      ],
+      "rules_forbid": [
+        "ห้ามเดาราคาหรือคุณสมบัติคู่แข่ง",
+        "ห้ามลอกข้อมูลโดยไม่วิเคราะห์"
+      ],
+      "custom": ""
+    },
+    "campaign_strategy": {
+      "preset": "balanced",
+      "campaign_objective": "sales",
+      "risk_level": "balanced",
+      "priority": [
+        "margin",
+        "brand"
+      ],
+      "budget_max": "",
+      "discount_max": "",
+      "forbid_tactics": [],
+      "rules_must": [
+        "ราคาที่แนะนำต้องมีเหตุผล",
+        "แคมเปญต้องเป็นไปได้จริง"
+      ],
+      "rules_forbid": [
+        "ห้ามเสนอแคมเปญที่ขาดทุนชัดเจน",
+        "ห้ามใช้คำโฆษณาเกินจริง"
+      ],
+      "custom": ""
+    },
+    "content_creator": {
+      "preset": "friendly",
+      "tone": [
+        "friendly",
+        "professional"
+      ],
+      "hook_style": "problemsolution",
+      "sell_style": "balanced",
+      "language": "conversational",
+      "rules_must": [
+        "Content ต้องตรงกับแคมเปญที่กำหนด",
+        "Hashtag ต้องเกี่ยวข้องกับสินค้าจริง"
+      ],
+      "rules_forbid": [
+        "ห้ามใช้คำหยาบ",
+        "ห้ามอ้างสรรพคุณที่ไม่จริง"
+      ],
+      "custom": ""
+    }
+  },
+  "_custom_settings": {
+    "product_spec": {
+      "preset": "balanced",
+      "focus": [
+        "USP",
+        "differentiation",
+        "sales_info"
+      ],
+      "detail_level": "standard",
+      "rules_must": [
+        "แยก fact กับ assumption ชัดเจน",
+        "ถ้าไม่มีข้อมูลให้ระบุว่าไม่มีข้อมูล",
+        "เน้นประโยชน์ต่อลูกค้า"
+      ],
+      "rules_forbid": [
+        "ห้ามสร้างข้อมูลที่ไม่มีใน source",
+        "ห้ามเดาคุณสมบัติสินค้า",
+        "ห้ามใช้คำโฆษณาเกินจริง"
+      ],
+      "custom": "",
+      "data_strictness": "strict"
+    },
+    "competitor_analysis": {
+      "preset": "standard",
+      "analysis_depth": "standard",
+      "competitor_types": [
+        "direct",
+        "indirect"
+      ],
+      "importance": [
+        "price",
+        "features",
+        "positioning",
+        "marketing"
+      ],
+      "analysis_style": "strategic",
+      "web_search": true,
+      "rules_must": [
+        "ระบุแหล่งที่มาของข้อมูลคู่แข่ง",
+        "แยกข้อมูลที่ค้นหาได้กับที่สันนิษฐาน"
+      ],
+      "rules_forbid": [
+        "ห้ามเดาราคาหรือคุณสมบัติคู่แข่ง",
+        "ห้ามลอกข้อมูลโดยไม่วิเคราะห์"
+      ],
+      "custom": ""
+    },
+    "campaign_strategy": {
+      "preset": "balanced",
+      "campaign_objective": "sales",
+      "risk_level": "balanced",
+      "priority": [
+        "margin",
+        "brand"
+      ],
+      "budget_max": "",
+      "discount_max": "",
+      "forbid_tactics": [],
+      "rules_must": [
+        "ราคาที่แนะนำต้องมีเหตุผล",
+        "แคมเปญต้องเป็นไปได้จริง"
+      ],
+      "rules_forbid": [
+        "ห้ามเสนอแคมเปญที่ขาดทุนชัดเจน",
+        "ห้ามใช้คำโฆษณาเกินจริง"
+      ],
+      "custom": ""
+    },
+    "content_creator": {
+      "preset": "friendly",
+      "tone": [
+        "friendly",
+        "professional"
+      ],
+      "hook_style": "problemsolution",
+      "sell_style": "balanced",
+      "language": "conversational",
+      "rules_must": [
+        "Content ต้องตรงกับแคมเปญที่กำหนด",
+        "Hashtag ต้องเกี่ยวข้องกับสินค้าจริง"
+      ],
+      "rules_forbid": [
+        "ห้ามใช้คำหยาบ",
+        "ห้ามอ้างสรรพคุณที่ไม่จริง"
+      ],
+      "custom": ""
+    }
+  }
+}

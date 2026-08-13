@@ -1,0 +1,12 @@
+image_model: google/gemini-3.1-flash-image
+image_n: 1
+image_aspect_ratio: '16:9'
+image_timeout_seconds: 180
+video_model: bytedance/seedance-2.0-fast
+video_duration: 5
+video_aspect_ratio: '16:9'
+video_resolution: 720p
+video_poll_interval_seconds: 5
+video_max_wait_seconds: 600
+auto_generate_image: true
+auto_generate_video: true

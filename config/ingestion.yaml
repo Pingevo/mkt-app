@@ -1,0 +1,46 @@
+# ============================================================
+#  Ingestion Configuration
+#  รายการไฟล์ที่ระบบรองรับ + preprocessor ที่ใช้แปลงแต่ละประเภท
+#  แก้ที่นี่อย่างเดียว ไม่ต้องแก้โค้ด
+# ============================================================
+
+# --- รูปแบบที่รองรับ ---
+# ไฟล์ที่ไม่อยู่ในรายการนี้ → ระบบจะข้าม แจ้ง user ว่าไม่รองรับ ไม่ทำลาย
+supported_formats:
+  text:    [.txt, .md, .pdf, .xlsx, .xls, .docx, .csv]
+  image:   [.jpg, .jpeg, .png, .webp]
+  video:   [.mp4, .mov]
+  audio:   [.wav, .mp3, .m4a]
+
+# --- Preprocessor ต่อประเภท ---
+# แต่ละประเภทเรียก function ใน src/ingestion.py ชื่อตาม field นี้
+preprocessors:
+  text:    extract_text          # pandas, pdfplumber, python-docx
+  image:   extract_image_info    # ส่งเข้า LLM เป็น image input
+  video:   extract_video_frames  # ffmpeg ดึง key frames → ส่งเข้า LLM
+  audio:   extract_audio_text    # whisper / API transcribe
+
+# --- การตรวจ hash ---
+# ถ้า raw file hash เหมือนเดิม → ข้าม re-ingest ประหยัด token
+hash_check: true
+
+# --- จำนวน video frames ที่ดึง ---
+# ถ้ามากไป token แพง ถ้าน้อยไปอาจตกหล่นข้อมูล
+video_max_frames: 5
+
+# --- ขนาดไฟล์สูงสุด (MB) ---
+# เกินขนาดนี้ → แจ้ง user ว่าไฟล์ใหญ่เกินไป
+max_file_size_mb:
+  text:    50
+  image:   20
+  video:   200
+  audio:   100
+
+# --- สถานะสินค้า ---
+# 5 สถานะ: empty / no_usable_data / processing / ready / stale
+status_labels:
+  empty:           "ว่าง"
+  no_usable_data:  "ไม่มีข้อมูลใช้ได้"
+  processing:      "กำลังประมวลผล"
+  ready:           "พร้อม"
+  stale:           "ข้อมูลเก่า"
