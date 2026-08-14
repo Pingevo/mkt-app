@@ -422,10 +422,18 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
             eta_seconds=eta,
         )
 
-        # ตรวจขนาด
+        # ตรวจขนาด — ถ้าใหญ่เกิน บันทึกเป็น error ใน DB เลย (ไม่ใช่ update ที่อาจไม่เจอ)
         ok, size_msg = _check_size(file_path, ftype, config)
         if not ok:
-            product_db.update_file_status(product_id, f["path"], "error", size_msg)
+            product_db.add_file(product_id, {
+                "name": f["name"],
+                "path": f["path"],
+                "type": ftype,
+                "status": "error",
+                "hash": f["hash"],
+                "size": f["size"],
+                "error": size_msg,
+            })
             errors.append(f"{f['name']}: {size_msg}")
             continue
 
@@ -433,7 +441,15 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
         try:
             preprocessor = PREPROCESSORS.get(ftype)
             if preprocessor is None:
-                product_db.update_file_status(product_id, f["path"], "error", f"ไม่มี preprocessor สำหรับ {ftype}")
+                product_db.add_file(product_id, {
+                    "name": f["name"],
+                    "path": f["path"],
+                    "type": ftype,
+                    "status": "error",
+                    "hash": f["hash"],
+                    "size": f["size"],
+                    "error": f"ไม่มี preprocessor สำหรับ {ftype}",
+                })
                 errors.append(f"{f['name']}: ไม่มี preprocessor")
                 continue
 
@@ -491,22 +507,35 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
             })
 
         except Exception as e:
-            product_db.update_file_status(product_id, f["path"], "error", str(e))
+            product_db.add_file(product_id, {
+                "name": f["name"],
+                "path": f["path"],
+                "type": ftype,
+                "status": "error",
+                "hash": f["hash"],
+                "size": f["size"],
+                "error": str(e),
+            })
             errors.append(f"{f['name']}: {e}")
 
     # 4. สร้าง metadata summary (LLM สรุปสั้นๆ ครั้งเดียว — สำหรับ automate discovery)
     _generate_metadata_summary(product_id, llm)
 
-    # 5. ตั้งสถานะ ready
-    product_db.set_status(product_id, product_db.STATUS_READY)
+    # 5. ตั้งสถานะ — ถ้าไม่มีไฟล์ ingested สักไฟล์ → no_usable_data ไม่ใช่ ready
+    record = product_db.load(product_id)
+    ingested_count = sum(1 for f in record.get("files", []) if f.get("status") == "ingested")
+    if ingested_count == 0:
+        product_db.set_status(product_id, product_db.STATUS_NO_USABLE)
+    else:
+        product_db.set_status(product_id, product_db.STATUS_READY)
 
     if llm is not None:
         llm.close()
 
     return {
-        "status": "ready",
+        "status": "ready" if ingested_count > 0 else "no_usable_data",
         "files_total": len(files),
-        "files_ingested": len(to_ingest),
+        "files_ingested": ingested_count,
         "files_skipped": len(skipped),
         "files_unsupported": len(unsupported),
         "errors": errors,

@@ -201,7 +201,8 @@ class BaseAgent:
 
         return "\n\n".join(sections)
 
-    def run(self, user_prompt: str, quick_brief: str = "", image_paths: list[str] | None = None) -> str:
+    def run(self, user_prompt: str, quick_brief: str = "", image_paths: list[str] | None = None,
+            response_format: dict | None = None) -> str:
         """Generate output then review/refine it.
 
         Returns the final (possibly refined) text response.
@@ -212,6 +213,10 @@ class BaseAgent:
           Phase 2: Generate — สร้าง output จากข้อมูลที่ค้นได้
           Phase 3: Review — ตรวจงาน
         ถ้าไม่มี web_search_planning → ทำแบบเดิม (ส่ง tools ให้ LLM ค้นเอง)
+
+        If response_format is provided, enables OpenRouter Structured Outputs.
+        Note: review/refine phase is skipped when response_format is set
+        (structured output ไม่เข้ากับ review prompt ที่คาดการณ์ text ธรรมดา).
 
         Args:
             user_prompt: text prompt สำหรับ agent
@@ -236,7 +241,7 @@ class BaseAgent:
         web_search = self.config.get("web_search")
         use_planning = self.config.get("web_search_planning", False)
 
-        if web_search and use_planning:
+        if web_search and use_planning and not response_format:
             # --- Phase 0: Plan search queries ---
             queries = self._plan_search_queries(user_prompt, system_prompt)
             # --- Phase 1: Execute searches ---
@@ -266,7 +271,7 @@ class BaseAgent:
                 {"role": "user", "content": user_content},
             ]
             tools = None
-            if web_search:
+            if web_search and not response_format:
                 tools = [{"type": "openrouter:web_search", "max_results": 5}]
             output = self.llm.chat(
                 messages,
@@ -275,10 +280,13 @@ class BaseAgent:
                 max_tokens=self.config.get("max_tokens", 4096),
                 max_retry_limit=self.config.get("max_retry_limit", 3),
                 tools=tools,
+                response_format=response_format,
                 source=f"{self.agent_name}.generate",
             )
 
-        # --- Phase 3: Review & Refine ---
+        # --- Phase 3: Review & Refine (optional) ---
+        # ถ้า max_review_iterations > 0 → สั่ง LLM ตรวจงานตัวเองรอบที่ 2
+        # ถ้า = 0 → agent ตรวจเองในการเรียกครั้งเดียว (self-check ใน system_prompt)
         max_review = self.config.get("max_review_iterations", 1)
         if max_review and max_review > 0:
             instruction_block = self._format_instructions()
@@ -286,6 +294,7 @@ class BaseAgent:
                 output, system_prompt,
                 instruction_block=instruction_block,
                 quick_brief=quick_brief,
+                response_format=response_format,
             )
 
         return output
@@ -443,6 +452,7 @@ class BaseAgent:
         system_prompt: str,
         instruction_block: str = "",
         quick_brief: str = "",
+        response_format: dict | None = None,
     ) -> str:
         """ตรวจงานเทียบกับ instructions เป็น checklist รายข้อ.
 
@@ -451,11 +461,21 @@ class BaseAgent:
           2. Checklist จาก user instructions (rules_must, rules_forbid, custom, ฯลฯ)
           3. คำสั่งเฉพาะรอบนี้ (quick_brief)
 
-        ถ้าผลงานไม่เป็นไปตาม checklist ข้อใด ให้แก้แล้วส่งกลับ
-        ถ้าครบทุกข้อ ส่งเดิมกลับ
+        วิธีทำงาน:
+          - รอบที่ 1: review → ถ้าเจอปัญหา → แก้ → ส่งกลับ
+          - รอบที่ 2+: review ผลงานที่แก้แล้ว → ถ้าไม่มีการเปลี่ยนแปลง → หยุด (ผ่านแล้ว)
+          - ถ้ายังมีการเปลี่ยนแปลง → วนต่อจนกว่าจะครบหรือถึง max iterations
+
+        ถ้า response_format ส่งมา → review ก็ใช้ structured outputs ด้วย
+        (LLM คืน JSON ที่แก้แล้ว ไม่ใช่ plain text)
+
+        review_model: ถ้า config ระบุ → ใช้ model ที่เก่งกว่าตอน review
+        (default = model เดียวกับตอน generate)
         """
         review_prompt = self.config.get("review_prompt", "")
         review_temp = self.config.get("review_temperature", 0.2)
+        review_model = self.config.get("review_model") or self.config.get("model")
+        max_iterations = self.config.get("max_review_iterations", 1)
 
         # สร้าง checklist ส่วนที่เน้น instructions ของ user แยกจาก system_prompt
         checklist_section = ""
@@ -474,7 +494,15 @@ class BaseAgent:
                 f"--- สิ้นสุดคำสั่งเพิ่มเติม ---\n"
             )
 
-        for i in range(self.config.get("max_review_iterations", 1)):
+        # คำสั่งพิเศษสำหรับ structured output — บอก LLM ว่าต้องคืน JSON ไม่ใช่ text
+        json_instruction = ""
+        if response_format:
+            json_instruction = (
+                f"\n**สำคัญ: ผลงานเป็น JSON ตาม schema — ถ้าแก้ ต้องคืน JSON ที่ตรง schema เดิม**\n"
+                f"ถ้าทุกข้อผ่านแล้ว ส่ง JSON เดิมกลับมาเป๊ะๆ ห้ามเปลี่ยนแปลงอะไรเลย\n"
+            )
+
+        for i in range(max_iterations):
             review_user_msg = (
                 f"--- ข้อกำหนดหลักของ agent ---\n"
                 f"{system_prompt}\n"
@@ -483,6 +511,7 @@ class BaseAgent:
                 f"--- ผลงานที่ต้องตรวจ ---\n"
                 f"{output}\n"
                 f"--- สิ้นสุดผลงาน ---\n\n"
+                f"{json_instruction}"
                 f"วิธีตรวจ:\n"
                 f"1. อ่าน CHECKLIST ทุกข้อ แล้วเช็คว่าผลงานเป็นไปตามข้อนั้นไหม\n"
                 f"2. ถ้ามีข้อใดข้อหนึ่งที่ผลงานไม่เป็นไปตาม ให้แก้ไขผลงานให้เป็นไปตามข้อนั้น\n"
@@ -496,12 +525,18 @@ class BaseAgent:
             console.print(f"\n[cyan]กำลังตรวจงาน... (รอบที่ {i+1})[/cyan]\n")
             refined = self.llm.chat(
                 messages,
-                model=self.config.get("model"),
+                model=review_model,
                 temperature=review_temp,
                 max_tokens=self.config.get("max_tokens", 4096),
                 max_retry_limit=self.config.get("max_retry_limit", 3),
+                response_format=response_format,
                 source=f"{self.agent_name}.review",
             )
+
+            # Early termination: ถ้า LLM คืนของเดิม (ไม่มีการแก้) → ผ่านแล้ว หยุด
+            if refined.strip() == output.strip():
+                console.print(f"[green]ตรวจงานผ่าน — ไม่มีข้อที่ต้องแก้[/green]")
+                break
             output = refined
 
         return output

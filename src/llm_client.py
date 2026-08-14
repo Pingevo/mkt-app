@@ -53,6 +53,7 @@ class LLMClient:
         stream: bool = True,
         tools: list[dict[str, Any]] | None = None,
         plugins: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
         source: str = "llm_client.chat",
     ) -> str:
         """Send a chat completion request and return the assistant's text reply.
@@ -66,9 +67,16 @@ class LLMClient:
         If plugins is provided (e.g. [{"id": "web"}]), enables OpenRouter plugins
         (auto-search once per request).
 
+        If response_format is provided (e.g. {"type": "json_schema", "json_schema": {...}}),
+        enables OpenRouter Structured Outputs — model returns JSON conforming to schema.
+        Note: when response_format is set, stream is forced to False (OpenRouter limitation).
+
         source: label สำหรับ AI Usage Hub log (เช่น "content_creator", "ingestion")
         """
         used_model = model or self._default_model
+        # Structured Outputs ไม่รองรับ stream — บังคับ non-stream
+        if response_format:
+            stream = False
         payload: dict[str, Any] = {
             "model": used_model,
             "messages": messages,
@@ -83,6 +91,8 @@ class LLMClient:
             payload["tools"] = tools
         if plugins:
             payload["plugins"] = plugins
+        if response_format:
+            payload["response_format"] = response_format
 
         last_error: Exception | None = None
         for attempt in range(1, max_retry_limit + 1):

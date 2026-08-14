@@ -168,13 +168,24 @@ def _scan_sessions() -> list[dict[str, Any]]:
         if not item.is_dir() or item.name.startswith(".") or item.name == ".DS_Store":
             continue
         files = []
+        # เก็บชื่อไฟล์ทั้งหมดก่อน เพื่อกรอง .json ที่มี .md คู่กัน (content_creator structured output)
+        all_names: set[str] = set()
         for f in sorted(item.iterdir()):
             if f.is_file() and not f.name.startswith(".") and f.name != ".DS_Store":
-                files.append({
-                    "name": f.name,
-                    "size": f.stat().st_size,
-                    "modified": datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
-                })
+                all_names.add(f.name)
+        for f in sorted(item.iterdir()):
+            if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store":
+                continue
+            # ซ่อน .json ที่มี .md คู่กัน (content_creator structured output — user เห็น .md อย่างเดียวพอ)
+            if f.suffix == ".json":
+                md_pair = f.stem + ".md"
+                if md_pair in all_names:
+                    continue
+            files.append({
+                "name": f.name,
+                "size": f.stat().st_size,
+                "modified": datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+            })
         if files:
             sessions.append({"name": item.name, "files": files})
     return sessions
@@ -253,7 +264,11 @@ async def api_media_config_save(request: Request) -> JSONResponse:
 
 @app.post("/api/parse_media_prompts")
 async def api_parse_media_prompts(request: Request) -> JSONResponse:
-    """Parse content_creator output แยก image + video prompts — ใช้ก่อนกดสร้างจริง."""
+    """Parse content_creator output แยก image + video prompts — ใช้ก่อนกดสร้างจริง.
+
+    รองรับทั้ง .json (structured output ใหม่) และ .md (เดิม)
+    ถ้า filepath เป็น .md → ลองหา .json ที่ชื่อเดียวกันก่อน (มีข้อมูล structure ครบ)
+    """
     body = await request.json()
     content = body.get("content", "")
     if not content:
@@ -261,9 +276,14 @@ async def api_parse_media_prompts(request: Request) -> JSONResponse:
         filepath = body.get("file", "")
         if filepath:
             p = Path(filepath)
-            if p.exists():
+            # ถ้าเป็น .md → ลองหา .json ที่ชื่อเดียวกันก่อน (structured output)
+            if p.suffix == ".md":
+                json_p = p.with_suffix(".json")
+                if json_p.exists():
+                    content = json_p.read_text(encoding="utf-8")
+            if not content and p.exists():
                 content = p.read_text(encoding="utf-8")
-            else:
+            if not content:
                 return JSONResponse({"error": "file not found"}, status_code=404)
         else:
             return JSONResponse({"error": "missing content or file"}, status_code=400)
@@ -421,7 +441,14 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
         else:
             product_image_paths = product_db.get_product_image_paths(product_id)
 
-    content = p.read_text(encoding="utf-8")
+    # ถ้าเป็น .md → ลองหา .json ที่ชื่อเดียวกันก่อน (structured output)
+    content = ""
+    if p.suffix == ".md":
+        json_p = p.with_suffix(".json")
+        if json_p.exists():
+            content = json_p.read_text(encoding="utf-8")
+    if not content:
+        content = p.read_text(encoding="utf-8")
     parsed = media_gen.parse_media_prompts(content)
     images = parsed.get("images", [])
     videos = parsed.get("videos", [])
@@ -1455,10 +1482,22 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
             if save_output:
                 if content_count > 1:
                     timestamp = datetime.now().strftime("%H%M%S")
-                    fname = f"04_content_creator_{folder}_โพสต์ที่{i+1}_{timestamp}.md"
-                    filepath = output_dir / fname
-                    filepath.write_text(result, encoding="utf-8")
-                    saved_path = str(filepath)
+                    fname_base = f"04_content_creator_{folder}_โพสต์ที่{i+1}_{timestamp}"
+                    # content_creator ใช้ Structured Outputs → เซฟ .json + .md
+                    # .md มาจาก render_posts_to_markdown (เรา generate เองจาก posts)
+                    import json as _json_cc
+                    from src.content_schema import render_posts_to_markdown
+                    md_content = result
+                    try:
+                        parsed_cc = _json_cc.loads(result)
+                        md_content = render_posts_to_markdown(parsed_cc)
+                    except (_json_cc.JSONDecodeError, TypeError):
+                        pass
+                    json_path = output_dir / f"{fname_base}.json"
+                    json_path.write_text(result, encoding="utf-8")
+                    md_filepath = output_dir / f"{fname_base}.md"
+                    md_filepath.write_text(md_content, encoding="utf-8")
+                    saved_path = str(md_filepath)
                 else:
                     saved = orch.save_result("content_creator", str(output_dir))
                     saved_path = str(saved.get("content_creator", ""))
@@ -1955,7 +1994,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .tk-card .tk-overlay { position: absolute; inset: 0; background: linear-gradient(to bottom, rgba(0,0,0,0.3) 0%, transparent 30%, transparent 60%, rgba(0,0,0,0.7) 100%); pointer-events: none; }
   .tk-card .tk-content { position: absolute; bottom: 60px; left: 12px; right: 60px; pointer-events: none; }
   .tk-card .tk-user { font-weight: 700; font-size: 16px; margin-bottom: 6px; }
+  .tk-card .tk-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; line-height: 1.3; }
   .tk-card .tk-caption { font-size: 14px; line-height: 1.4; white-space: pre-wrap; }
+  .tk-card .tk-caption.collapsed { max-height: 4.2em; overflow: hidden; }
+  .tk-card .tk-caption-toggle { color: #ddd; font-size: 13px; font-weight: 600; cursor: pointer; pointer-events: auto; display: inline-block; margin-top: 4px; }
   .tk-card .tk-hashtags { color: #fff; font-size: 13px; margin-top: 6px; }
   .tk-card .tk-hashtags a { color: #fff; font-weight: 600; }
   .tk-script { background: #161821; border: 1px solid #2a2d3a; border-radius: 8px; padding: 16px; margin-top: 16px; }
@@ -3303,6 +3345,11 @@ function buildExecutionPlan() {
       const info = AGENT_INFO[key] || {};
       const step = buildStep(key, info);
       plans.push({ folder: comb.join(' + '), folders: comb, mode: 'combined', steps: [step] });
+    } else if (comb.length === 1) {
+      // รวม 1 ชิ้น = แยก 1 ชิ้น (ไม่มีอะไรให้รวม) → ทำเป็น separate
+      const info = AGENT_INFO[key] || {};
+      const step = buildStep(key, info);
+      plans.push({ folder: comb[0], folders: [comb[0]], mode: 'separate', steps: [step] });
     }
 
     // Separate plans: one per folder
@@ -3753,13 +3800,33 @@ function viewResult(filepath) {
   }
   fetch('/api/file/' + encodeURIComponent(session) + '/' + encodeURIComponent(filename)).then(r => r.json()).then(data => {
     if (isContentCreatorFile(filename)) {
-      bodyEl.innerHTML = renderContentResult(session, filename, data.content);
+      // ถ้าเป็น .md → ลองโหลด .json ที่ชื่อเดียวกันก่อน (structured output มีข้อมูลครบกว่า)
+      if (filename.toLowerCase().endsWith('.md')) {
+        const jsonFilename = filename.replace(/\.md$/i, '.json');
+        fetch('/api/file/' + encodeURIComponent(session) + '/' + encodeURIComponent(jsonFilename))
+          .then(r => r.ok ? r.json() : null)
+          .then(jsonData => {
+            if (jsonData && jsonData.content) {
+              bodyEl.innerHTML = renderContentResult(session, jsonFilename, jsonData.content);
+            } else {
+              bodyEl.innerHTML = renderContentResult(session, filename, data.content);
+            }
+            overlay.classList.add('visible');
+          })
+          .catch(() => {
+            bodyEl.innerHTML = renderContentResult(session, filename, data.content);
+            overlay.classList.add('visible');
+          });
+      } else {
+        bodyEl.innerHTML = renderContentResult(session, filename, data.content);
+        overlay.classList.add('visible');
+      }
     } else {
       let html = '<div class="file-info-display" style="margin-bottom:12px">Session: ' + escapeHtml(session) + '</div>';
       html += '<div class="content-box">' + renderMarkdown(data.content) + '</div>';
       bodyEl.innerHTML = html;
+      overlay.classList.add('visible');
     }
-    overlay.classList.add('visible');
   });
 }
 
@@ -3879,12 +3946,93 @@ function escapeHtml(text) {
 
 // ===== Platform Preview =====
 // ตรวจว่าไฟล์เป็น content_creator output หรือไม่
+// รองรับทั้ง .md (เดิม) และ .json (structured output ใหม่)
 function isContentCreatorFile(filename) {
-  return /content_creator/i.test(filename) && filename.toLowerCase().endsWith('.md');
+  const lower = filename.toLowerCase();
+  return /content_creator/i.test(filename) && (lower.endsWith('.md') || lower.endsWith('.json'));
 }
 
-// แยก fields จาก content_creator output (ตามรูปแบบใน agents.yaml)
+// Generate markdown จาก posts (JS version — เหมือน render_posts_to_markdown ใน Python)
+// ใช้ตอน JSON ไม่มี markdown field (schema ใหม่ — LLM ส่งแค่ posts)
+function renderPostsToMarkdownJS(parsed) {
+  const posts = parsed.posts || [];
+  if (!posts.length) return '';
+  const parts = [];
+  posts.forEach((post, idx) => {
+    const n = idx + 1;
+    parts.push('## ' + n + '. ข้อมูลโพสต์');
+    parts.push('- **แพลตฟอร์ม** — ' + (post.platform || ''));
+    parts.push('- **มุมมอง** — ' + (post.angle || ''));
+    parts.push('- **หัวข้อ** — ' + (post.title || ''));
+    parts.push('- **Caption (พร้อมโพสต์)** — ');
+    parts.push(post.caption || post.content || '');
+    parts.push('- **Hashtag** — ' + (post.hashtags || ''));
+    parts.push('');
+    if (post.script) {
+      parts.push('## ' + n + '. Script สำหรับวิดีโอ');
+      parts.push(post.script);
+      parts.push('');
+    }
+    const ips = post.image_prompts || [];
+    if (ips.length) {
+      parts.push('## ' + n + '. Prompt สำหรับ Gen Image');
+      ips.forEach((ip, i) => {
+        parts.push('- **' + (i+1) + ' ภาพ**');
+        parts.push('- **Prompt:** ' + (ip.prompt || ''));
+        if (ip.aspect_ratio) parts.push('- **Aspect Ratio:** ' + ip.aspect_ratio);
+        if (ip.resolution) parts.push('- **Resolution:** ' + ip.resolution);
+      });
+      parts.push('');
+    }
+    const vps = post.video_prompts || [];
+    if (vps.length) {
+      parts.push('## ' + n + '. Prompt สำหรับ Gen Video');
+      vps.forEach((vp, i) => {
+        parts.push('- **' + (i+1) + ' วิดีโอ**');
+        parts.push('- **Prompt:** ' + (vp.prompt || ''));
+        if (vp.duration) parts.push('- **Duration:** ' + vp.duration + ' วินาที');
+        if (vp.aspect_ratio) parts.push('- **Aspect Ratio:** ' + vp.aspect_ratio);
+        if (vp.resolution) parts.push('- **Resolution:** ' + vp.resolution);
+      });
+      parts.push('');
+    }
+  });
+  return parts.join('\n');
+}
+
+// แยก fields จาก content_creator output
+// รองรับ 2 รูปแบบ:
+// 1. JSON (structured output): ถ้า text เป็น JSON ที่มี field "posts" → อ่านจาก structure
+//    - markdown ไม่ได้ส่งจาก LLM แล้ว เรา generate เองจาก posts (renderPostsToMarkdownJS)
+//    - รองรับ JSON เก่าที่มี markdown field อยู่ (backward compatible)
+// 2. Markdown (เดิม): ใช้ regex parser ตามรูปแบบใน agents.yaml
 function parseContentPost(text) {
+  // --- Path 1: JSON (structured output) ---
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && parsed.posts && parsed.posts.length > 0) {
+      const p = parsed.posts[0];
+      const post = {
+        platform: p.platform || '',
+        angle: p.angle || '',
+        title: p.title || '',
+        // schema ใหม่: caption + script แยก / schema เก่า: content
+        caption: p.caption || p.content || '',
+        script: p.script || '',
+        content: p.caption || p.content || '',  // backward compat
+        hashtags: p.hashtags || '',
+        imagePrompt: (p.image_prompts && p.image_prompts.length > 0) ? p.image_prompts[0].prompt : '',
+        videoPrompt: (p.video_prompts && p.video_prompts.length > 0) ? p.video_prompts[0].prompt : '',
+        // ถ้ามี markdown field (JSON เก่า) → ใช้ของเดิม, ถ้าไม่มี → generate จาก posts
+        raw: parsed.markdown || renderPostsToMarkdownJS(parsed),
+      };
+      return post;
+    }
+  } catch (e) {
+    // ไม่ใช่ JSON → ใช้ regex parser
+  }
+
+  // --- Path 2: Markdown (regex parser) ---
   const post = { platform: '', angle: '', title: '', content: '', hashtags: '', imagePrompt: '', videoPrompt: '', raw: text };
   // แพลตฟอร์ม — รองรับช่องว่างก่อนเครื่องหมาย: "**แพลตฟอร์ม** — Facebook"
   let m = text.match(/\*\*แพลตฟอร์ม\*\*\s*[—\-:]\s*(.+)/i);
@@ -3935,20 +4083,26 @@ function parseContentPost(text) {
 
 // รวม field values จาก section ที่ใช้ field names (scene description, camera movement, ...)
 function extractFieldPrompt(section) {
-  const FIELD_NAMES = ['scene description', 'camera movement', 'duration', 'mood',
-    'subject', 'style', 'lighting', 'composition', 'usage', 'scene', 'camera', 'setting', 'action', 'dialogue'];
+  const SKIP_FIELDS = ['usage', 'duration', 'aspect ratio', 'aspect_ratio', 'resolution', 'avoid'];
   const lines = section.split('\n');
   const parts = [];
   for (const line of lines) {
     const s = line.trim();
     if (!s) continue;
-    // หา pattern: - **field** — value  หรือ  **field**: value
-    const fm = s.match(/^-\s*\*\*([^*]+)\*\*\s*[:\-—]\s*(.+)$/);
+    // ข้าม heading และ label ที่ไม่ใช่ field value (เช่น "- **1 ภาพ**", "## 2. ...")
+    if (s.startsWith('##') || /^-\s*\*\*\d+/.test(s)) continue;
+    // รองรับ 3 รูปแบบ:
+    // 1) - **field** — value  (มี bold + มี -)
+    // 2) - field: value       (ไม่มี bold + มี -)
+    // 3) field: value          (ไม่มี bold + ไม่มี -)
+    let fm = s.match(/^-\s*\*\*([^*]+)\*\*\s*[:\-—]\s*(.+)$/);
+    if (!fm) fm = s.match(/^-\s*([^:*]+?):\s*(.+)$/);
+    if (!fm) fm = s.match(/^([^:*]+?):\s*(.+)$/);
     if (fm) {
       const fieldName = fm[1].trim().toLowerCase();
       const val = fm[2].trim();
-      // ข้าม field ที่เป็น usage/duration (ไม่ใช่ prompt text)
-      if (fieldName === 'usage' || fieldName === 'duration') continue;
+      // ข้าม field ที่ไม่ใช่ prompt text
+      if (SKIP_FIELDS.some(f => fieldName.includes(f))) continue;
       if (val && val.length > 10) parts.push(val);
     }
   }
@@ -3989,6 +4143,19 @@ function formatTikTokScript(text) {
   return html;
 }
 
+// สลับขยาย/ย่อ caption ของ TikTok card — เหมือน TikTok จริง
+function toggleTkCaption(captionId, toggleEl) {
+  const el = document.getElementById(captionId);
+  if (!el) return;
+  if (el.classList.contains('collapsed')) {
+    el.classList.remove('collapsed');
+    toggleEl.textContent = 'ย่อ';
+  } else {
+    el.classList.add('collapsed');
+    toggleEl.textContent = 'เพิ่มเติม';
+  }
+}
+
 // สร้าง platform preview HTML
 function renderPlatformPreview(post, session, images, videos) {
   videos = videos || [];
@@ -4011,8 +4178,8 @@ function renderFacebookCard(post, session, images) {
   html += '</div>';
   html += '<div class="fb-body">';
   if (post.title) html += '<div class="fb-title">' + escapeHtml(post.title) + '</div>';
-  // content + hashtag ต่อกันเป็นโพสต์เดียว เหมือน Facebook จริง
-  let bodyText = post.content || '';
+  // caption + hashtag ต่อกันเป็นโพสต์เดียว เหมือน Facebook จริง
+  let bodyText = post.caption || post.content || '';
   if (post.hashtags) bodyText += '\n' + post.hashtags;
   if (bodyText) html += escapeHtml(bodyText);
   html += '</div>';
@@ -4050,10 +4217,18 @@ function renderTikTokCard(post, session, images, videos) {
   html += '<div class="tk-overlay"></div>';
   html += '<div class="tk-content">';
   html += '<div class="tk-user">แบรนด์ของคุณ</div>';
-  // caption สั้น — ใช้ title + hashtag เท่านั้น (เหมือน TikTok จริง)
-  let tkCaption = post.title || '';
+  // title — TikTok จริงแสดงหัวข้อได้ (text overlay บนวิดีโอ/ภาพ)
+  if (post.title) html += '<div class="tk-title">' + escapeHtml(post.title) + '</div>';
+  // caption — เหมือน TikTok จริง: แสดงบางส่วน + "เพิ่มเติม" ถ้ายาว
+  // ใช้ caption (พร้อมโพสต์) ไม่ใช่ content (สคริปต์)
+  let tkCaption = post.caption || post.content || '';
   if (post.hashtags) tkCaption += '\n' + post.hashtags;
-  if (tkCaption) html += '<div class="tk-caption">' + escapeHtml(tkCaption) + '</div>';
+  if (tkCaption) {
+    const captionId = 'tk-cap-' + Math.random().toString(36).slice(2, 9);
+    html += '<div class="tk-caption collapsed" id="' + captionId + '">' + escapeHtml(tkCaption) + '</div>';
+    // แสดงปุ่ม "เพิ่มเติม" / "ย่อ" — คลิกได้เพราะ pointer-events: auto
+    html += '<div class="tk-caption-toggle" onclick="toggleTkCaption(\'' + captionId + '\', this)">เพิ่มเติม</div>';
+  }
   html += '</div>';
   html += '<div class="tk-side">';
   html += '<div><div class="tk-icon">❤️</div><div class="tk-count">12.5K</div></div>';
@@ -4088,8 +4263,8 @@ function renderInstagramCard(post, session, images) {
   html += '<div class="ig-actions"><span>♡</span><span>💬</span><span>↗</span></div>';
   html += '<div class="ig-likes">1,234 ถูกใจ</div>';
   html += '<div class="ig-caption"><b>แบรนด์ของคุณ</b> ';
-  if (post.title) html += escapeHtml(post.title) + ' ';
-  if (post.content) html += escapeHtml(post.content);
+  if (post.caption) html += escapeHtml(post.caption);
+  else if (post.content) html += escapeHtml(post.content);
   html += '</div>';
   if (post.hashtags) {
     html += '<div class="ig-hashtags">' + escapeHtml(post.hashtags) + '</div>';
@@ -4138,8 +4313,9 @@ function renderContentResult(session, filename, content) {
   html += '<div class="media-action-bar" id="media-action-bar">กำลังตรวจสอบ media...</div>';
   // Platform preview (visible by default)
   html += '<div class="preview-platform visible" id="preview-platform-view"><div class="preview-container" id="preview-platform-content">กำลังโหลดตัวอย่าง...</div></div>';
-  // Original (hidden by default)
-  html += '<div class="preview-original" id="preview-original-view"><div class="content-box">' + renderMarkdown(content) + '</div></div>';
+  // Original (hidden by default) — แสดง markdown ไม่ใช่ JSON
+  // post.raw เป็น markdown แม้ตอนโหลดจาก .json (parseContentPost แยก markdown field ออกมา)
+  html += '<div class="preview-original" id="preview-original-view"><div class="content-box">' + renderMarkdown(post.raw || content) + '</div></div>';
   // Load media + status then render platform card + action bar
   findSessionMedia(session, function(media) {
     const el = document.getElementById('preview-platform-content');

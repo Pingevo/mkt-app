@@ -860,12 +860,50 @@ def parse_media_prompts(content: str) -> dict[str, list[dict[str, str]]]:
     """Parse content_creator output แยก image + video prompts.
 
     คืน: {"images": [{prompt, usage, aspect_ratio?}], "videos": [{prompt, usage, duration?, aspect_ratio?, resolution?}]}
-    รองรับหลายรูปแบบ heading: ## 3. Prompt สำหรับ Gen Image, ## 3. Image Prompts, etc.
-    รองรับ output แบบ "1 โพสต์ = 1 prompt" ที่ใช้ field names (scene description, camera movement, ...)
-    ดึง duration, aspect_ratio, resolution ออกมาด้วยถ้ามี
+
+    รองรับ 2 รูปแบบ:
+    1. JSON (structured output ใหม่): ถ้า content เป็น JSON ที่มี field "posts"
+       → อ่าน image_prompts/video_prompts จาก structure โดยตรง (ไม่ต้อง regex)
+    2. Markdown (เดิม): ถ้าไม่ใช่ JSON → ใช้ regex parser เหมือนเดิม
+       รองรับหลายรูปแบบ heading: ## 3. Prompt สำหรับ Gen Image, ## 3. Image Prompts, etc.
+       รองรับ output แบบ "1 โพสต์ = 1 prompt" ที่ใช้ field names (scene description, camera movement, ...)
+       ดึง duration, aspect_ratio, resolution ออกมาด้วยถ้ามี
     """
-    images: list[dict[str, str]] = []
-    videos: list[dict[str, str]] = []
+    # --- Path 1: JSON (structured output) ---
+    try:
+        import json as _json
+        parsed = _json.loads(content)
+        if isinstance(parsed, dict) and "posts" in parsed:
+            images: list[dict[str, str]] = []
+            videos: list[dict[str, str]] = []
+            for post in parsed.get("posts", []):
+                for ip in post.get("image_prompts", []):
+                    p = ip.get("prompt", "").strip()
+                    if p:
+                        img_item = {"prompt": p}
+                        if ip.get("aspect_ratio"):
+                            img_item["aspect_ratio"] = ip["aspect_ratio"]
+                        if ip.get("resolution"):
+                            img_item["resolution"] = ip["resolution"]
+                        images.append(img_item)
+                for vp in post.get("video_prompts", []):
+                    p = vp.get("prompt", "").strip()
+                    if p:
+                        vid_item = {"prompt": p}
+                        if vp.get("duration"):
+                            vid_item["duration"] = vp["duration"]
+                        if vp.get("aspect_ratio"):
+                            vid_item["aspect_ratio"] = vp["aspect_ratio"]
+                        if vp.get("resolution"):
+                            vid_item["resolution"] = vp["resolution"]
+                        videos.append(vid_item)
+            return {"images": images, "videos": videos}
+    except (_json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    # --- Path 2: Markdown (regex parser — สำหรับไฟล์เก่า) ---
+    images = []
+    videos = []
 
     # field names ที่เป็นส่วนประกอบของ prompt เดียว — ไม่ใช่ prompt แยก
     FIELD_NAMES = {

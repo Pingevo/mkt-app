@@ -161,37 +161,6 @@ class Orchestrator:
     #  Individual agent runners
     # ------------------------------------------------------------------
 
-    def _save_to_ready(self, filename: str, content: str) -> None:
-        """Save content to cache/{product_id}/{filename}.
-
-        System-generated files go to cache/ — NOT data/ — to keep data/
-        clean for user-uploaded files only.
-
-        If file already exists, compare with new content.
-        If different, overwrite and notify. If same, skip.
-        """
-        if not self.product_id:
-            return
-
-        from pathlib import Path
-        project_root = Path(__file__).resolve().parent.parent
-        cache_dir = project_root / "cache" / self.product_id
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        file_path = cache_dir / filename
-        if file_path.exists():
-            old_content = file_path.read_text(encoding="utf-8").strip()
-            new_content = content.strip()
-            if old_content == new_content:
-                # ข้อมูลเหมือนเดิม ไม่ต้องเขียนใหม่
-                return
-            else:
-                # มีข้อมูลเดิมและไม่เหมือนกัน — เขียนทับ
-                file_path.write_text(content, encoding="utf-8")
-        else:
-            # ยังไม่มีไฟล์ — สร้างใหม่
-            file_path.write_text(content, encoding="utf-8")
-    
     def run_product_spec(
         self, raw_data: str, product_images: list[str] | None = None, llm: LLMClient | None = None,
         quick_brief: str = "",
@@ -211,9 +180,6 @@ class Orchestrator:
             image_paths = self._get_product_image_paths() if self.product_id else (product_images or [])
             result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
             self.results["product_spec"] = result
-
-            # Save product_spec to cache/ folder — เป็น deliverable สำหรับ user ไม่ใช่ data source
-            self._save_to_ready("product_spec.txt", result)
 
             return result
         finally:
@@ -284,9 +250,6 @@ class Orchestrator:
             result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
             self.results["competitor_analysis"] = result
 
-            # Save competitor_analysis to cache/ folder (deliverable สำหรับ user)
-            self._save_to_ready("competitor_analysis.txt", result)
-
             return result
         finally:
             if own:
@@ -354,9 +317,27 @@ class Orchestrator:
                 media_type=media_type,
             )
             image_paths = self._get_product_image_paths()
-            result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
-            self.results["content_creator"] = result
-            return result
+            # ใช้ Structured Outputs — LLM คืน JSON ที่ตรง schema
+            # แทนการ parse markdown ด้วย regex (ที่พังทุกครั้งที่ format เปลี่ยน)
+            # LLM คืนแค่ posts (structured data) — เรา generate markdown เอง
+            from .content_schema import CONTENT_RESPONSE_FORMAT, render_posts_to_markdown
+            import json as _json_cc
+            raw_result = agent.run(
+                prompt, quick_brief=quick_brief, image_paths=image_paths,
+                response_format=CONTENT_RESPONSE_FORMAT,
+            )
+            # แปลง JSON → markdown สำหรับ display + เก็บ JSON ดิบไว้สำหรับ parse_media_prompts
+            try:
+                parsed = _json_cc.loads(raw_result)
+                markdown = render_posts_to_markdown(parsed)
+                # เก็บทั้ง JSON ดิบ (สำหรับ media gen) และ markdown (สำหรับ display)
+                # save_result จะแยกเซฟ .json + .md
+                self.results["content_creator"] = raw_result
+                self.results["content_creator_markdown"] = markdown
+            except (_json_cc.JSONDecodeError, TypeError):
+                self.results["content_creator"] = raw_result
+                self.results["content_creator_markdown"] = raw_result
+            return raw_result
         finally:
             if own:
                 llm.close()
@@ -419,7 +400,11 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def save_result(self, agent_key: str, output_dir: str | Path | None = None) -> dict[str, Path]:
-        """Save a single agent result to a markdown file."""
+        """Save a single agent result to a markdown file.
+
+        สำหรับ content_creator: ถ้า result เป็น JSON (structured output)
+        → เซฟ .json (raw) + .md (markdown field สำหรับ user ดู)
+        """
         if output_dir is None:
             output_dir = Path("output") / "latest"
         output_dir = Path(output_dir)
@@ -439,8 +424,28 @@ class Orchestrator:
             return {}
 
         fname = filenames.get(agent_key, agent_key)
+        raw = self.results[agent_key]
+
+        # content_creator ใช้ Structured Outputs → result เป็น JSON string
+        # แยกเซฟ: .json (raw) + .md (markdown ที่เรา generate จาก posts)
+        if agent_key == "content_creator":
+            import json as _json
+            try:
+                # เซฟ .json (raw structured output — สำหรับ parse_media_prompts)
+                json_path = output_dir / f"{fname}_{pid}_{timestamp}.json"
+                json_path.write_text(raw, encoding="utf-8")
+                # เซฟ .md (markdown ที่ render_posts_to_markdown สร้าง — สำหรับ user ดู)
+                md_content = self.results.get("content_creator_markdown", raw)
+                md_path = output_dir / f"{fname}_{pid}_{timestamp}.md"
+                md_path.write_text(md_content, encoding="utf-8")
+                return {agent_key: md_path, f"{agent_key}_json": json_path}
+            except (_json.JSONDecodeError, TypeError):
+                # fallback: ถ้า LLM ไม่คืน JSON (model ไม่รองรับ structured outputs)
+                # เซฟเป็น .md ธรรมดาเหมือนเดิม
+                pass
+
         filepath = output_dir / f"{fname}_{pid}_{timestamp}.md"
-        filepath.write_text(self.results[agent_key], encoding="utf-8")
+        filepath.write_text(raw, encoding="utf-8")
         return {agent_key: filepath}
 
     def save_results(self, output_dir: str | Path | None = None) -> dict[str, Path]:
