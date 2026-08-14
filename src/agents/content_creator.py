@@ -15,8 +15,17 @@ class ContentCreatorAgent(BaseAgent):
         competitor_analysis: str,
         campaign_strategy: str,
         media_capabilities: str = "",
+        media_type: str = "",
     ) -> str:
         parts = ["กรุณาสร้าง **1 โพสต์** สำหรับโปรโมทสินค้า ตามรูปแบบใน system prompt"]
+
+        # media_type directive — override system prompt ในการตัดสินใจว่าจะสร้าง image/video
+        if media_type == "image":
+            parts.append("สำคัญ: สร้าง **Prompt สำหรับ Gen Image เท่านั้น** — ห้ามสร้าง Gen Video prompt แม้ว่าแพลตฟอร์มจะเป็น TikTok")
+        elif media_type == "video":
+            parts.append("สำคัญ: สร้าง **Prompt สำหรับ Gen Video เท่านั้น** — ห้ามสร้าง Gen Image prompt")
+        elif media_type == "both":
+            parts.append("สำคัญ: ต้องสร้างทั้ง **Prompt สำหรับ Gen Image** และ **Prompt สำหรับ Gen Video**")
         # ตรวจว่าเป็นโหมดรวมหลายสินค้าไหม
         is_multi = "=== สินค้า:" in product_spec and product_spec.count("=== สินค้า:") > 1
         if is_multi:

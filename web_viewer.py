@@ -1186,6 +1186,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
     auto_image = body.get("auto_image", None)
     auto_video = body.get("auto_video", None)
     platforms = body.get("platforms", ["facebook", "tiktok"])
+    media_type = body.get("media_type", "")
 
     if not agent_key or not folder:
         return JSONResponse({"error": "missing agent or folder"})
@@ -1236,6 +1237,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                             ready_contents, orch, llm, output_dir,
                             quick_brief=quick_brief, context=context, content_count=content_count,
                             auto_image=auto_image, auto_video=auto_video, platforms=platforms,
+                            media_type=media_type,
                             status_callback=_status_cb,
                         )
                         for i, (result, filepath) in enumerate(results):
@@ -1331,6 +1333,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                       context: dict | None = None, content_count: int = 1,
                       auto_image: bool | None = None, auto_video: bool | None = None,
                       platforms: list[str] | None = None,
+                      media_type: str = "",
                       status_callback=None) -> list[tuple[str, str | None]]:
     """Run one agent, return list of (result_text, filepath) tuples.
 
@@ -1438,6 +1441,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
             result = orch.run_content_creator(
                 "", analysis_text, campaign_text,
                 llm=llm, quick_brief=multi_brief,
+                media_type=media_type,
             )
             orch.results["content_creator"] = result
 
@@ -1678,7 +1682,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                                 save_output=True, quick_brief=quick_brief,
                                 context=context, content_count=content_count,
                                 auto_image=auto_image, auto_video=auto_video,
-                                platforms=platforms,
+                                platforms=platforms, media_type=media_type,
                                 status_callback=_status_cb_combined,
                             )
                             for i, (result, filepath) in enumerate(results):
@@ -1711,7 +1715,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                                     save_output=True, quick_brief=quick_brief,
                                     context=context, content_count=content_count,
                                     auto_image=auto_image, auto_video=auto_video,
-                                    platforms=platforms,
+                                    platforms=platforms, media_type=media_type,
                                     status_callback=_status_cb_sep,
                                 )
                                 for i, (result, filepath) in enumerate(results):

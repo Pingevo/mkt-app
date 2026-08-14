@@ -319,6 +319,7 @@ class Orchestrator:
         campaign_strategy: str,
         llm: LLMClient | None = None,
         quick_brief: str = "",
+        media_type: str = "",
     ) -> str:
         own = llm is None
         if own:
@@ -350,6 +351,7 @@ class Orchestrator:
             prompt = agent.build_prompt(
                 product_data, competitor_analysis, campaign_strategy,
                 media_capabilities=media_caps_text,
+                media_type=media_type,
             )
             image_paths = self._get_product_image_paths()
             result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
