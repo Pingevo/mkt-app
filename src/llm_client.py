@@ -10,6 +10,11 @@ from rich.console import Console
 from rich.live import Live
 from rich.text import Text
 
+try:
+    from .ai_usage import log_ai_usage, make_entry
+except ImportError:
+    from ai_usage import log_ai_usage, make_entry  # type: ignore
+
 console = Console()
 
 
@@ -48,6 +53,7 @@ class LLMClient:
         stream: bool = True,
         tools: list[dict[str, Any]] | None = None,
         plugins: list[dict[str, Any]] | None = None,
+        source: str = "llm_client.chat",
     ) -> str:
         """Send a chat completion request and return the assistant's text reply.
 
@@ -59,14 +65,20 @@ class LLMClient:
         enables OpenRouter server tools — model controls when/how often to search.
         If plugins is provided (e.g. [{"id": "web"}]), enables OpenRouter plugins
         (auto-search once per request).
+
+        source: label สำหรับ AI Usage Hub log (เช่น "content_creator", "ingestion")
         """
+        used_model = model or self._default_model
         payload: dict[str, Any] = {
-            "model": model or self._default_model,
+            "model": used_model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": stream,
         }
+        if stream:
+            # เปิด include_usage เพื่อให้ chunk สุดท้ายมี usage ส่งกลับมา
+            payload["stream_options"] = {"include_usage": True}
         if tools:
             payload["tools"] = tools
         if plugins:
@@ -74,16 +86,23 @@ class LLMClient:
 
         last_error: Exception | None = None
         for attempt in range(1, max_retry_limit + 1):
+            t0 = time.time()
             try:
                 if stream:
-                    return self._chat_stream(payload)
+                    text, usage = self._chat_stream(payload)
+                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt)
+                    return text
                 else:
                     resp = self._client.post("/chat/completions", json=payload)
                     resp.raise_for_status()
                     data = resp.json()
+                    usage = data.get("usage")
+                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt)
                     return data["choices"][0]["message"]["content"]
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
                 last_error = exc
+                # log error path ด้วย
+                self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status="error", error_message=str(exc))
                 if self._aborted:
                     raise RuntimeError("Request aborted")
                 if attempt < max_retry_limit:
@@ -93,10 +112,47 @@ class LLMClient:
 
         raise RuntimeError(f"LLM request failed after {max_retry_limit} retries: {last_error}")
 
-    def _chat_stream(self, payload: dict[str, Any]) -> str:
-        """Stream chat completion and display real-time output."""
+    @staticmethod
+    def _log_usage(
+        model: str,
+        source: str,
+        usage: dict[str, Any] | None,
+        *,
+        duration_ms: int,
+        attempt: int = 1,
+        status: str = "success",
+        error_message: str | None = None,
+    ) -> None:
+        """ยิง log ไป AI Usage Hub — fire-and-forget."""
+        entry = make_entry(
+            provider="openrouter",
+            model=model,
+            operation="chat.completions",
+            source=source,
+            duration_ms=duration_ms,
+            attempt=attempt,
+            status=status,
+            error_message=error_message,
+        )
+        if usage:
+            entry["prompt_tokens"] = usage.get("prompt_tokens")
+            entry["completion_tokens"] = usage.get("completion_tokens")
+            cost = usage.get("cost")
+            if cost is not None:
+                entry["cost_usd"] = float(cost)
+            entry["raw_usage"] = usage
+        log_ai_usage(entry)
+
+    def _chat_stream(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+        """Stream chat completion and display real-time output.
+
+        คืน (text, usage) — usage มาจาก chunk สุดท้ายเมื่อเปิด stream_options.include_usage
+        """
+        import json
+
         collected: list[str] = []
         text = Text()
+        usage: dict[str, Any] | None = None
 
         with self._client.stream("POST", "/chat/completions", json=payload) as resp:
             resp.raise_for_status()
@@ -108,8 +164,10 @@ class LLMClient:
                     if data.strip() == "[DONE]":
                         break
                     try:
-                        import json
                         chunk = json.loads(data)
+                        # chunk สุดท้ายมี usage อยู่ระดับ top-level (ไม่ใช่ใน choices)
+                        if chunk.get("usage"):
+                            usage = chunk["usage"]
                         delta = chunk.get("choices", [{}])[0].get("delta", {})
                         content = delta.get("content", "")
                         if content:
@@ -120,7 +178,7 @@ class LLMClient:
                         continue
 
         console.print()
-        return "".join(collected)
+        return "".join(collected), usage
 
     def chat_stream_yield(
         self,
@@ -132,16 +190,22 @@ class LLMClient:
         max_retry_limit: int = 3,
         tools: list[dict[str, Any]] | None = None,
         plugins: list[dict[str, Any]] | None = None,
+        source: str = "llm_client.chat_stream_yield",
     ):
-        """Stream chat completion, yielding chunks. For web SSE."""
+        """Stream chat completion, yielding chunks. For web SSE.
+
+        source: label สำหรับ AI Usage Hub log
+        """
         import json
 
+        used_model = model or self._default_model
         payload: dict[str, Any] = {
-            "model": model or self._default_model,
+            "model": used_model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if tools:
             payload["tools"] = tools
@@ -150,7 +214,9 @@ class LLMClient:
 
         last_error: Exception | None = None
         for attempt in range(1, max_retry_limit + 1):
+            t0 = time.time()
             try:
+                usage: dict[str, Any] | None = None
                 with self._client.stream("POST", "/chat/completions", json=payload) as resp:
                     resp.raise_for_status()
                     for line in resp.iter_lines():
@@ -161,15 +227,19 @@ class LLMClient:
                             break
                         try:
                             chunk = json.loads(data)
+                            if chunk.get("usage"):
+                                usage = chunk["usage"]
                             delta = chunk.get("choices", [{}])[0].get("delta", {})
                             content = delta.get("content", "")
                             if content:
                                 yield content
                         except (json.JSONDecodeError, IndexError, KeyError):
                             continue
+                self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt)
                 return
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
                 last_error = exc
+                self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status="error", error_message=str(exc))
                 if attempt < max_retry_limit:
                     time.sleep(2**attempt)
                 continue

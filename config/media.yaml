@@ -10,3 +10,7 @@ video_poll_interval_seconds: 5
 video_max_wait_seconds: 600
 auto_generate_image: true
 auto_generate_video: true
+# LLM ที่ใช้แก้ prompt เมื่อ auto-gen ถูก reject (copyright, safety, etc.)
+# auto mode: วนแก้จนกว่าจะออก (ไม่มี limit)
+# ask mode: ไม่ auto-retry ส่ง error ให้ user ตัดสินใจ
+media_retry_model: anthropic/claude-sonnet-4

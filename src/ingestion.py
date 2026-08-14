@@ -126,6 +126,7 @@ def extract_image_info(file_path: Path, config: dict, llm: LLMClient | None = No
             temperature=0.3,
             max_tokens=1024,
             stream=False,
+            source="ingestion.describe_image",
         )
     except Exception as e:
         # Fallback ถ้า LLM ไม่รองรับ image
@@ -194,6 +195,7 @@ def extract_video_frames(file_path: Path, config: dict, llm: LLMClient | None = 
                     temperature=0.3,
                     max_tokens=1024,
                     stream=False,
+                    source="ingestion.describe_video_frames",
                 )
             except Exception as e:
                 return f"[LLM vision failed: {e}]"

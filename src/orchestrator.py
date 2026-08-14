@@ -154,6 +154,7 @@ class Orchestrator:
             max_tokens=config.get("max_tokens", 4096),
             max_retry_limit=config.get("max_retry_limit", 3),
             stream=False,
+            source="orchestrator.manager",
         )
 
     # ------------------------------------------------------------------
@@ -304,7 +305,30 @@ class Orchestrator:
             agent = self._make_agent("content_creator", ContentCreatorAgent, llm)
             # ดึงข้อมูลสินค้าจาก DB ถ้ามี ไม่งั้นใช้ parameter (backward compatible)
             product_data = self._get_product_data(product_spec)
-            prompt = agent.build_prompt(product_data, competitor_analysis, campaign_strategy)
+
+            # ดึง media model capabilities เพื่อบอก agent ว่า model ทำได้อะไร (grounding)
+            media_caps_text = ""
+            try:
+                from . import media_gen
+                cfg = media_gen._load_media_config()
+                video_model = cfg.get("video_model", media_gen.DEFAULT_VIDEO_MODEL)
+                image_model = cfg.get("image_model", media_gen.DEFAULT_IMAGE_MODEL)
+                video_caps = media_gen.format_capabilities_for_prompt(video_model, kind="video")
+                image_caps = media_gen.format_capabilities_for_prompt(image_model, kind="image")
+                caps_parts = []
+                if video_caps:
+                    caps_parts.append(f"[Video] {video_caps}")
+                if image_caps:
+                    caps_parts.append(f"[Image] {image_caps}")
+                if caps_parts:
+                    media_caps_text = "\n".join(caps_parts)
+            except Exception:
+                pass  # ดึงไม่ได้ → ไม่บังคับ ใช้ default
+
+            prompt = agent.build_prompt(
+                product_data, competitor_analysis, campaign_strategy,
+                media_capabilities=media_caps_text,
+            )
             result = agent.run(prompt, quick_brief=quick_brief)
             self.results["content_creator"] = result
             return result

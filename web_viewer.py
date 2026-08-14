@@ -288,6 +288,10 @@ async def api_generate_media(request: Request) -> StreamingResponse:
     output_dir_str = body.get("output_dir", "")
     filename = body.get("filename", "")
     usage = body.get("usage", "")
+    # optional parameters จาก parse_media_prompts (duration, aspect_ratio, resolution)
+    duration = body.get("duration")
+    aspect_ratio = body.get("aspect_ratio")
+    resolution = body.get("resolution")
 
     if not prompt or not output_dir_str or not filename:
         return JSONResponse({"error": "missing prompt, output_dir, or filename"})
@@ -304,11 +308,24 @@ async def api_generate_media(request: Request) -> StreamingResponse:
         try:
             if media_type == "image":
                 q.put_nowait(_sse("status", "กำลังสร้างรูป..."))
-                result = media_gen.generate_image(prompt, output_path)
+                img_kwargs: dict = {}
+                if aspect_ratio:
+                    img_kwargs["aspect_ratio"] = aspect_ratio
+                result = media_gen.generate_image(prompt, output_path, **img_kwargs)
             else:
                 def on_status(s):
                     q.put_nowait(_sse("status", f"วิดีโอ: {s}"))
-                result = media_gen.generate_video(prompt, output_path, on_status=on_status)
+                vid_kwargs: dict = {"on_status": on_status}
+                if duration:
+                    vid_kwargs["duration"] = int(duration)
+                if aspect_ratio:
+                    vid_kwargs["aspect_ratio"] = aspect_ratio
+                if resolution:
+                    vid_kwargs["resolution"] = resolution
+                result = media_gen.generate_video(prompt, output_path, **vid_kwargs)
+
+            # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
+            media_gen.save_retry_history(output_path.parent, media_type, filename, result)
 
             if result.get("ok"):
                 q.put_nowait(_sse("done", json.dumps({
@@ -317,6 +334,7 @@ async def api_generate_media(request: Request) -> StreamingResponse:
                     "model": result.get("model"),
                     "usage": usage,
                     "type": media_type,
+                    "warnings": result.get("warnings", []),
                 }, ensure_ascii=False)))
             else:
                 q.put_nowait(_sse("error", result.get("error", "unknown")))
@@ -366,49 +384,128 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
     output_dir = p.parent
     session_rel = str(output_dir.relative_to(OUTPUT_DIR)) if output_dir.is_relative_to(OUTPUT_DIR) else str(output_dir)
 
+    # Persistent status file — เก็บสถานะ media gen ให้เห็นได้หลัง refresh
+    status_file = output_dir / "_media_status.json"
+
+    def _save_status(status: dict):
+        try:
+            status_file.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _load_status() -> dict:
+        try:
+            if status_file.exists():
+                return json.loads(status_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    # เช็คว่ามี gen ค้างอยู่ไหม — ถ้ามี ไม่ให้เริ่มใหม่
+    existing = _load_status()
+    if existing.get("status") == "in_progress":
+        return JSONResponse({"error": "media generation already in progress", "status": existing})
+
+    # เริ่ม gen — บันทึกสถานะ
+    _save_status({
+        "status": "in_progress",
+        "started_at": datetime.now().isoformat(),
+        "auto_image": auto_image,
+        "auto_video": auto_video,
+        "total": (len(images) if auto_image else 0) + (len(videos) if auto_video else 0),
+        "done": 0,
+        "errors": [],
+        "last_update": "",
+    })
+
     q: _queue.Queue[str | None] = _queue.Queue()
 
     def worker():
+        errors: list[str] = []
         try:
             total = (len(images) if auto_image else 0) + (len(videos) if auto_video else 0)
             done = 0
             q.put_nowait(_sse("status", f"เริ่มสร้าง — {total} ไฟล์"))
 
+            # ask mode — ไม่ auto-retry ถ้าถูก reject ส่ง error ให้ user ตัดสินใจ
             if auto_image:
                 for i, img in enumerate(images):
                     q.put_nowait(_sse("status", f"รูปที่ {i+1}/{len(images)}: กำลังสร้าง..."))
+                    _save_status({**_load_status(), "last_update": f"รูปที่ {i+1}: กำลังสร้าง..."})
                     fname = f"image_{i+1}.png"
                     out_path = output_dir / fname
-                    result = media_gen.generate_image(img["prompt"], out_path)
+                    img_kwargs: dict = {}
+                    if img.get("aspect_ratio"):
+                        img_kwargs["aspect_ratio"] = img["aspect_ratio"]
+                    result = media_gen.generate_image(img["prompt"], out_path, **img_kwargs)
                     done += 1
+                    # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
+                    media_gen.save_retry_history(output_dir, "image", fname, result)
                     if result.get("ok"):
                         q.put_nowait(_sse("media_done", json.dumps({
                             "type": "image", "path": result.get("path"),
                             "usage": img.get("usage", ""),
                             "index": i + 1, "total": len(images),
+                            "warnings": result.get("warnings", []),
                         }, ensure_ascii=False)))
                     else:
-                        q.put_nowait(_sse("error", f"รูปที่ {i+1}: {result.get('error')}"))
+                        err = f"รูปที่ {i+1}: {result.get('error')}"
+                        errors.append(err)
+                        q.put_nowait(_sse("error", err))
 
             if auto_video:
                 for i, vid in enumerate(videos):
                     def on_status(s, idx=i):
                         q.put_nowait(_sse("status", f"วิดีโอที่ {idx+1}/{len(videos)}: {s}"))
+                        _save_status({**_load_status(), "last_update": f"วิดีโอที่ {idx+1}: {s}"})
                     fname = f"video_{i+1}.mp4"
                     out_path = output_dir / fname
-                    result = media_gen.generate_video(vid["prompt"], out_path, on_status=on_status)
+                    vid_kwargs: dict = {"on_status": on_status}
+                    if vid.get("duration"):
+                        vid_kwargs["duration"] = int(vid["duration"])
+                    if vid.get("aspect_ratio"):
+                        vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
+                    if vid.get("resolution"):
+                        vid_kwargs["resolution"] = vid["resolution"]
+                    result = media_gen.generate_video(vid["prompt"], out_path, **vid_kwargs)
                     done += 1
+                    # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
+                    media_gen.save_retry_history(output_dir, "video", fname, result)
                     if result.get("ok"):
                         q.put_nowait(_sse("media_done", json.dumps({
                             "type": "video", "path": result.get("path"),
                             "usage": vid.get("usage", ""),
                             "index": i + 1, "total": len(videos),
+                            "warnings": result.get("warnings", []),
                         }, ensure_ascii=False)))
                     else:
-                        q.put_nowait(_sse("error", f"วิดีโอที่ {i+1}: {result.get('error')}"))
+                        err = f"วิดีโอที่ {i+1}: {result.get('error')}"
+                        errors.append(err)
+                        q.put_nowait(_sse("error", err))
 
-            q.put_nowait(_sse("done", json.dumps({"total": done})))
+            # บันทึกสถานะสุดท้าย
+            final_status = "completed" if not errors else ("completed_with_errors" if done > 0 else "failed")
+            _save_status({
+                "status": final_status,
+                "started_at": _load_status().get("started_at", ""),
+                "finished_at": datetime.now().isoformat(),
+                "auto_image": auto_image,
+                "auto_video": auto_video,
+                "total": total,
+                "done": done,
+                "errors": errors,
+                "last_update": f"เสร็จ — {done}/{total}" + (f" ({len(errors)} errors)" if errors else ""),
+            })
+            q.put_nowait(_sse("done", json.dumps({"total": done, "errors": errors})))
         except Exception as e:
+            errors.append(str(e))
+            _save_status({
+                "status": "failed",
+                "started_at": _load_status().get("started_at", ""),
+                "finished_at": datetime.now().isoformat(),
+                "errors": errors,
+                "last_update": f"error: {e}",
+            })
             q.put_nowait(_sse("error", str(e)))
         finally:
             q.put_nowait(None)
@@ -424,6 +521,52 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
             yield item
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.get("/api/media_status/{session}")
+def api_media_status(session: str) -> JSONResponse:
+    """ดึงสถานะ media generation ของ session — ใช้ตอนเปิดหน้า output ใหม่."""
+    status_file = OUTPUT_DIR / session / "_media_status.json"
+    if not status_file.exists():
+        return JSONResponse({"status": "none"})
+    try:
+        return JSONResponse(json.loads(status_file.read_text(encoding="utf-8")))
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)})
+
+
+@app.get("/api/media_retry_log/{session}")
+def api_media_retry_log(session: str) -> JSONResponse:
+    """ดึงประวัติการ retry ของ session — ดูได้ผ่านหน้าเว็บ."""
+    session_dir = OUTPUT_DIR / session
+    if not session_dir.exists():
+        return JSONResponse({"error": "session not found", "entries": []})
+    entries = media_gen.load_retry_history(session_dir)
+    return JSONResponse({"entries": entries})
+
+
+@app.post("/api/media_retry/{session}")
+async def api_media_retry(session: str, request: Request) -> JSONResponse:
+    """ล้างสถานะ media gen เดิม เพื่อให้กดสร้างใหม่ได้."""
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    auto_image = body.get("auto_image", True)
+    auto_video = body.get("auto_video", True)
+    status_file = OUTPUT_DIR / session / "_media_status.json"
+    if status_file.exists():
+        status_file.unlink()
+    # หาไฟล์ content_creator ใน session
+    session_dir = OUTPUT_DIR / session
+    if not session_dir.exists():
+        return JSONResponse({"error": "session not found"})
+    cc_files = [f for f in session_dir.iterdir() if f.is_file() and "content_creator" in f.name.lower() and f.suffix == ".md"]
+    if not cc_files:
+        return JSONResponse({"error": "no content_creator file found"})
+    # ลบไฟล์ media เดิมที่ fail
+    for f in session_dir.iterdir():
+        if f.is_file() and f.suffix in (".mp4", ".png", ".jpg", ".jpeg", ".webp"):
+            # เก็บไฟล์ที่สร้างสำเร็จไว้ — ลบเฉพาะที่อาจจะ fail
+            pass
+    return JSONResponse({"ok": True, "file": str(cc_files[0].relative_to(OUTPUT_DIR)), "auto_image": auto_image, "auto_video": auto_video})
 
 
 @app.get("/api/data_folders")
@@ -1261,29 +1404,75 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
             if save_output and saved_path and (auto_image or auto_video):
                 try:
                     parsed = media_gen.parse_media_prompts(result)
+                    # สร้าง LLM client สำหรับ retry-on-reject
+                    # auto mode: วนแก้ prompt จนกว่าจะออก (ไม่มี limit)
+                    retry_llm = llm if llm is not None else None
+                    if retry_llm is None:
+                        try:
+                            retry_llm = orch._make_client()
+                        except Exception:
+                            retry_llm = None
                     if auto_image:
                         for j, img in enumerate(parsed.get("images", [])):
                             img_path = output_dir / f"image_โพสต์{i+1}_{j+1}.png"
                             if status_callback:
                                 status_callback(f"กำลังสร้างรูปที่ {j+1}...")
-                            r = media_gen.generate_image(img["prompt"], img_path)
+                            img_kwargs: dict = {}
+                            if img.get("aspect_ratio"):
+                                img_kwargs["aspect_ratio"] = img["aspect_ratio"]
+                            def _img_retry(old_p, new_p, err, idx=j):
+                                if status_callback:
+                                    status_callback(f"รูปที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
+                                print(f"[MediaGen] retry รูป {idx+1}: {err[:80]}", flush=True)
+                            r = media_gen.generate_image_with_retry(
+                                img["prompt"], img_path, llm=retry_llm,
+                                on_retry=_img_retry, **img_kwargs,
+                            )
+                            # เก็บประวัติ retry
+                            media_gen.save_retry_history(
+                                output_dir, "image", img_path.name, r,
+                            )
                             if not r.get("ok"):
                                 msg = f"รูปที่ {j+1}: {r.get('error', 'unknown')}"
                                 if status_callback:
                                     status_callback(msg)
                                 print(f"[MediaGen] {msg}", flush=True)
+                            elif r.get("retry_count"):
+                                if status_callback:
+                                    status_callback(f"รูปที่ {j+1}: สร้างสำเร็จหลังแก้ prompt {r['retry_count']} ครั้ง")
                     if auto_video:
                         for j, vid in enumerate(parsed.get("videos", [])):
                             vid_path = output_dir / f"video_โพสต์{i+1}_{j+1}.mp4"
                             def _vid_status(s, idx=j):
                                 if status_callback:
                                     status_callback(f"วิดีโอที่ {idx+1}: {s}")
-                            r = media_gen.generate_video(vid["prompt"], vid_path, on_status=_vid_status)
+                            vid_kwargs: dict = {"on_status": _vid_status}
+                            if vid.get("duration"):
+                                vid_kwargs["duration"] = int(vid["duration"])
+                            if vid.get("aspect_ratio"):
+                                vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
+                            if vid.get("resolution"):
+                                vid_kwargs["resolution"] = vid["resolution"]
+                            def _vid_retry(old_p, new_p, err, idx=j):
+                                if status_callback:
+                                    status_callback(f"วิดีโอที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
+                                print(f"[MediaGen] retry วิดีโอ {idx+1}: {err[:80]}", flush=True)
+                            vid_kwargs["on_retry"] = _vid_retry
+                            r = media_gen.generate_video_with_retry(
+                                vid["prompt"], vid_path, llm=retry_llm, **vid_kwargs,
+                            )
+                            # เก็บประวัติ retry
+                            media_gen.save_retry_history(
+                                output_dir, "video", vid_path.name, r,
+                            )
                             if not r.get("ok"):
                                 msg = f"วิดีโอที่ {j+1}: {r.get('error', 'unknown')}"
                                 if status_callback:
                                     status_callback(msg)
                                 print(f"[MediaGen] {msg}", flush=True)
+                            elif r.get("retry_count"):
+                                if status_callback:
+                                    status_callback(f"วิดีโอที่ {j+1}: สร้างสำเร็จหลังแก้ prompt {r['retry_count']} ครั้ง")
                 except Exception as e:
                     # media gen fail ไม่ต้องทำให้ content_creator fail ด้วย — แต่ log จริง
                     msg = f"media gen error: {e}"
@@ -1723,6 +1912,28 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .media-status.working { background: #1c2333; color: #7c8aff; }
   .media-status.error { background: #331a1a; color: #f87171; }
   .media-status.none { color: #555; }
+
+  .media-retry-history { margin-bottom: 16px; }
+  .retry-history-title { font-size: 13px; color: #888; margin-bottom: 8px; font-weight: 600; }
+  .retry-entry { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 12px; }
+  .retry-entry.success { border-left: 3px solid #4ade80; }
+  .retry-entry.failed { border-left: 3px solid #f87171; }
+  .retry-entry-header { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+  .retry-status { font-weight: bold; }
+  .retry-entry.success .retry-status { color: #4ade80; }
+  .retry-entry.failed .retry-status { color: #f87171; }
+  .retry-type { background: #1c1e2a; padding: 2px 8px; border-radius: 4px; color: #7c8aff; text-transform: uppercase; font-size: 10px; }
+  .retry-filename { color: #aaa; }
+  .retry-time { color: #666; font-size: 11px; }
+  .retry-count { color: #fbbf24; font-size: 11px; }
+  .retry-error { color: #f87171; margin: 4px 0; font-size: 12px; }
+  .retry-warnings { color: #fbbf24; margin-top: 4px; font-size: 11px; }
+  .retry-details { margin-top: 6px; }
+  .retry-details summary { cursor: pointer; color: #7c8aff; font-size: 11px; }
+  .retry-step { background: #161821; border-radius: 6px; padding: 8px; margin: 6px 0; border-left: 2px solid #f87171; }
+  .retry-step-num { color: #f87171; font-weight: 600; font-size: 11px; margin-bottom: 4px; }
+  .retry-step-error { color: #f87171; font-size: 11px; margin-bottom: 4px; }
+  .retry-step-prompt { color: #ccc; font-size: 11px; margin: 2px 0; word-break: break-word; }
 
   .settings-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 1000; }
   .settings-modal-overlay.visible { display: flex; }
@@ -3103,28 +3314,17 @@ function showFlow(plansArg) {
       html += '</div>';
     }
     html += '</div>';
-    // media action box สำหรับ content_creator — โผล่ใต้ steps หลังเสร็จ
+    // media action box สำหรับ content_creator — แจ้ง user ว่าพร้อมสร้างในหน้า output
     if (plan.steps.some(s => s.key === 'content_creator')) {
       const ccStepIdx = plan.steps.findIndex(s => s.key === 'content_creator');
       const ccStepId = 'flow-' + planIdx + '-' + ccStepIdx;
       const opts = getContentCreatorOptions();
-      html += '<div class="flow-media-action" id="' + ccStepId + '-media-action">';
-      // ปุ่มตามที่ user เลือกใน agent box — ไม่ถามซ้อน
-      const mediaType = opts.media_type || 'prompt';
-      const btnLabel = { image: '🖼️ สร้างรูป', video: '🎬 สร้างวิดีโอ', both: '🎨 สร้างรูป + วิดีโอ' };
-      if (mediaType !== 'prompt') {
-        html += '<div class="flow-media-action-label">พร้อมสร้างสื่อสำหรับโพสต์นี้:</div>';
-        html += '<div class="flow-media-action-btns">';
-        html += '<button class="flow-media-action-btn primary" onclick="generateMediaForStep(' + planIdx + ',' + ccStepIdx + ',\'' + escapeHtml(plan.folder) + '\',\'' + mediaType + '\')">' + (btnLabel[mediaType] || 'สร้างสื่อ') + '</button>';
-        html += '</div>';
+      const mediaWhen = opts.media_when || 'ask';
+      html += '<div class="flow-media-action" id="' + ccStepId + '-media-action" data-folder="' + escapeHtml(plan.folder) + '">';
+      if (mediaWhen === 'auto') {
+        html += '<div class="flow-media-action-label">⚡ สื่อสร้างอัตโนมัติแล้ว (auto mode)</div>';
       } else {
-        // default: ถามว่าจะสร้างอะไร
-        html += '<div class="flow-media-action-label">🎨 พร้อมสร้างสื่อสำหรับโพสต์นี้ — เลือกว่าจะสร้างอะไร:</div>';
-        html += '<div class="flow-media-action-btns">';
-        html += '<button class="flow-media-action-btn primary" onclick="generateMediaForStep(' + planIdx + ',' + ccStepIdx + ',\'' + escapeHtml(plan.folder) + '\',\'all\')">🎨 สร้างรูป + วิดีโอ</button>';
-        html += '<button class="flow-media-action-btn secondary" onclick="generateMediaForStep(' + planIdx + ',' + ccStepIdx + ',\'' + escapeHtml(plan.folder) + '\',\'image\')">🖼️ สร้างแค่รูป</button>';
-        html += '<button class="flow-media-action-btn secondary" onclick="generateMediaForStep(' + planIdx + ',' + ccStepIdx + ',\'' + escapeHtml(plan.folder) + '\',\'video\')">🎬 สร้างแค่วิดีโอ</button>';
-        html += '</div>';
+        html += '<div class="flow-media-action-label">🎨 พร้อมสร้างสื่อ — ไปกดที่หน้าผลลัพธ์ (คลิก "ดูผลลัพธ์" แล้วกดสร้างรูป/วิดีโอได้ที่นั่น)</div>';
       }
       html += '<div class="flow-media-status" id="' + ccStepId + '-media-status"></div>';
       html += '</div>';
@@ -3385,94 +3585,6 @@ async function toggleAutoMedia(field, value) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ [field]: value }),
   });
-}
-
-async function generateMediaForStep(planIdx, stepIdx, folder, mediaType) {
-  const actionEl = document.getElementById('flow-' + planIdx + '-' + stepIdx + '-media-action');
-  const statusEl = document.getElementById('flow-' + planIdx + '-' + stepIdx + '-media-status');
-  if (!actionEl) return;
-  const file = actionEl.dataset.file;
-  if (!file) { alert('ไม่พบไฟล์ content_creator — ลอง refresh แล้วรันใหม่'); return; }
-
-  const doImage = (mediaType === 'all' || mediaType === 'image');
-  const doVideo = (mediaType === 'all' || mediaType === 'video');
-
-  // disable ปุ่มทั้งหมด + โชว์ status
-  actionEl.querySelectorAll('.flow-media-action-btn').forEach(b => b.disabled = true);
-  if (statusEl) statusEl.textContent = '⏳ กำลังสร้าง...';
-
-  try {
-    const res = await fetch('/api/generate_all_media', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: file, auto_image: doImage, auto_video: doVideo }),
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      if (statusEl) statusEl.textContent = '✗ ' + (err.error || 'สร้างไม่สำเร็จ');
-      actionEl.querySelectorAll('.flow-media-action-btn').forEach(b => b.disabled = false);
-      return;
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    const mediaResults = [];
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const data = JSON.parse(line.slice(6));
-          if (data.type === 'status') {
-            if (statusEl) statusEl.textContent = '⏳ ' + data.text;
-          } else if (data.type === 'media_done') {
-            const info = JSON.parse(data.text);
-            mediaResults.push(info);
-            if (statusEl) statusEl.textContent = '⏳ สร้างเสร็จ ' + mediaResults.length + ' ไฟล์...';
-          } else if (data.type === 'error') {
-            console.error('media error:', data.text);
-          } else if (data.type === 'done') {
-            if (statusEl) statusEl.textContent = '✓ สร้างเสร็จ (' + mediaResults.length + ' ไฟล์)';
-            actionEl.querySelectorAll('.flow-media-action-btn').forEach(b => b.disabled = false);
-            // เปิด viewer ที่แสดงรูป + วิดีโอ
-            viewMediaResult(file, mediaResults);
-          }
-        } catch (e) {}
-      }
-    }
-  } catch (e) {
-    if (statusEl) statusEl.textContent = '✗ ' + e.message;
-    actionEl.querySelectorAll('.flow-media-action-btn').forEach(b => b.disabled = false);
-  }
-}
-
-function viewMediaResult(contentFile, mediaResults) {
-  // แสดง modal / panel โชว์รูป + วิดีโอที่สร้างได้
-  let html = '<div class="media-viewer-overlay" onclick="closeMediaViewer(event)">';
-  html += '<div class="media-viewer" onclick="event.stopPropagation()">';
-  html += '<div class="media-viewer-header"><b>🎨 รูปและวิดีโอที่สร้าง</b><button onclick="closeMediaViewer()">✕</button></div>';
-  html += '<div class="media-viewer-body">';
-  if (!mediaResults.length) {
-    html += '<p>ไม่สามารถสร้างรูป/วิดีโอได้ — ตรวจสอบ prompt ใน content_creator output</p>';
-  } else {
-    for (const m of mediaResults) {
-      const url = '/api/file/' + m.path.replace(/^.*\/output\//, '');
-      if (m.type === 'image') {
-        html += '<div class="media-item"><img src="' + url + '" alt="generated"><div class="media-caption">' + escapeHtml(m.usage || 'image ' + m.index) + '</div></div>';
-      } else if (m.type === 'video') {
-        html += '<div class="media-item"><video controls src="' + url + '"></video><div class="media-caption">' + escapeHtml(m.usage || 'video ' + m.index) + '</div></div>';
-      }
-    }
-  }
-  html += '</div></div></div>';
-  const div = document.createElement('div');
-  div.id = 'media-viewer-container';
-  div.innerHTML = html;
-  document.body.appendChild(div);
 }
 
 function closeMediaViewer(event) {
@@ -3945,24 +4057,65 @@ function renderContentResult(session, filename, content) {
   html += '<div class="preview-platform visible" id="preview-platform-view"><div class="preview-container" id="preview-platform-content">กำลังโหลดตัวอย่าง...</div></div>';
   // Original (hidden by default)
   html += '<div class="preview-original" id="preview-original-view"><div class="content-box">' + renderMarkdown(content) + '</div></div>';
-  // Load media then render platform card + action bar
+  // Load media + status then render platform card + action bar
   findSessionMedia(session, function(media) {
     const el = document.getElementById('preview-platform-content');
     if (el) el.innerHTML = renderPlatformPreview(post, session, media.images, media.videos);
-    renderMediaActionBar(session, filename, post, media);
+    fetch('/api/media_status/' + encodeURIComponent(session)).then(r => r.json()).then(st => {
+      renderMediaActionBar(session, filename, post, media, st);
+    }).catch(() => renderMediaActionBar(session, filename, post, media));
   });
   return html;
 }
 
 // แสดงปุ่มสร้างรูป/วิดีโอในหน้า output — ถ้ายังไม่มี
-function renderMediaActionBar(session, filename, post, media) {
+function renderMediaActionBar(session, filename, post, media, mediaStatus) {
   const bar = document.getElementById('media-action-bar');
   if (!bar) return;
+  mediaStatus = mediaStatus || {status: 'none'};
   const hasImages = media.images.length > 0;
   const hasVideos = media.videos.length > 0;
   const hasImagePrompt = !!post.imagePrompt;
   const hasVideoPrompt = !!post.videoPrompt;
   let html = '';
+
+  // ถ้ากำลังสร้างอยู่ — แสดง progress, ไม่ให้กดซ้ำ
+  if (mediaStatus.status === 'in_progress') {
+    const last = mediaStatus.last_update || 'กำลังสร้าง...';
+    html = '<span class="media-status working">⏳ ' + escapeHtml(last) + '</span>';
+    bar.innerHTML = html;
+    // poll สถานะทุก 5 วินาที
+    if (!bar._polling) {
+      bar._polling = true;
+      setTimeout(function() {
+        bar._polling = false;
+        fetch('/api/media_status/' + encodeURIComponent(session)).then(r => r.json()).then(st => {
+          findSessionMedia(session, function(m) {
+            const el = document.getElementById('preview-platform-content');
+            if (el) el.innerHTML = renderPlatformPreview(post, session, m.images, m.videos);
+            renderMediaActionBar(session, filename, post, m, st);
+          });
+        });
+      }, 5000);
+    }
+    return;
+  }
+
+  // ถ้าสร้างเสร็จแล้วมี error — แสดงปุ่ม retry + error message
+  if (mediaStatus.status === 'failed' || mediaStatus.status === 'completed_with_errors') {
+    const errs = (mediaStatus.errors || []).join('; ');
+    if (errs) html += '<span class="media-status error">⚠ ' + escapeHtml(errs.slice(0, 100)) + '</span>';
+    if (!hasImages && hasImagePrompt) {
+      html += '<button class="media-gen-btn" onclick="retryMediaFromOutput(\'image\')">🎨 สร้างรูปใหม่</button>';
+    }
+    if (!hasVideos && hasVideoPrompt) {
+      html += '<button class="media-gen-btn" onclick="retryMediaFromOutput(\'video\')">🎬 สร้างวิดีโอใหม่</button>';
+    }
+    bar.innerHTML = html;
+    return;
+  }
+
+  // สถานะปกติ — แสดงปุ่มสร้างถ้ายังไม่มี media
   if (!hasImages && hasImagePrompt) {
     html += '<button class="media-gen-btn" onclick="generateMediaFromOutput(\'image\')">🎨 สร้างรูป</button>';
   }
@@ -3973,6 +4126,83 @@ function renderMediaActionBar(session, filename, post, media) {
     html = '<span class="media-status none">โพสต์นี้ไม่มี prompt รูป/วิดีโอ</span>';
   }
   bar.innerHTML = html;
+
+  // โหลดประวัติ retry แล้วแสดงใต้ action bar
+  fetch('/api/media_retry_log/' + encodeURIComponent(session)).then(r => r.json()).then(data => {
+    renderRetryHistory(data.entries || []);
+  }).catch(() => {});
+}
+
+// แสดงประวัติการ retry ใต้ action bar
+function renderRetryHistory(entries) {
+  let existing = document.getElementById('media-retry-history');
+  if (!existing) {
+    const bar = document.getElementById('media-action-bar');
+    if (!bar) return;
+    const div = document.createElement('div');
+    div.id = 'media-retry-history';
+    div.className = 'media-retry-history';
+    bar.parentNode.insertBefore(div, bar.nextSibling);
+    existing = div;
+  }
+  if (!entries.length) {
+    existing.innerHTML = '';
+    return;
+  }
+  let html = '<div class="retry-history-title">📋 ประวัติการสร้างสื่อ (' + entries.length + ' ครั้ง)</div>';
+  entries.forEach(function(e) {
+    const ok = e.ok;
+    const statusCls = ok ? 'success' : 'failed';
+    const statusIcon = ok ? '✓' : '✗';
+    let entryHtml = '<div class="retry-entry ' + statusCls + '">';
+    entryHtml += '<div class="retry-entry-header">';
+    entryHtml += '<span class="retry-status">' + statusIcon + '</span>';
+    entryHtml += '<span class="retry-type">' + escapeHtml(e.media_type) + '</span>';
+    entryHtml += '<span class="retry-filename">' + escapeHtml(e.filename) + '</span>';
+    entryHtml += '<span class="retry-time">' + escapeHtml(e.timestamp) + '</span>';
+    if (e.retry_count > 0) {
+      entryHtml += '<span class="retry-count">แก้ prompt ' + e.retry_count + ' ครั้ง</span>';
+    }
+    entryHtml += '</div>';
+    if (!ok && e.error) {
+      entryHtml += '<div class="retry-error">⚠ ' + escapeHtml(e.error) + '</div>';
+    }
+    if (e.retry_history && e.retry_history.length) {
+      entryHtml += '<details class="retry-details"><summary>ดู prompt ที่แก้</summary>';
+      e.retry_history.forEach(function(h) {
+        entryHtml += '<div class="retry-step">';
+        entryHtml += '<div class="retry-step-num">ครั้งที่ ' + h.attempt + '</div>';
+        entryHtml += '<div class="retry-step-error">Error: ' + escapeHtml(h.error) + '</div>';
+        entryHtml += '<div class="retry-step-prompt"><b>เดิม:</b> ' + escapeHtml(h.old_prompt.slice(0, 120)) + (h.old_prompt.length > 120 ? '...' : '') + '</div>';
+        entryHtml += '<div class="retry-step-prompt"><b>แก้เป็น:</b> ' + escapeHtml(h.new_prompt.slice(0, 120)) + (h.new_prompt.length > 120 ? '...' : '') + '</div>';
+        entryHtml += '</div>';
+      });
+      entryHtml += '</details>';
+    }
+    if (e.warnings && e.warnings.length) {
+      entryHtml += '<div class="retry-warnings">⚠ ' + escapeHtml(e.warnings.join('; ')) + '</div>';
+    }
+    entryHtml += '</div>';
+    html += entryHtml;
+  });
+  existing.innerHTML = html;
+}
+
+// retry — ล้างสถานะเดิมแล้วสร้างใหม่
+function retryMediaFromOutput(mediaType) {
+  const session = _currentMediaSession;
+  if (!session) return;
+  fetch('/api/media_retry/' + encodeURIComponent(session), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({auto_image: mediaType === 'image', auto_video: mediaType === 'video'}),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      generateMediaFromOutput(mediaType);
+    } else {
+      alert(data.error || 'ไม่สามารถ retry ได้');
+    }
+  });
 }
 
 // สร้างรูป/วิดีโอจากหน้า output — เรียก /api/generate_all_media
@@ -3994,7 +4224,9 @@ function generateMediaFromOutput(mediaType) {
     findSessionMedia(session, function(media) {
       const el = document.getElementById('preview-platform-content');
       if (el) el.innerHTML = renderPlatformPreview(_currentMediaPost, session, media.images, media.videos);
-      renderMediaActionBar(session, filename, _currentMediaPost, media);
+      fetch('/api/media_status/' + encodeURIComponent(session)).then(r => r.json()).then(st => {
+        renderMediaActionBar(session, filename, _currentMediaPost, media, st);
+      }).catch(() => renderMediaActionBar(session, filename, _currentMediaPost, media));
       // รีเฟรช sidebar file list ด้วย
       loadSessions();
     });
