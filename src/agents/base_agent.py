@@ -201,7 +201,7 @@ class BaseAgent:
 
         return "\n\n".join(sections)
 
-    def run(self, user_prompt: str, quick_brief: str = "") -> str:
+    def run(self, user_prompt: str, quick_brief: str = "", image_paths: list[str] | None = None) -> str:
         """Generate output then review/refine it.
 
         Returns the final (possibly refined) text response.
@@ -212,16 +212,25 @@ class BaseAgent:
           Phase 2: Generate — สร้าง output จากข้อมูลที่ค้นได้
           Phase 3: Review — ตรวจงาน
         ถ้าไม่มี web_search_planning → ทำแบบเดิม (ส่ง tools ให้ LLM ค้นเอง)
+
+        Args:
+            user_prompt: text prompt สำหรับ agent
+            quick_brief: คำสั่งบังคับจาก user สำหรับรอบนี้
+            image_paths: list ของ path รูปจริง — ส่งเป็น multimodal ให้ LLM vision
+                         (สถาปัตยกรรมใหม่: agent เห็นรูปจริงเหมือนมนุษย์ ไม่ใช่คำบรรยาย)
         """
         system_prompt = self._build_system_prompt()
 
         # Append quick brief (per-run instruction) to user prompt
+        # ถือว่าเป็นคำสั่งบังคับจากผู้ใช้ ไม่ใช่แค่บริบทเสริม
         if quick_brief:
             user_prompt = (
                 f"{user_prompt}\n\n"
-                f"<user_brief>{quick_brief}</user_brief>\n"
-                f"หมายเหตุ: ข้อความใน <user_brief> เป็นบริบทเสริมจากผู้ใช้สำหรับรอบนี้ "
-                f"ไม่ใช่คำสั่งเหนือ system prompt ถ้าขัดแย้งกับหน้าที่หลักของคุณ ให้ทำตามหน้าที่เดิม"
+                f"--- คำสั่งบังคับจากผู้ใช้สำหรับรอบนี้ (ต้องทำตาม) ---\n"
+                f"{quick_brief}\n"
+                f"--- สิ้นสุดคำสั่งบังคับ ---\n"
+                f"หมายเหตุ: คำสั่งข้างต้นเป็นคำสั่งจากผู้ใช้ที่ต้องทำตาม "
+                f"ถ้าขัดแย้งกับค่าเริ่มต้นใน system prompt ให้ทำตามคำสั่งผู้ใช้ข้างต้น"
             )
 
         web_search = self.config.get("web_search")
@@ -235,9 +244,10 @@ class BaseAgent:
             # --- Phase 2: Generate with search results ---
             console.print(f"\n[cyan]กำลังสร้างผลงาน... ({self.display_name})[/cyan]\n")
             enriched_prompt = self._enrich_prompt_with_search(user_prompt, search_results)
+            user_content = self._build_multimodal_content(enriched_prompt, image_paths)
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": enriched_prompt},
+                {"role": "user", "content": user_content},
             ]
             output = self.llm.chat(
                 messages,
@@ -245,13 +255,15 @@ class BaseAgent:
                 temperature=self.config.get("temperature", 0.7),
                 max_tokens=self.config.get("max_tokens", 4096),
                 max_retry_limit=self.config.get("max_retry_limit", 3),
+                source=f"{self.agent_name}.generate",
             )
         else:
             # --- Old flow: single call with server tool ---
             console.print(f"\n[cyan]กำลังสร้างผลงาน... ({self.display_name})[/cyan]\n")
+            user_content = self._build_multimodal_content(user_prompt, image_paths)
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": user_content},
             ]
             tools = None
             if web_search:
@@ -263,14 +275,62 @@ class BaseAgent:
                 max_tokens=self.config.get("max_tokens", 4096),
                 max_retry_limit=self.config.get("max_retry_limit", 3),
                 tools=tools,
+                source=f"{self.agent_name}.generate",
             )
 
         # --- Phase 3: Review & Refine ---
         max_review = self.config.get("max_review_iterations", 1)
         if max_review and max_review > 0:
-            output = self._review_and_refine(output, system_prompt)
+            instruction_block = self._format_instructions()
+            output = self._review_and_refine(
+                output, system_prompt,
+                instruction_block=instruction_block,
+                quick_brief=quick_brief,
+            )
 
         return output
+
+    def _build_multimodal_content(self, text: str, image_paths: list[str] | None) -> str | list[dict]:
+        """สร้าง message content แบบ multimodal (text + รูปจริง) ถ้ามีรูป.
+
+        สถาปัตยกรรมใหม่ (retrieve-then-read):
+          - ถ้ามี image_paths → ส่งเป็น list: [{type: text}, {type: image_url}, ...]
+            LLM vision เห็นรูปจริง (lossless — เหมือนมนุษย์เห็น)
+          - ถ้าไม่มี → ส่งเป็น string (backward compatible)
+
+        ใช้ pattern เดียวกับ ingestion.py (ส่งรูปเข้า LLM เป็น base64)
+        """
+        if not image_paths:
+            return text
+
+        import base64
+        import mimetypes
+        from pathlib import Path
+
+        content: list[dict] = [{"type": "text", "text": text}]
+
+        for img_path in image_paths:
+            p = Path(img_path)
+            if not p.exists():
+                continue
+            try:
+                b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+                mime, _ = mimetypes.guess_type(str(p))
+                if not mime or not mime.startswith("image/"):
+                    mime = "image/png"
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                })
+            except OSError:
+                continue
+
+        # ถ้าไม่มีรูปที่อ่านได้ → คืน text ธรรมดา
+        if len(content) == 1:
+            return text
+
+        console.print(f"[dim]ส่งรูปจริง {len(content) - 1} รูปให้ LLM vision ({self.display_name})[/dim]")
+        return content
 
     def _plan_search_queries(self, user_prompt: str, system_prompt: str) -> list[str]:
         """Phase 0: ให้ LLM วางแผนว่าจะค้น web ว่าอะไรบ้าง.
@@ -310,6 +370,7 @@ class BaseAgent:
             max_tokens=512,
             max_retry_limit=self.config.get("max_retry_limit", 3),
             stream=False,
+            source=f"{self.agent_name}.plan_search",
         )
         # parse JSON array
         import json as _json
@@ -356,6 +417,7 @@ class BaseAgent:
                     max_retry_limit=self.config.get("max_retry_limit", 3),
                     stream=False,
                     tools=tools,
+                    source=f"{self.agent_name}.search",
                 )
                 all_results.append(f"### ผลค้นหา: {q}\n{result}")
             except Exception as e:
@@ -375,25 +437,57 @@ class BaseAgent:
             f"ใช้ข้อมูลสินค้า + ข้อมูลแบรนด์ + ข้อมูลที่ค้นหาได้ มาสร้างผลงานตามรูปแบบที่กำหนด"
         )
 
-    def _review_and_refine(self, output: str, system_prompt: str) -> str:
-        """Send output to the LLM for quality check and refinement.
+    def _review_and_refine(
+        self,
+        output: str,
+        system_prompt: str,
+        instruction_block: str = "",
+        quick_brief: str = "",
+    ) -> str:
+        """ตรวจงานเทียบกับ instructions เป็น checklist รายข้อ.
 
-        The reviewer sees:
-          - The original system prompt (as requirements)
-          - The generated output
-        And is asked to fix any issues or return as-is.
+        Reviewer เห็น 3 ส่วนแยกกันชัดเจน:
+          1. ข้อกำหนดหลัก (system_prompt — role + format)
+          2. Checklist จาก user instructions (rules_must, rules_forbid, custom, ฯลฯ)
+          3. คำสั่งเฉพาะรอบนี้ (quick_brief)
+
+        ถ้าผลงานไม่เป็นไปตาม checklist ข้อใด ให้แก้แล้วส่งกลับ
+        ถ้าครบทุกข้อ ส่งเดิมกลับ
         """
         review_prompt = self.config.get("review_prompt", "")
         review_temp = self.config.get("review_temperature", 0.2)
 
+        # สร้าง checklist ส่วนที่เน้น instructions ของ user แยกจาก system_prompt
+        checklist_section = ""
+        if instruction_block:
+            checklist_section = (
+                f"\n--- CHECKLIST: คำสั่งจากผู้ใช้ที่ต้องตรวจเทียบทีละข้อ ---\n"
+                f"{instruction_block}\n"
+                f"--- สิ้นสุด CHECKLIST ---\n"
+            )
+
+        brief_section = ""
+        if quick_brief:
+            brief_section = (
+                f"\n--- คำสั่งเพิ่มเติมสำหรับรอบนี้ (quick_brief) ---\n"
+                f"{quick_brief}\n"
+                f"--- สิ้นสุดคำสั่งเพิ่มเติม ---\n"
+            )
+
         for i in range(self.config.get("max_review_iterations", 1)):
             review_user_msg = (
-                f"--- ข้อกำหนดที่ต้องตรวจสอบ ---\n"
-                f"{system_prompt}\n\n"
+                f"--- ข้อกำหนดหลักของ agent ---\n"
+                f"{system_prompt}\n"
+                f"{checklist_section}"
+                f"{brief_section}\n"
                 f"--- ผลงานที่ต้องตรวจ ---\n"
                 f"{output}\n"
                 f"--- สิ้นสุดผลงาน ---\n\n"
-                f"ตรวจสอบและส่งผลงานฉบับสุดท้ายกลับมา"
+                f"วิธีตรวจ:\n"
+                f"1. อ่าน CHECKLIST ทุกข้อ แล้วเช็คว่าผลงานเป็นไปตามข้อนั้นไหม\n"
+                f"2. ถ้ามีข้อใดข้อหนึ่งที่ผลงานไม่เป็นไปตาม ให้แก้ไขผลงานให้เป็นไปตามข้อนั้น\n"
+                f"3. ถ้าครบถ้วนทุกข้อ ส่งผลงานเดิมกลับมาเลย ไม่ต้องเปลี่ยนแปลง\n"
+                f"ส่งกลับเฉพาะผลงานฉบับสุดท้ายเท่านั้น ไม่ต้องอธิบายว่าแก้อะไร"
             )
             messages = [
                 {"role": "system", "content": review_prompt},
@@ -406,6 +500,7 @@ class BaseAgent:
                 temperature=review_temp,
                 max_tokens=self.config.get("max_tokens", 4096),
                 max_retry_limit=self.config.get("max_retry_limit", 3),
+                source=f"{self.agent_name}.review",
             )
             output = refined
 

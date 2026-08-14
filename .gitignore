@@ -28,6 +28,15 @@ output/
 data/Lagenio*/
 cache/Lagenio*/
 
+# Test / mockup data (not for production)
+data/Mockup*/
+cache/Mockup*/
+data/Coffee/
+cache/Coffee/
+data/ZMI*/
+cache/ZMI*/
+mockup_data/
+
 # Brand profiles (real customer data — keep .example.md only)
 brand/brand_profile.md
 brand/tone_of_voice.md
