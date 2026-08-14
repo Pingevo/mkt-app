@@ -14,8 +14,10 @@ data/ มีแค่ไฟล์ user เท่านั้น — ไฟล์
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import mimetypes
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -290,6 +292,9 @@ def get_agent_context_text(product_id: str) -> str:
 
     วิธีสากล: ส่ง raw text ทั้งหมดให้ agent โดยไม่สกัด fields ล่วงหน้า
     แต่ละ agent จะแยกเองว่าต้องการข้อมูลอะไร
+
+    Note: ฟังก์ชันนี้คืน text เท่านั้น (backward compatible)
+    สำหรับ multimodal (text + รูปจริง) ใช้ get_agent_context() แทน
     """
     data = get_fields_for_agent(product_id)
     parts = []
@@ -299,11 +304,14 @@ def get_agent_context_text(product_id: str) -> str:
         parts.append(data["raw_text"][:12000])  # จำกัดป้องกัน token เกิน
         parts.append("--- สิ้นสุดข้อมูลดิบ ---\n")
 
-    if data["image_descriptions"]:
-        parts.append("--- คำบรรยายรูปภาพ ---")
-        for desc in data["image_descriptions"]:
-            parts.append(f"[{desc.get('file', '?')}]: {desc.get('description', '')}")
-        parts.append("--- สิ้นสุดคำบรรยายรูป ---\n")
+    # สถาปัตยกรรมใหม่: ไม่ส่งคำบรรยายรูปแล้ว (agent เห็นรูปจริงผ่าน get_agent_context)
+    # แต่ยังส่ง transcript วิดีโอ/เสียง (เป็น text อยู่แล้ว)
+    # Backward compat: สินค้าเดิมที่มี description ไม่มี path → ยังส่ง text อยู่
+    for desc in data["image_descriptions"]:
+        p = desc.get("path")
+        d = desc.get("description", "").strip()
+        if d and not (p and Path(p).exists()):
+            parts.append(f"[รูป {desc.get('file', '?')}]: {d}")
 
     if data["video_transcripts"]:
         parts.append("--- Transcript วิดีโอ ---")
@@ -318,3 +326,128 @@ def get_agent_context_text(product_id: str) -> str:
         parts.append("--- สิ้นสุด Transcript เสียง ---\n")
 
     return "\n".join(parts) if parts else ""
+
+
+def get_agent_context(product_id: str) -> dict[str, Any]:
+    """ดึง context สำหรับ agent การตลาด — แบบ multimodal (retrieve-then-read).
+
+    คืน dict:
+      - text: raw_text + transcripts (string) — ส่งเป็น text ให้ LLM
+      - image_paths: list ของ path รูปจริง (ส่งเป็น image_url base64 ให้ LLM vision)
+      - file_paths: list ของ path PDF ดิบ (ส่งเป็น file ให้ OpenRouter ถ้าจำเป็น)
+
+    สถาปัตยกรรมใหม่:
+      - text: lossless cache (ถูก)
+      - รูป: ส่งรูปจริงให้ LLM (แม่น — LLM เห็นเหมือนมนุษย์)
+      - PDF: ส่งดิบตอนจำเป็น (ผ่าน OpenRouter type: "file")
+
+    Backward compat: สินค้าเดิมที่มี image_descriptions แบบเก่า (มี description ไม่มี path)
+    → รวม description เข้าใน text (ไม่เสียข้อมูลจนกว่าจะ re-ingest)
+    """
+    record = load(product_id)
+
+    # text context (raw_text + transcripts)
+    text_parts = []
+    if record.get("raw_text"):
+        text_parts.append("--- ข้อมูลดิบ (text) ---")
+        text_parts.append(record["raw_text"][:12000])
+        text_parts.append("--- สิ้นสุดข้อมูลดิบ ---\n")
+
+    for t in record.get("video_transcripts", []):
+        text_parts.append(f"[วิดีโอ {t.get('file', '?')}]: {t.get('transcript', '')}")
+    for t in record.get("audio_transcripts", []):
+        text_parts.append(f"[เสียง {t.get('file', '?')}]: {t.get('transcript', '')}")
+
+    # image paths (รูปจริง — ส่งให้ LLM vision)
+    # + backward compat: เก่าที่มี description ไม่มี path → รวมใน text
+    image_paths: list[str] = []
+    legacy_descs: list[str] = []
+    for desc in record.get("image_descriptions", []):
+        p = desc.get("path")
+        d = desc.get("description", "").strip()
+        if p and Path(p).exists():
+            image_paths.append(p)
+        elif d:
+            # สินค้าเดิมที่ยังไม่ re-ingest — มี description แต่ไม่มี path
+            legacy_descs.append(f"[{desc.get('file', '?')}]: {d}")
+
+    if legacy_descs:
+        text_parts.append("--- คำบรรยายรูปภาพ (ข้อมูลเดิม — re-ingest เพื่อใช้รูปจริง) ---")
+        text_parts.extend(legacy_descs)
+        text_parts.append("--- สิ้นสุดคำบรรยายรูป ---\n")
+
+    # file paths (PDF ดิบ — ส่งผ่าน OpenRouter type: "file" ตอนจำเป็น)
+    file_paths: list[str] = []
+    for f in record.get("files", []):
+        if f.get("type") == "text" and f.get("path", "").lower().endswith(".pdf"):
+            p = f.get("path")
+            if p and Path(p).exists():
+                file_paths.append(p)
+
+    return {
+        "text": "\n".join(text_parts) if text_parts else "",
+        "image_paths": image_paths,
+        "file_paths": file_paths,
+    }
+
+
+def get_product_metadata(product_id: str) -> dict[str, Any]:
+    """ดึง metadata สั้นของสินค้า — สำหรับ automate discovery.
+
+    ใช้ตอน agent ต้องเลือกสินค้าเอง (automate mode):
+      - อ่าน metadata ของทุกสินค้า (เบา ไม่โหลดไฟล์)
+      - เลือกสินค้าที่เกี่ยวข้อง
+      - ค่อยดึง context เต็มผ่าน get_agent_context()
+
+    คืน dict:
+      - summary: สรุปสั้น (string)
+      - category: หมวด (string)
+      - file_count: จำนวนไฟล์ (int)
+      - has_images: มีรูปไหม (bool)
+      - image_count: จำนวนรูป (int)
+      - status: สถานะ (string)
+    """
+    record = load(product_id)
+    meta = record.get("metadata", {})
+    return {
+        "product_id": product_id,
+        "summary": meta.get("summary", ""),
+        "category": meta.get("category", ""),
+        "file_count": meta.get("file_count", len(record.get("files", []))),
+        "has_images": meta.get("has_images", False),
+        "image_count": meta.get("image_count", 0),
+        "status": record.get("status", STATUS_EMPTY),
+    }
+
+
+def get_product_image_paths(product_id: str) -> list[str]:
+    """ดึง path ของไฟล์รูปจริงทั้งหมดของสินค้า — สำหรับส่งเป็น reference ตอน generate.
+
+    คืน list ของ absolute path ของรูปจริงที่ user upload ไว้
+    ลำดับตามที่เก็บใน image_descriptions
+    """
+    record = load(product_id)
+    paths: list[str] = []
+    for desc in record.get("image_descriptions", []):
+        p = desc.get("path")
+        if p and Path(p).exists():
+            paths.append(p)
+    return paths
+
+
+def image_to_data_url(image_path: str | Path) -> str | None:
+    """แปลงไฟล์รูปเป็น base64 data URL — สำหรับส่งให้ OpenRouter input_references.
+
+    คืน None ถ้าไฟล์ไม่มีหรืออ่านไม่ได้
+    """
+    p = Path(image_path)
+    if not p.exists():
+        return None
+    mime, _ = mimetypes.guess_type(str(p))
+    if not mime or not mime.startswith("image/"):
+        mime = "image/png"
+    try:
+        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except OSError:
+        return None

@@ -1,24 +1,27 @@
 # ============================================================
 #  Ingestion Configuration
-#  รายการไฟล์ที่ระบบรองรับ + preprocessor ที่ใช้แปลงแต่ละประเภท
+# รายการไฟล์ที่ระบบรองรับ + preprocessor ที่ใช้แปลงแต่ละประเภท
 #  แก้ที่นี่อย่างเดียว ไม่ต้องแก้โค้ด
 # ============================================================
 
 # --- รูปแบบที่รองรับ ---
 # ไฟล์ที่ไม่อยู่ในรายการนี้ → ระบบจะข้าม แจ้ง user ว่าไม่รองรับ ไม่ทำลาย
+#
+# หมายเหตุ: video/audio ต้องการ dependency เพิ่ม (ffmpeg, whisper)
+# ถ้าติดตั้งแล้วเปิดในรายการด้านล่าง ถ้าไม่มี → ระบบจะบอก user ว่าไม่พร้อม
 supported_formats:
   text:    [.txt, .md, .pdf, .xlsx, .xls, .docx, .csv]
   image:   [.jpg, .jpeg, .png, .webp]
-  video:   [.mp4, .mov]
-  audio:   [.wav, .mp3, .m4a]
+  # video:   [.mp4, .mov]      # ต้องติดตั้ง ffmpeg ก่อนเปิด
+  # audio:   [.wav, .mp3, .m4a]  # ต้องติดตั้ง whisper ก่อนเปิด
 
 # --- Preprocessor ต่อประเภท ---
 # แต่ละประเภทเรียก function ใน src/ingestion.py ชื่อตาม field นี้
 preprocessors:
-  text:    extract_text          # pandas, pdfplumber, python-docx
-  image:   extract_image_info    # ส่งเข้า LLM เป็น image input
-  video:   extract_video_frames  # ffmpeg ดึง key frames → ส่งเข้า LLM
-  audio:   extract_audio_text    # whisper / API transcribe
+  text:    extract_text          # PyPDF2, openpyxl, python-docx, csv
+  image:   extract_image_info    # เก็บ path รูปจริง (lossless) — agent เห็นรูปจริงตอนทำงาน
+  # video:   extract_video_frames  # ffmpeg ดึง key frames → ส่งเข้า LLM
+  # audio:   extract_audio_text    # whisper / API transcribe
 
 # --- การตรวจ hash ---
 # ถ้า raw file hash เหมือนเดิม → ข้าม re-ingest ประหยัด token
@@ -33,8 +36,8 @@ video_max_frames: 5
 max_file_size_mb:
   text:    50
   image:   20
-  video:   200
-  audio:   100
+  # video:   200
+  # audio:   100
 
 # --- สถานะสินค้า ---
 # 5 สถานะ: empty / no_usable_data / processing / ready / stale

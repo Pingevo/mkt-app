@@ -207,7 +207,9 @@ class Orchestrator:
         try:
             agent = self._make_agent("product_spec", ProductSpecAgent, llm)
             prompt = agent.build_prompt(raw_data, product_images or self.product_images)
-            result = agent.run(prompt, quick_brief=quick_brief)
+            # ส่งรูปจริงให้ agent (retrieve-then-read — agent เห็นรูปเหมือนมนุษย์)
+            image_paths = self._get_product_image_paths() if self.product_id else (product_images or [])
+            result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
             self.results["product_spec"] = result
 
             # Save product_spec to cache/ folder — เป็น deliverable สำหรับ user ไม่ใช่ data source
@@ -247,6 +249,24 @@ class Orchestrator:
                     return db_data
         return fallback
 
+    def _get_product_image_paths(self) -> list[str]:
+        """ดึง path รูปจริงของสินค้า — สำหรับส่งเป็น multimodal ให้ agent (retrieve-then-read).
+
+        สถาปัตยกรรมใหม่: agent เห็นรูปจริง (lossless) ไม่ใช่คำบรรยาย (lossy)
+        กรณี multi-product: รวมรูปจากทุกสินค้า
+        """
+        if not self.product_id:
+            return []
+        paths: list[str] = []
+        if " + " in self.product_id:
+            for pid in self.product_id.split(" + "):
+                pid = pid.strip()
+                if product_db.is_ready(pid):
+                    paths.extend(product_db.get_product_image_paths(pid))
+        elif product_db.is_ready(self.product_id):
+            paths = product_db.get_product_image_paths(self.product_id)
+        return paths
+
     def run_competitor_analysis(
         self, product_spec: str, competitor_data: str | None = None, llm: LLMClient | None = None,
         quick_brief: str = "",
@@ -260,7 +280,8 @@ class Orchestrator:
             product_data = self._get_product_data(product_spec)
             # If competitor_data is None or empty, agent will search web itself
             prompt = agent.build_prompt(product_data, competitor_data or "")
-            result = agent.run(prompt, quick_brief=quick_brief)
+            image_paths = self._get_product_image_paths()
+            result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
             self.results["competitor_analysis"] = result
 
             # Save competitor_analysis to cache/ folder (deliverable สำหรับ user)
@@ -283,7 +304,8 @@ class Orchestrator:
             # ดึงข้อมูลสินค้าจาก DB ถ้ามี ไม่งั้นใช้ parameter (backward compatible)
             product_data = self._get_product_data(product_spec)
             prompt = agent.build_prompt(product_data, competitor_analysis)
-            result = agent.run(prompt, quick_brief=quick_brief)
+            image_paths = self._get_product_image_paths()
+            result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
             self.results["campaign_strategy"] = result
             return result
         finally:
@@ -329,7 +351,8 @@ class Orchestrator:
                 product_data, competitor_analysis, campaign_strategy,
                 media_capabilities=media_caps_text,
             )
-            result = agent.run(prompt, quick_brief=quick_brief)
+            image_paths = self._get_product_image_paths()
+            result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
             self.results["content_creator"] = result
             return result
         finally:

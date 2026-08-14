@@ -201,7 +201,7 @@ class BaseAgent:
 
         return "\n\n".join(sections)
 
-    def run(self, user_prompt: str, quick_brief: str = "") -> str:
+    def run(self, user_prompt: str, quick_brief: str = "", image_paths: list[str] | None = None) -> str:
         """Generate output then review/refine it.
 
         Returns the final (possibly refined) text response.
@@ -212,6 +212,12 @@ class BaseAgent:
           Phase 2: Generate — สร้าง output จากข้อมูลที่ค้นได้
           Phase 3: Review — ตรวจงาน
         ถ้าไม่มี web_search_planning → ทำแบบเดิม (ส่ง tools ให้ LLM ค้นเอง)
+
+        Args:
+            user_prompt: text prompt สำหรับ agent
+            quick_brief: คำสั่งบังคับจาก user สำหรับรอบนี้
+            image_paths: list ของ path รูปจริง — ส่งเป็น multimodal ให้ LLM vision
+                         (สถาปัตยกรรมใหม่: agent เห็นรูปจริงเหมือนมนุษย์ ไม่ใช่คำบรรยาย)
         """
         system_prompt = self._build_system_prompt()
 
@@ -238,9 +244,10 @@ class BaseAgent:
             # --- Phase 2: Generate with search results ---
             console.print(f"\n[cyan]กำลังสร้างผลงาน... ({self.display_name})[/cyan]\n")
             enriched_prompt = self._enrich_prompt_with_search(user_prompt, search_results)
+            user_content = self._build_multimodal_content(enriched_prompt, image_paths)
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": enriched_prompt},
+                {"role": "user", "content": user_content},
             ]
             output = self.llm.chat(
                 messages,
@@ -253,9 +260,10 @@ class BaseAgent:
         else:
             # --- Old flow: single call with server tool ---
             console.print(f"\n[cyan]กำลังสร้างผลงาน... ({self.display_name})[/cyan]\n")
+            user_content = self._build_multimodal_content(user_prompt, image_paths)
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": user_content},
             ]
             tools = None
             if web_search:
@@ -281,6 +289,48 @@ class BaseAgent:
             )
 
         return output
+
+    def _build_multimodal_content(self, text: str, image_paths: list[str] | None) -> str | list[dict]:
+        """สร้าง message content แบบ multimodal (text + รูปจริง) ถ้ามีรูป.
+
+        สถาปัตยกรรมใหม่ (retrieve-then-read):
+          - ถ้ามี image_paths → ส่งเป็น list: [{type: text}, {type: image_url}, ...]
+            LLM vision เห็นรูปจริง (lossless — เหมือนมนุษย์เห็น)
+          - ถ้าไม่มี → ส่งเป็น string (backward compatible)
+
+        ใช้ pattern เดียวกับ ingestion.py (ส่งรูปเข้า LLM เป็น base64)
+        """
+        if not image_paths:
+            return text
+
+        import base64
+        import mimetypes
+        from pathlib import Path
+
+        content: list[dict] = [{"type": "text", "text": text}]
+
+        for img_path in image_paths:
+            p = Path(img_path)
+            if not p.exists():
+                continue
+            try:
+                b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+                mime, _ = mimetypes.guess_type(str(p))
+                if not mime or not mime.startswith("image/"):
+                    mime = "image/png"
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                })
+            except OSError:
+                continue
+
+        # ถ้าไม่มีรูปที่อ่านได้ → คืน text ธรรมดา
+        if len(content) == 1:
+            return text
+
+        console.print(f"[dim]ส่งรูปจริง {len(content) - 1} รูปให้ LLM vision ({self.display_name})[/dim]")
+        return content
 
     def _plan_search_queries(self, user_prompt: str, system_prompt: str) -> list[str]:
         """Phase 0: ให้ LLM วางแผนว่าจะค้น web ว่าอะไรบ้าง.

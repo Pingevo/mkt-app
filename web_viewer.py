@@ -26,6 +26,7 @@ from src.data_loader import detect_data_files
 from src.file_loader import load_file
 from src.config_loader import get_env
 from src import media_gen
+from src import product_db
 from src import angle_manager
 
 # Load .env
@@ -292,6 +293,7 @@ async def api_generate_media(request: Request) -> StreamingResponse:
     duration = body.get("duration")
     aspect_ratio = body.get("aspect_ratio")
     resolution = body.get("resolution")
+    product_id = body.get("product_id", "")
 
     if not prompt or not output_dir_str or not filename:
         return JSONResponse({"error": "missing prompt, output_dir, or filename"})
@@ -302,6 +304,24 @@ async def api_generate_media(request: Request) -> StreamingResponse:
     output_path = output_dir / filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # หารูปสินค้าจริงจาก product_id (ถ้าไม่มี ลองอ่านจาก session meta)
+    if not product_id:
+        meta_path = output_dir / "_session_meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                product_id = meta.get("product_id", "")
+            except Exception:
+                pass
+    product_image_paths: list[str] = []
+    if product_id:
+        # กรณี multi-product: product_id = "K5 + K2" → ดึงจากทุกสินค้า
+        if " + " in product_id:
+            for pid in product_id.split(" + "):
+                product_image_paths.extend(product_db.get_product_image_paths(pid.strip()))
+        else:
+            product_image_paths = product_db.get_product_image_paths(product_id)
+
     q: _queue.Queue[str | None] = _queue.Queue()
 
     def worker():
@@ -311,6 +331,9 @@ async def api_generate_media(request: Request) -> StreamingResponse:
                 img_kwargs: dict = {}
                 if aspect_ratio:
                     img_kwargs["aspect_ratio"] = aspect_ratio
+                # ส่งรูปสินค้าจริงเป็น reference — image-to-image
+                if product_image_paths:
+                    img_kwargs["input_references"] = product_image_paths
                 result = media_gen.generate_image(prompt, output_path, **img_kwargs)
             else:
                 def on_status(s):
@@ -322,6 +345,9 @@ async def api_generate_media(request: Request) -> StreamingResponse:
                     vid_kwargs["aspect_ratio"] = aspect_ratio
                 if resolution:
                     vid_kwargs["resolution"] = resolution
+                # ส่งรูปสินค้าจริงเป็น reference — reference-to-video
+                if product_image_paths:
+                    vid_kwargs["input_references"] = product_image_paths
                 result = media_gen.generate_video(prompt, output_path, **vid_kwargs)
 
             # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
@@ -366,6 +392,7 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
     filepath = body.get("file", "")
     auto_image = body.get("auto_image", True)
     auto_video = body.get("auto_video", True)
+    product_id = body.get("product_id", "")
 
     if not filepath:
         return JSONResponse({"error": "missing file"})
@@ -375,6 +402,24 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
         p = OUTPUT_DIR / filepath
     if not p.exists():
         return JSONResponse({"error": f"file not found: {filepath}"})
+
+    # หารูปสินค้าจริงจาก product_id (ถ้าไม่มี ลองอ่านจาก session meta)
+    if not product_id:
+        meta_path = p.parent / "_session_meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                product_id = meta.get("product_id", "")
+            except Exception:
+                pass
+    product_image_paths: list[str] = []
+    if product_id:
+        # กรณี multi-product: product_id = "K5 + K2" → ดึงจากทุกสินค้า
+        if " + " in product_id:
+            for pid in product_id.split(" + "):
+                product_image_paths.extend(product_db.get_product_image_paths(pid.strip()))
+        else:
+            product_image_paths = product_db.get_product_image_paths(product_id)
 
     content = p.read_text(encoding="utf-8")
     parsed = media_gen.parse_media_prompts(content)
@@ -437,6 +482,9 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                     img_kwargs: dict = {}
                     if img.get("aspect_ratio"):
                         img_kwargs["aspect_ratio"] = img["aspect_ratio"]
+                    # ส่งรูปสินค้าจริงเป็น reference — image-to-image
+                    if product_image_paths:
+                        img_kwargs["input_references"] = product_image_paths
                     result = media_gen.generate_image(img["prompt"], out_path, **img_kwargs)
                     done += 1
                     # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
@@ -467,6 +515,9 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                         vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
                     if vid.get("resolution"):
                         vid_kwargs["resolution"] = vid["resolution"]
+                    # ส่งรูปสินค้าจริงเป็น reference — reference-to-video
+                    if product_image_paths:
+                        vid_kwargs["input_references"] = product_image_paths
                     result = media_gen.generate_video(vid["prompt"], out_path, **vid_kwargs)
                     done += 1
                     # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
@@ -1154,6 +1205,16 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                 output_dir = OUTPUT_DIR / _session_ts
                 output_dir.mkdir(parents=True, exist_ok=True)
 
+                # บันทึก session metadata — สำหรับหารูปสินค้าจริงตอน generate media
+                try:
+                    meta_path = output_dir / "_session_meta.json"
+                    meta_path.write_text(json.dumps({
+                        "product_id": folder,
+                        "created_at": datetime.now().isoformat(),
+                    }, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
+
                 if _current_llm is None:
                     _current_llm = orch._make_client()
                 llm = _current_llm
@@ -1237,7 +1298,7 @@ def _read_folder(folder: str) -> tuple[list[str], list[str], dict[str, str]]:
             ext = f.suffix.lower()
             if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
                 image_paths.append(str(f))
-            elif ext in {".txt", ".md", ".pdf", ".xlsx", ".xls"}:
+            elif ext in {".txt", ".md", ".pdf", ".xlsx", ".xls", ".docx", ".csv"}:
                 raw_contents.append(load_file(str(f)))
     # Read system-generated files from cache/
     if cache_dir.exists() and cache_dir.is_dir():
@@ -1288,8 +1349,9 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
 
     if agent_key == "product_spec":
         raw_data = "\n\n".join(raw_contents) if raw_contents else ""
-        if not raw_data:
-            raise ValueError(f"ไม่พบข้อมูลดิบในโฟลเดอร์ {folder}")
+        # ถ้าไม่มี text แต่มีรูป → ใช้รูปเป็นข้อมูลหลัก (agent เห็นรูปจริงผ่าน multimodal)
+        if not raw_data and not image_paths:
+            raise ValueError(f"ไม่พบข้อมูลในโฟลเดอร์ {folder} — ต้องมีไฟล์ text หรือรูปอย่างน้อย 1 ไฟล์")
         result = orch.run_product_spec(raw_data, image_paths, llm=llm, quick_brief=quick_brief)
         orch.results["product_spec"] = result
         if save_output:
@@ -1420,6 +1482,9 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                             img_kwargs: dict = {}
                             if img.get("aspect_ratio"):
                                 img_kwargs["aspect_ratio"] = img["aspect_ratio"]
+                            # ส่งรูปสินค้าจริงเป็น reference — image-to-image
+                            if image_paths:
+                                img_kwargs["input_references"] = image_paths
                             def _img_retry(old_p, new_p, err, idx=j):
                                 if status_callback:
                                     status_callback(f"รูปที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
@@ -1453,6 +1518,9 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                                 vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
                             if vid.get("resolution"):
                                 vid_kwargs["resolution"] = vid["resolution"]
+                            # ส่งรูปสินค้าจริงเป็น reference — reference-to-video
+                            if image_paths:
+                                vid_kwargs["input_references"] = image_paths
                             def _vid_retry(old_p, new_p, err, idx=j):
                                 if status_callback:
                                     status_callback(f"วิดีโอที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
@@ -1565,6 +1633,17 @@ async def api_run_agents(request: Request) -> StreamingResponse:
             try:
                 output_dir = OUTPUT_DIR / session_ts
                 output_dir.mkdir(parents=True, exist_ok=True)
+
+                # บันทึก session metadata — สำหรับหารูปสินค้าจริงตอน generate media
+                try:
+                    meta_path = output_dir / "_session_meta.json"
+                    meta_path.write_text(json.dumps({
+                        "product_id": folders[0] if len(folders) == 1 else " + ".join(folders),
+                        "product_ids": folders,
+                        "created_at": datetime.now().isoformat(),
+                    }, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
 
                 llm = orch._make_client()
                 _active_llms.append(llm)

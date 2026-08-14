@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import re
 import time
 from pathlib import Path
@@ -22,6 +23,42 @@ try:
     from .ai_usage import log_ai_usage, make_entry
 except ImportError:
     from ai_usage import log_ai_usage, make_entry  # type: ignore
+
+
+# ---------------------------------------------------------------------------
+# Helpers — แปลงไฟล์รูปจริง → data URL สำหรับ input_references
+# ---------------------------------------------------------------------------
+
+def _image_to_data_url(image_path: str | Path) -> str | None:
+    """แปลงไฟล์รูปเป็น base64 data URL — สำหรับส่งเป็น input_references.
+
+    คืน None ถ้าไฟล์ไม่มีหรืออ่านไม่ได้
+    """
+    p = Path(image_path)
+    if not p.exists():
+        return None
+    mime, _ = mimetypes.guess_type(str(p))
+    if not mime or not mime.startswith("image/"):
+        mime = "image/png"
+    try:
+        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except OSError:
+        return None
+
+
+def _paths_to_input_references(paths: list[str]) -> list[dict]:
+    """แปลง list ของ image path → list ของ input_references objects สำหรับ API.
+
+    ข้าม path ที่ไม่มีไฟล์อยู่จริง
+    รูปแบบ: [{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]
+    """
+    refs: list[dict] = []
+    for p in paths:
+        url = _image_to_data_url(p)
+        if url:
+            refs.append({"type": "image_url", "image_url": {"url": url}})
+    return refs
 
 from .config_loader import get_env
 
@@ -232,10 +269,14 @@ def generate_image(
     model: str | None = None,
     aspect_ratio: str = "16:9",
     timeout: float = 180,
+    input_references: list[dict] | list[str] | None = None,
 ) -> dict[str, Any]:
     """สร้างรูปจาก prompt — เซฟลง output_path แล้วคืน metadata.
 
     ก่อนส่ง API จะเช็ค + clamp aspect_ratio กับ capabilities ของ model
+    input_references: list ของ dict (API format) หรือ list ของ path รูปจริง
+        - ถ้าเป็น path (str) → แปลงเป็น base64 data URL อัตโนมัติ
+        - ใช้เป็น reference image สำหรับ image-to-image generation
     คืน: {ok, path, model, prompt, error?, warnings?}
     """
     cfg = _load_media_config()
@@ -261,6 +302,20 @@ def generate_image(
     n = cfg.get("image_n", 1)
     if n > 1:
         payload["n"] = n
+
+    # input_references — รูปสินค้าจริงสำหรับ image-to-image
+    if input_references:
+        refs: list[dict] = []
+        for r in input_references:
+            if isinstance(r, str):
+                # path → data URL
+                url = _image_to_data_url(r)
+                if url:
+                    refs.append({"type": "image_url", "image_url": {"url": url}})
+            elif isinstance(r, dict):
+                refs.append(r)
+        if refs:
+            payload["input_references"] = refs
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -333,11 +388,18 @@ def generate_video(
     poll_interval: float = 5.0,
     max_wait: float = 600.0,
     on_status=None,
+    input_references: list[dict] | list[str] | None = None,
+    frame_images: list[dict] | list[str] | None = None,
 ) -> dict[str, Any]:
     """สร้างวิดีโอจาก prompt — async รอจนเสร็จ — เซฟลง output_path.
 
     ก่อนส่ง API จะเช็ค + clamp duration/aspect_ratio/resolution กับ capabilities ของ model
     on_status: callback(status_str) สำหรับโชว์ progress
+    input_references: list ของ path รูปจริง (str) หรือ dict (API format)
+        - ใช้เป็น reference สำหรับ reference-to-video (style/subject guidance)
+    frame_images: list ของ path รูปจริง (str) หรือ dict (API format)
+        - ใช้เป็น first_frame / last_frame สำหรับ image-to-video
+        - ถ้าเป็น str → ใช้เป็น first_frame อัตโนมัติ
     คืน: {ok, path, model, prompt, error?, warnings?}
     """
     cfg = _load_media_config()
@@ -367,6 +429,36 @@ def generate_video(
         "resolution": resolution,
         "duration": duration,
     }
+
+    # input_references — reference-to-video (style/subject guidance)
+    if input_references:
+        refs: list[dict] = []
+        for r in input_references:
+            if isinstance(r, str):
+                url = _image_to_data_url(r)
+                if url:
+                    refs.append({"type": "image_url", "image_url": {"url": url}})
+            elif isinstance(r, dict):
+                refs.append(r)
+        if refs:
+            payload["input_references"] = refs
+
+    # frame_images — image-to-video (first/last frame)
+    if frame_images:
+        frames: list[dict] = []
+        for fi in frame_images:
+            if isinstance(fi, str):
+                url = _image_to_data_url(fi)
+                if url:
+                    frames.append({
+                        "type": "image_url",
+                        "image_url": {"url": url},
+                        "frame_type": "first_frame",
+                    })
+            elif isinstance(fi, dict):
+                frames.append(fi)
+        if frames:
+            payload["frame_images"] = frames
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -563,11 +655,13 @@ def generate_image_with_retry(
     aspect_ratio: str = "16:9",
     timeout: float = 180,
     on_retry=None,
+    input_references: list[dict] | list[str] | None = None,
 ) -> dict[str, Any]:
     """สร้างรูป — ถ้าถูก reject ให้ LLM แก้ prompt แล้วลองใหม่ ไม่จำกัดจำนวนครั้ง.
 
     หยุดเฉพาะเมื่อ: สำเร็จ / ไม่ใช่ reject error / LLM แก้ prompt ไม่ได้
     on_retry: callback(old_prompt, new_prompt, error) สำหรับโชว์สถานะ
+    input_references: รูปสินค้าจริงสำหรับ image-to-image (path หรือ dict)
     คืน: เหมือน generate_image + เพิ่ม retry_count, original_prompt, retry_history
     """
     cfg = _load_media_config()
@@ -581,6 +675,7 @@ def generate_image_with_retry(
         result = generate_image(
             current_prompt, output_path,
             model=model, aspect_ratio=aspect_ratio, timeout=timeout,
+            input_references=input_references,
         )
         if result.get("ok"):
             if attempt > 0:
@@ -632,11 +727,15 @@ def generate_video_with_retry(
     max_wait: float = 600.0,
     on_status=None,
     on_retry=None,
+    input_references: list[dict] | list[str] | None = None,
+    frame_images: list[dict] | list[str] | None = None,
 ) -> dict[str, Any]:
     """สร้างวิดีโอ — ถ้าถูก reject ให้ LLM แก้ prompt แล้วลองใหม่ ไม่จำกัดจำนวนครั้ง.
 
     หยุดเฉพาะเมื่อ: สำเร็จ / ไม่ใช่ reject error / LLM แก้ prompt ไม่ได้
     on_retry: callback(old_prompt, new_prompt, error) สำหรับโชว์สถานะ
+    input_references: รูปสินค้าจริงสำหรับ reference-to-video
+    frame_images: รูปสินค้าจริงสำหรับ image-to-video (first/last frame)
     คืน: เหมือน generate_video + เพิ่ม retry_count, original_prompt, retry_history
     """
     cfg = _load_media_config()
@@ -652,6 +751,7 @@ def generate_video_with_retry(
             model=model, duration=duration, aspect_ratio=aspect_ratio,
             resolution=resolution, poll_interval=poll_interval,
             max_wait=max_wait, on_status=on_status,
+            input_references=input_references, frame_images=frame_images,
         )
         if result.get("ok"):
             if attempt > 0:

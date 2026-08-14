@@ -20,18 +20,15 @@ class ProductSpecAgent(BaseAgent):
             f"{raw_data}\n"
             "--- สิ้นสุดข้อมูลดิบ ---\n\n"
         )
-        
+
+        # สถาปัตยกรรมใหม่: รูปจริงถูกส่งเป็น multimodal ใน agent.run(image_paths=...)
+        # ไม่ต้อง OCR รูปเป็น text แล้ว — บอกแค่ว่ามีรูปประกอบให้ดูประกอบการวิเคราะห์
         if product_images:
-            for i, image_path in enumerate(product_images, 1):
-                try:
-                    image_text = load_file(image_path)
-                    prompt += (
-                        f"--- ข้อมูลจากรูปภาพสินค้าภาพที่ {i} ---\n"
-                        f"{image_text}\n"
-                        f"--- สิ้นสุดข้อมูลจากรูปภาพภาพที่ {i} ---\n\n"
-                    )
-                except Exception as e:
-                    prompt += f"[หมายเหตุ: ไม่สามารถอ่านรูปภาพภาพที่ {i} ({image_path}) ได้: {e}]\n\n"
-        
+            prompt += (
+                f"--- รูปภาพสินค้า ---\n"
+                f"มีรูปภาพสินค้า {len(product_images)} รูป ประกอบการวิเคราะห์ (ส่งเป็น image input)\n"
+                f"--- สิ้นสุดรูปภาพสินค้า ---\n\n"
+            )
+
         prompt += "สร้างสเปคสินค้าเป็นภาษาไทยตามรูปแบบที่กำหนดใน system prompt"
         return prompt

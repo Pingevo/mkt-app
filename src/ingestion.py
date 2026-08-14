@@ -74,63 +74,125 @@ def _check_size(file_path: Path, ftype: str, config: dict) -> tuple[bool, str]:
 # ------------------------------------------------------------------
 
 def extract_text(file_path: Path, config: dict, llm: LLMClient | None = None) -> str:
-    """แปลง text/PDF/Excel/Word → text."""
-    return load_file(str(file_path))
+    """แปลง text/PDF/Excel/Word → text + ดึงรูปที่ฝังใน document ออกมาเก็บเป็นไฟล์.
+
+    สถาปัตยกรรมใหม่ (retrieve-then-read):
+      - text: ดึงออกมาเก็บใน DB (lossless — text คือ text)
+      - รูปใน xlsx/docx: ดึงออกเก็บเป็นไฟล์ + path ใน DB (lossless)
+      - PDF: เก็บ path ดิบไว้ ส่งให้ OpenRouter ตอน agent ทำงาน (ไม่ extract text ด้วย OCR)
+
+    คืนค่า: text ที่ดึงได้ (string)
+    ผลข้างเคียง: รูปที่ดึงได้เก็บใน _extracted_images (ใช้โดย ingest_product)
+    """
+    global _extracted_images
+    _extracted_images = []
+
+    suffix = file_path.suffix.lower()
+    text = load_file(str(file_path))
+
+    # ดึงรูปที่ฝังใน xlsx/docx ออกมาเก็บเป็นไฟล์ (lossless)
+    if suffix in {".xlsx", ".xls"}:
+        _extracted_images = _extract_images_from_xlsx(file_path)
+    elif suffix == ".docx":
+        _extracted_images = _extract_images_from_docx(file_path)
+
+    return text
+
+
+# เก็บรูปที่ดึงได้จาก document ระหว่างการเรียก extract_text
+_extracted_images: list[str] = []
+
+
+def _extract_images_from_xlsx(file_path: Path) -> list[str]:
+    """ดึงรูปที่ฝังใน xlsx ออกมาเก็บเป็นไฟล์ — คืน list ของ path รูปที่บันทึกแล้ว.
+
+    วิธีสากล (ตาม VOYAGER-Inc/excel-vision-mcp):
+      1. สแกน xl/media/ ใน zip archive (จับได้ครบทุกรูป)
+      2. บันทึกแต่ละรูปเป็นไฟล์ใน cache/{product_id}/extracted_images/
+    """
+    import zipfile
+
+    saved_paths: list[str] = []
+    out_dir = _extracted_images_dir(file_path)
+
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            media_files = [
+                name for name in zf.namelist()
+                if name.startswith("xl/media/")
+                and Path(name).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+            ]
+            for idx, media_path in enumerate(sorted(media_files)):
+                try:
+                    raw = zf.read(media_path)
+                    ext = Path(media_path).suffix.lower() or ".png"
+                    out_file = out_dir / f"xlsx_img_{idx:03d}{ext}"
+                    out_file.write_bytes(raw)
+                    saved_paths.append(str(out_file))
+                except Exception:
+                    continue
+    except (zipfile.BadZipFile, OSError):
+        pass
+
+    return saved_paths
+
+
+def _extract_images_from_docx(file_path: Path) -> list[str]:
+    """ดึงรูปที่ฝังใน docx ออกมาเก็บเป็นไฟล์ — คืน list ของ path รูป.
+
+    วิธี: docx = zip archive, รูปอยู่ใน word/media/
+    """
+    import zipfile
+
+    saved_paths: list[str] = []
+    out_dir = _extracted_images_dir(file_path)
+
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            media_files = [
+                name for name in zf.namelist()
+                if name.startswith("word/media/")
+                and Path(name).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+            ]
+            for idx, media_path in enumerate(sorted(media_files)):
+                try:
+                    raw = zf.read(media_path)
+                    ext = Path(media_path).suffix.lower() or ".png"
+                    out_file = out_dir / f"docx_img_{idx:03d}{ext}"
+                    out_file.write_bytes(raw)
+                    saved_paths.append(str(out_file))
+                except Exception:
+                    continue
+    except (zipfile.BadZipFile, OSError):
+        pass
+
+    return saved_paths
+
+
+def _extracted_images_dir(file_path: Path) -> Path:
+    """โฟลเดอร์เก็บรูปที่ดึงจาก document — อยู่ใน cache/ ไม่ปนกับไฟล์ user ใน data/."""
+    # หา product_id จาก path: data/{product_id}/file.xlsx
+    parts = file_path.parts
+    product_id = "unknown"
+    if "data" in parts:
+        idx = parts.index("data")
+        if idx + 1 < len(parts):
+            product_id = parts[idx + 1]
+    out_dir = _project_root() / "cache" / product_id / "extracted_images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
 
 
 def extract_image_info(file_path: Path, config: dict, llm: LLMClient | None = None) -> str:
-    """บรรยายรูปภาพเป็น text โดยใช้ LLM (vision).
+    """รูปภาพ — เก็บ path จริง (lossless) ไม่บรรยายเป็น text (lossy).
 
-    ถ้าไม่มี LLM → ใช้ OCR แบบเดิม (load_file)
+    สถาปัตยกรรมใหม่ (retrieve-then-read):
+      - ingest: เก็บ path รูปจริงใน DB (ไม่เสีย token LLM)
+      - agent ทำงาน: ส่งรูปจริง base64 ให้ LLM vision (เห็นเหมือนมนุษย์)
+
+    คืนค่า: path ของรูป (string) — ใช้สำหรับเก็บใน image_descriptions.path
     """
-    if llm is None:
-        # Fallback: OCR
-        return load_file(str(file_path))
-
-    # ส่งรูปเข้า LLM เป็น image input
-    import base64
-    with open(file_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
-
-    ext = file_path.suffix.lower().lstrip(".")
-    mime_map = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}
-    mime = mime_map.get(ext, "jpeg")
-
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        "บรรยายรูปภาพสินค้านี้เป็นภาษาไทย โดยระบุ:\n"
-                        "1. สินค้าคืออะไร\n"
-                        "2. ลักษณะที่เห็น (สี, ขนาด, รูปทรง, บรรจุภัณฑ์)\n"
-                        "3. ข้อความ/ฉลาก/โลโก้ที่เห็นในรูป (ถ้ามี)\n"
-                        "4. บริบทการใช้งาน (ถ้าเห็นได้จากรูป)\n"
-                        "กระชับ ชัดเจน ไม่เกิน 200 คำ"
-                    ),
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/{mime};base64,{b64}"},
-                },
-            ],
-        }
-    ]
-
-    try:
-        return llm.chat(
-            messages,
-            model="google/gemini-2.5-flash",
-            temperature=0.3,
-            max_tokens=1024,
-            stream=False,
-            source="ingestion.describe_image",
-        )
-    except Exception as e:
-        # Fallback ถ้า LLM ไม่รองรับ image
-        return f"[LLM vision failed: {e}]\n{load_file(str(file_path))}"
+    return str(file_path)
 
 
 def extract_video_frames(file_path: Path, config: dict, llm: LLMClient | None = None) -> str:
@@ -321,14 +383,25 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
             to_ingest.append(f)
 
     # 3. ประมวลผลไฟล์ทีละไฟล์
-    # LLM ใช้แค่สำหรับ image/video (vision) — text ใช้ deterministic parser
-    llm = _make_llm() if any(f["type"] in ("image", "video") for f in to_ingest) else None
+    # สถาปัตยกรรมใหม่: LLM ใช้แค่ video (vision) + metadata summary — ไม่ใช้กับ image แล้ว
+    #   - image: เก็บ path จริง (lossless, ไม่เสีย token)
+    #   - text: deterministic parser (ไม่เสีย token)
+    #   - video: ดึง frames → ส่ง LLM (จำเป็น ไม่มีทางอื่น)
+    #   - metadata summary: LLM สรุปสั้นๆ 1 ครั้ง (ถูกมาก — text only, 512 max tokens)
+    needs_llm = any(f["type"] == "video" for f in to_ingest) or any(f["type"] == "text" for f in to_ingest)
+    llm = _make_llm() if needs_llm else None
     total_steps = len(to_ingest)
     current_step = 0
     start_time = time.time()
 
     all_extracted: list[dict[str, Any]] = []
     errors: list[str] = []
+
+    # เคลียร์ image_descriptions เดิมก่อน re-ingest (กัน duplicate)
+    record = product_db.load(product_id)
+    record["image_descriptions"] = []
+    record["raw_text"] = ""
+    product_db.save(product_id, record)
 
     for f in to_ingest:
         current_step += 1
@@ -373,9 +446,12 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
 
             # บันทึกลง DB ตามประเภท
             if ftype == "image":
+                # สถาปัตยกรรมใหม่: เก็บ path รูปจริง (lossless) ไม่บรรยายเป็น text
+                # agent จะเห็นรูปจริงตอนทำงาน (ส่ง base64 ให้ LLM vision)
                 product_db.append_extracted(product_id, "image_descriptions", {
                     "file": f["name"],
-                    "description": extracted_text,
+                    "path": f["path"],
+                    "description": "",  # ไม่บรรยายแล้ว — agent เห็นรูปจริง
                 })
             elif ftype == "video":
                 product_db.append_extracted(product_id, "video_transcripts", {
@@ -393,6 +469,16 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
                 record["raw_text"] = (record.get("raw_text", "") + "\n\n" + extracted_text).strip()
                 product_db.save(product_id, record)
 
+                # รูปที่ดึงจาก document (xlsx/docx) → เก็บ path ใน image_descriptions
+                global _extracted_images
+                for img_path in _extracted_images:
+                    product_db.append_extracted(product_id, "image_descriptions", {
+                        "file": Path(img_path).name,
+                        "path": img_path,
+                        "description": "",
+                        "source": f["name"],  # บอกว่ารูปนี้มาจากไฟล์ไหน
+                    })
+
             # บันทึกสถานะไฟล์
             product_db.add_file(product_id, {
                 "name": f["name"],
@@ -408,8 +494,10 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
             product_db.update_file_status(product_id, f["path"], "error", str(e))
             errors.append(f"{f['name']}: {e}")
 
-    # 4. ตั้งสถานะ ready — ไม่มี field extraction ล่วงหน้า
-    #    agent จะดึง raw text เองตอนทำงานจริง (วิธีสากล)
+    # 4. สร้าง metadata summary (LLM สรุปสั้นๆ ครั้งเดียว — สำหรับ automate discovery)
+    _generate_metadata_summary(product_id, llm)
+
+    # 5. ตั้งสถานะ ready
     product_db.set_status(product_id, product_db.STATUS_READY)
 
     if llm is not None:
@@ -423,6 +511,60 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
         "files_unsupported": len(unsupported),
         "errors": errors,
     }
+
+
+def _generate_metadata_summary(product_id: str, llm: LLMClient | None = None) -> None:
+    """สร้าง metadata สรุปสั้นๆ ของสินค้า — สำหรับ automate discovery.
+
+    ใช้ LLM สรุปจาก raw_text ครั้งเดียว (ถูกกว่าบรรยายทุกรูปมาก)
+    ถ้าไม่มี LLM หรือไม่มี raw_text → เก็บ metadata พื้นฐานจากไฟล์
+
+    เก็บใน product DB: metadata = {summary, category, file_count, has_images}
+    """
+    record = product_db.load(product_id)
+    raw_text = record.get("raw_text", "")
+    file_count = len(record.get("files", []))
+    image_count = len(record.get("image_descriptions", []))
+
+    metadata = {
+        "summary": "",
+        "category": "",
+        "file_count": file_count,
+        "has_images": image_count > 0,
+        "image_count": image_count,
+    }
+
+    # ถ้ามี LLM และมี raw_text → สรุปสั้นๆ
+    if llm is not None and raw_text.strip():
+        try:
+            messages = [
+                {
+                    "role": "user",
+                    "content": (
+                        "สรุปสินค้านี้เป็นภาษาไทย กระชับ ไม่เกิน 100 คำ จากข้อมูลต่อไปนี้:\n"
+                        f"{raw_text[:3000]}\n\n"
+                        "ระบุ: ชื่อสินค้า, ประเภท, ลักษณะเด่น"
+                    ),
+                }
+            ]
+            summary = llm.chat(
+                messages,
+                model="google/gemini-2.5-flash",
+                temperature=0.3,
+                max_tokens=512,
+                stream=False,
+                source="ingestion.metadata_summary",
+            )
+            metadata["summary"] = summary.strip()
+        except Exception:
+            pass  # ไม่สำคัญ — metadata พื้นฐานยังเก็บได้
+
+    # ถ้าไม่มี LLM → ใช้ text preview เป็น summary
+    if not metadata["summary"] and raw_text:
+        metadata["summary"] = raw_text[:200].replace("\n", " ")
+
+    record["metadata"] = metadata
+    product_db.save(product_id, record)
 
 
 def check_and_mark_stale(product_id: str) -> bool:

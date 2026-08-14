@@ -123,25 +123,30 @@ class LLMClient:
         status: str = "success",
         error_message: str | None = None,
     ) -> None:
-        """ยิง log ไป AI Usage Hub — fire-and-forget."""
-        entry = make_entry(
-            provider="openrouter",
-            model=model,
-            operation="chat.completions",
-            source=source,
-            duration_ms=duration_ms,
-            attempt=attempt,
-            status=status,
-            error_message=error_message,
-        )
-        if usage:
-            entry["prompt_tokens"] = usage.get("prompt_tokens")
-            entry["completion_tokens"] = usage.get("completion_tokens")
-            cost = usage.get("cost")
-            if cost is not None:
-                entry["cost_usd"] = float(cost)
-            entry["raw_usage"] = usage
-        log_ai_usage(entry)
+        """ยิง log ไป AI Usage Hub — fire-and-forget.
+
+        ห้ามให้ error ใน logging ทำลาย LLM call หลัก — wrap ด้วย try/except
+        """
+        try:
+            entry = make_entry(
+                provider="openrouter",
+                model=model,
+                operation="chat.completions",
+                source=source,
+                duration_ms=duration_ms,
+                status=status,
+                error_message=error_message,
+            )
+            if usage:
+                entry["prompt_tokens"] = usage.get("prompt_tokens")
+                entry["completion_tokens"] = usage.get("completion_tokens")
+                cost = usage.get("cost")
+                if cost is not None:
+                    entry["cost_usd"] = float(cost)
+                entry["raw_usage"] = usage
+            log_ai_usage(entry)
+        except Exception:
+            pass  # fire-and-forget — ไม่ให้ logging error ทำลาย main flow
 
     def _chat_stream(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         """Stream chat completion and display real-time output.
