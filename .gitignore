@@ -48,6 +48,10 @@ brand/terms.json
 brand/visual.json
 brand/audience.json
 
+# Asset Library — user uploaded files + catalog DB (system space)
+brand/assets/
+cache/assets/
+
 # IDE / editor
 .idea/
 .vscode/

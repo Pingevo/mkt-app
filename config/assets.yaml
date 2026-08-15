@@ -1,0 +1,39 @@
+# Asset Library config — วัตถุดิบกลางของแบรนด์
+# ไฟล์ที่ใช้ซ้ำข้ามการรัน (โลโก้ รูปพรีเซนเตอร์ เพลง ฯลฯ) — agent ค้นและหยิบใช้เองผ่าน tool calling
+
+# taxonomy — กำหนดก่อนเปิด auto-tagging (มาตรฐาน DAM: Papirfly/Floniks)
+# LLM ต้องเลือกจาก enum เหล่านี้เท่านั้น ไม่ใช่ free text — กัน tag สะเปะสะปะ
+taxonomy:
+  subject: [person, product, logo, background, graphic, scene, other]
+  style: [photo, illustration, graphic, "3d", other]
+
+# ประเภทไฟล์ — แนวเดียวกับ config/ingestion.yaml
+supported_formats:
+  image: [.jpg, .jpeg, .png, .webp, .gif, .bmp]
+  audio: [.mp3, .wav, .m4a, .aac]
+  video: [.mp4, .mov, .webm]
+  text:  [.txt, .md, .pdf]
+  other: []          # ฟอนต์/svg/psd — เก็บได้ แต่ tag จากชื่อไฟล์+user_note เท่านั้น
+
+max_file_size_mb:
+  image: 20
+  audio: 100
+  video: 200
+  text: 50
+  other: 50
+
+# auto-tagging — LLM vision บรรยาย + ติด tag ตาม taxonomy ครั้งเดียวตอนอัปโหลด
+tagging:
+  model: google/gemini-3.7-flash      # ตาม model ปัจจุบันของระบบ
+  temperature: 0.2
+  max_tokens: 1024
+  description_max_words: 60
+
+# embedding — ใช้ค่าเดียวกับ content_history (มาตรฐานเดิมของระบบ)
+embedding:
+  model: openai/text-embedding-3-small
+
+# retrieval — hybrid: filter type/subject ก่อน แล้ว rank ด้วย embedding similarity
+query:
+  default_top_k: 8          # จำนวนผลลัพธ์ default ของ list_assets
+  max_top_k: 20

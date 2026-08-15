@@ -1201,6 +1201,167 @@ async def api_voice_learn_upload(request: Request) -> JSONResponse:
 
 
 # ============================================================
+# Asset Library — วัตถุดิบกลางของแบรนด์ (โลโก้ รูปคน เพลง ฯลฯ)
+# agent ค้นและหยิบใช้เองผ่าน tool calling
+# ============================================================
+
+@app.get("/api/assets")
+def api_assets_list() -> JSONResponse:
+    """list_all() — สำหรับ UI แสดง asset ทั้งหมด."""
+    from src import asset_library
+    return JSONResponse({"assets": asset_library.list_all()})
+
+
+@app.get("/api/assets/{asset_id}")
+def api_assets_get(asset_id: str) -> JSONResponse:
+    """record เต็มของ asset หนึ่ง."""
+    from src import asset_library
+    rec = asset_library.get_asset(asset_id)
+    if not rec:
+        return JSONResponse({"error": "ไม่พบ asset"}, status_code=404)
+    return JSONResponse(rec)
+
+
+@app.post("/api/assets/upload")
+async def api_assets_upload(
+    files: list[UploadFile] = File(...),
+    user_note: str = Form(""),
+) -> JSONResponse:
+    """อัปโหลดไฟล์เข้า brand/assets/ → background ingest (auto-tag + embed).
+
+    เหมือน /api/upload ของ product — เซฟไฟล์ก่อน แล้ว trigger ingestion ใน background thread.
+    """
+    from src import asset_library
+
+    assets_dir = Path(__file__).parent / "brand" / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+
+    saved: list[str] = []
+    for f in files:
+        if not f.filename or f.filename.startswith(".") or f.filename == ".DS_Store":
+            continue
+        dest = assets_dir / f.filename
+        # กันชนชื่อซ้ำ
+        if dest.exists():
+            stem, suffix = dest.stem, dest.suffix
+            i = 1
+            while dest.exists():
+                dest = assets_dir / f"{stem}_{i}{suffix}"
+                i += 1
+        content = await f.read()
+        dest.write_bytes(content)
+        saved.append(dest.name)
+
+    if not saved:
+        return JSONResponse({"error": "ไม่มีไฟล์ที่บันทึก"}, status_code=400)
+
+    # trigger ingestion ใน background (auto-tag + embed)
+    def _run():
+        llm = asset_library.make_llm()
+        try:
+            for name in saved:
+                asset_library.ingest_asset(assets_dir / name, llm=llm, user_note=user_note)
+        except Exception as e:
+            print(f"[AssetLibrary] ingest error: {e}", flush=True)
+        finally:
+            if llm:
+                llm.close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    return JSONResponse({"ok": True, "files": saved})
+
+
+@app.post("/api/assets/{asset_id}/update")
+async def api_assets_update(asset_id: str, request: Request) -> JSONResponse:
+    """HITL — user แก้ metadata (tags/description/subject/style/user_note)."""
+    from src import asset_library
+    body = await request.json()
+    result = asset_library.update_asset(
+        asset_id,
+        tags=body.get("tags"),
+        description=body.get("description"),
+        subject=body.get("subject"),
+        style=body.get("style"),
+        user_note=body.get("user_note"),
+    )
+    if not result:
+        return JSONResponse({"error": "ไม่พบ asset"}, status_code=404)
+    return JSONResponse(result)
+
+
+@app.post("/api/assets/{asset_id}/delete")
+async def api_assets_delete(asset_id: str, request: Request) -> JSONResponse:
+    """ลบ asset + ลบไฟล์จริง."""
+    from src import asset_library
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    remove_file = body.get("remove_file", True)
+    ok = asset_library.delete_asset(asset_id, remove_file=remove_file)
+    if not ok:
+        return JSONResponse({"error": "ไม่พบ asset"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/assets/file/{asset_id}")
+def api_assets_file(asset_id: str):
+    """serve ไฟล์จริง — สำหรับ thumbnail ใน UI (pattern เดียวกับ /api/product_image)."""
+    from src import asset_library
+    from fastapi import Response
+    rec = asset_library.get_asset(asset_id)
+    if not rec:
+        return JSONResponse({"error": "ไม่พบ asset"}, status_code=404)
+    p = Path(rec.get("path", ""))
+    if not p.exists():
+        return JSONResponse({"error": "ไฟล์ไม่มี"}, status_code=404)
+    import mimetypes
+    ct, _ = mimetypes.guess_type(str(p))
+    return Response(content=p.read_bytes(), media_type=ct or "application/octet-stream")
+
+
+@app.post("/api/assets/reingest")
+async def api_assets_reingest(request: Request) -> JSONResponse:
+    """สแกน brand/assets/ ใหม่ — สำหรับปุ่ม 'สแกนใหม่' หรือกรณี user โยนไฟล์ตรงเข้าโฟลเดอร์."""
+    from src import asset_library
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    force = body.get("force", False)
+
+    def _run():
+        llm = asset_library.make_llm()
+        try:
+            asset_library.ingest_all(llm=llm, force=force)
+        except Exception as e:
+            print(f"[AssetLibrary] reingest error: {e}", flush=True)
+        finally:
+            if llm:
+                llm.close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return JSONResponse({"ok": True, "message": "เริ่มสแกนใหม่แล้ว"})
+
+
+@app.get("/api/assets_config")
+def api_assets_config() -> JSONResponse:
+    """taxonomy + ขนาดไฟล์สูงสุด — สำหรับ UI แสดง dropdown + ข้อจำกัด."""
+    from src import asset_library
+    cfg = asset_library._load_config()
+    return JSONResponse({
+        "taxonomy": cfg.get("taxonomy", {}),
+        "max_file_size_mb": cfg.get("max_file_size_mb", {}),
+        "supported_formats": cfg.get("supported_formats", {}),
+    })
+
+
+# ============================================================
 # Video Style Analysis — วิเคราะห์วิดีโอคู่แข่ง → style profile
 # (Style Reverse-Engineering จาก Notion "GOODBYE CAPCUT" prompt #2)
 # ============================================================
@@ -3557,6 +3718,8 @@ function loadBrandFiles() {
     html += '<div class="brand-file-item" onclick="editBrandSection(\'profile\')">📋 ประวัติแบรนด์ (Profile)</div>';
     html += '<div class="brand-file-item" onclick="editBrandSection(\'audience\')">👥 กลุ่มเป้าหมาย (Audience)</div>';
     html += '<div class="brand-file-item" onclick="editBrandSection(\'visual\')">🎨 แนวทางภาพ (Visual)</div>';
+    html += '<div style="border-top:1px solid #2a2d3a;margin:8px 0"></div>';
+    html += '<div class="brand-file-item" onclick="openAssetLibraryModal()">🗂 Asset Library (วัตถุดิบแบรนด์)</div>';
     el.innerHTML = html;
   });
 }
@@ -3751,6 +3914,214 @@ function saveBrandFileModal() {
       status.className = 'upload-status err';
       status.textContent = data.error || 'เกิดข้อผิดพลาด';
     }
+  });
+}
+
+// ============================================================
+// Asset Library — วัตถุดิบแบรนด์ (โลโก้ รูปคน เพลง ฯลฯ)
+// ============================================================
+
+let _assetConfig = { taxonomy: { subject: [], style: [] } };
+let _assetsPolling = null;
+let _assetRenderToken = 0;   // กัน race condition — fetch เก่าที่เสร็จทีหลังจะข้าม
+
+function openAssetLibraryModal() {
+  // โหลด config (taxonomy) ก่อน แล้วโหลด asset list
+  fetch('/api/assets_config').then(r => r.json()).then(cfg => {
+    _assetConfig = cfg;
+    const overlay = document.getElementById('asset-overlay');
+    overlay.className = 'settings-modal-overlay visible';
+    loadAssetsList();
+  });
+}
+
+function closeAssetModal() {
+  document.getElementById('asset-overlay').className = 'settings-modal-overlay';
+  if (_assetsPolling) { clearInterval(_assetsPolling); _assetsPolling = null; }
+}
+
+function loadAssetsList() {
+  const myToken = ++_assetRenderToken;
+  fetch('/api/assets').then(r => r.json()).then(data => {
+    if (myToken !== _assetRenderToken) return;   // stale — มี render ใหม่กว่าแล้ว
+    const assets = data.assets || [];
+    const body = document.getElementById('asset-modal-body');
+    let html = '';
+
+    // ปุ่มอัปโหลด
+    html += '<div style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+    html += '<label style="background:#7c8aff;color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600">+ อัปโหลดไฟล์<input type="file" multiple style="display:none" onchange="uploadAssets(this.files)"></label>';
+    html += '<button onclick="reingestAssets()" style="background:#2a2d3a;color:#e0e0e0;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid #3a3d4a">สแกนใหม่</button>';
+    html += '<span id="asset-upload-status" class="upload-status" style="font-size:12px"></span>';
+    html += '</div>';
+
+    if (assets.length === 0) {
+      html += '<div style="color:#555;font-size:13px;padding:24px;text-align:center">ยังไม่มี asset — อัปโหลดไฟล์ (โลโก้ รูปคน เพลง) เพื่อให้ agent ใช้ข้ามการรัน</div>';
+    } else {
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px">';
+      for (const a of assets) {
+        html += _renderAssetCard(a);
+      }
+      html += '</div>';
+    }
+
+    body.innerHTML = html;
+  });
+}
+
+function _renderAssetCard(a) {
+  const isImage = a.type === 'image';
+  const thumb = isImage
+    ? '<img src="/api/assets/file/' + a.id + '" style="width:100%;height:120px;object-fit:cover;border-radius:6px;background:#0f1117">'
+    : '<div style="width:100%;height:120px;display:flex;align-items:center;justify-content:center;font-size:32px;background:#0f1117;border-radius:6px">' + _assetIcon(a.type) + '</div>';
+
+  const statusBadge = a.status === 'ready'
+    ? '<span style="color:#4caf50;font-size:10px">●พร้อม</span>'
+    : '<span style="color:#f44336;font-size:10px">●' + escapeHtml(a.status || 'error') + '</span>';
+
+  return '<div style="background:#1c1e2a;border-radius:10px;padding:10px;cursor:pointer" onclick="editAsset(\'' + a.id + '\')">' +
+    thumb +
+    '<div style="margin-top:8px;font-size:12px;font-weight:600;color:#e0e0e0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(a.file) + '</div>' +
+    '<div style="margin-top:4px;font-size:11px;color:#888">' + escapeHtml(a.subject || '') + ' · ' + escapeHtml(a.type) + ' ' + statusBadge + '</div>' +
+    (a.description ? '<div style="margin-top:4px;font-size:11px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(a.description) + '</div>' : '') +
+    '</div>';
+}
+
+function _assetIcon(type) {
+  const icons = { audio: '🎵', video: '🎬', text: '📄', other: '📦' };
+  return icons[type] || '📄';
+}
+
+function uploadAssets(files) {
+  if (!files || !files.length) return;
+  const status = document.getElementById('asset-upload-status');
+  status.textContent = 'กำลังอัปโหลด...';
+  status.className = 'upload-status';
+
+  const formData = new FormData();
+  for (const f of files) formData.append('files', f);
+  formData.append('user_note', '');
+
+  fetch('/api/assets/upload', { method: 'POST', body: formData })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        status.className = 'upload-status ok';
+        status.textContent = 'อัปโหลดแล้ว — กำลัง tag อัตโนมัติ...';
+        // poll ทุก 3 วินาทีจนกว่าจะเห็น asset ใหม่
+        if (_assetsPolling) clearInterval(_assetsPolling);
+        let attempts = 0;
+        _assetsPolling = setInterval(() => {
+          loadAssetsList();
+          attempts++;
+          if (attempts > 20) { clearInterval(_assetsPolling); _assetsPolling = null; }
+        }, 3000);
+      } else {
+        status.className = 'upload-status err';
+        status.textContent = data.error || 'เกิดข้อผิดพลาด';
+      }
+    });
+}
+
+function reingestAssets() {
+  fetch('/api/assets/reingest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force: false }) })
+    .then(r => r.json())
+    .then(data => {
+      const status = document.getElementById('asset-upload-status');
+      if (data.ok) {
+        status.className = 'upload-status ok';
+        status.textContent = 'กำลังสแกนใหม่...';
+        if (_assetsPolling) clearInterval(_assetsPolling);
+        let attempts = 0;
+        _assetsPolling = setInterval(() => {
+          loadAssetsList();
+          attempts++;
+          if (attempts > 20) { clearInterval(_assetsPolling); _assetsPolling = null; }
+        }, 3000);
+      }
+    });
+}
+
+function editAsset(id) {
+  // หยุด polling ถ้ามี — กันทับหน้า edit ที่กำลังดู
+  if (_assetsPolling) { clearInterval(_assetsPolling); _assetsPolling = null; }
+  const myToken = ++_assetRenderToken;
+  fetch('/api/assets/' + id).then(r => r.json()).then(a => {
+    if (myToken !== _assetRenderToken) return;   // stale — มี render ใหม่กว่าแล้ว
+    const body = document.getElementById('asset-modal-body');
+    const subjects = (_assetConfig.taxonomy && _assetConfig.taxonomy.subject) || ['other'];
+    const styles = (_assetConfig.taxonomy && _assetConfig.taxonomy.style) || ['other'];
+
+    let h = '<div style="margin-bottom:12px"><button onclick="loadAssetsList()" style="background:#2a2d3a;color:#e0e0e0;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;border:1px solid #3a3d4a">← กลับ</button></div>';
+
+    // preview
+    if (a.type === 'image') {
+      h += '<img src="/api/assets/file/' + a.id + '" style="width:100%;max-height:300px;object-fit:contain;border-radius:8px;background:#0f1117;margin-bottom:12px">';
+    }
+
+    h += '<div style="font-size:13px;color:#888;margin-bottom:4px">ไฟล์: ' + escapeHtml(a.file) + ' · ' + escapeHtml(a.type) + '</div>';
+    h += '<div style="font-size:11px;color:#555;margin-bottom:12px">ID: ' + escapeHtml(a.id) + ' · hash: ' + escapeHtml((a.hash || '').substring(0, 12)) + '...</div>';
+
+    // subject dropdown
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Subject</label><select id="asset-subject" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">';
+    for (const s of subjects) h += '<option value="' + s + '"' + (a.subject === s ? ' selected' : '') + '>' + s + '</option>';
+    h += '</select></div>';
+
+    // style dropdown
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Style</label><select id="asset-style" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">';
+    for (const s of styles) h += '<option value="' + s + '"' + (a.style === s ? ' selected' : '') + '>' + s + '</option>';
+    h += '</select></div>';
+
+    // tags
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Tags <span style="color:#555">(คั่นด้วยจุลภาค)</span></label><textarea id="asset-tags" style="width:100%;min-height:50px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml((a.tags || []).join(', ')) + '</textarea></div>';
+
+    // description
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Description (AI บรรยาย — แก้ได้)</label><textarea id="asset-description" style="width:100%;min-height:80px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(a.description || '') + '</textarea></div>';
+
+    // user_note
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">หมายเหตุของคุณ</label><textarea id="asset-user-note" style="width:100%;min-height:50px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical" placeholder="เช่น โลโก้หลักใช้ทุกแพลตฟอร์ม">' + escapeHtml(a.user_note || '') + '</textarea></div>';
+
+    // ปุ่ม
+    h += '<div style="display:flex;gap:8px;align-items:center">';
+    h += '<button onclick="saveAsset(\'' + a.id + '\')" style="background:#7c8aff;color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600">บันทึก</button>';
+    h += '<button onclick="deleteAsset(\'' + a.id + '\',\'' + escapeHtml(a.file).replace(/'/g, "\\'") + '\')" style="background:#f44336;color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px">ลบ</button>';
+    h += '<span id="asset-save-status" class="upload-status" style="font-size:12px"></span>';
+    h += '</div>';
+
+    body.innerHTML = h;
+  });
+}
+
+function saveAsset(id) {
+  const status = document.getElementById('asset-save-status');
+  const tags = document.getElementById('asset-tags').value.split(',').map(t => t.trim()).filter(Boolean);
+  const payload = {
+    subject: document.getElementById('asset-subject').value,
+    style: document.getElementById('asset-style').value,
+    tags: tags,
+    description: document.getElementById('asset-description').value,
+    user_note: document.getElementById('asset-user-note').value,
+  };
+  fetch('/api/assets/' + id + '/update', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  }).then(r => r.json()).then(data => {
+    if (data.id) {
+      status.className = 'upload-status ok';
+      status.textContent = 'บันทึกแล้ว ✓';
+      setTimeout(() => loadAssetsList(), 800);
+    } else {
+      status.className = 'upload-status err';
+      status.textContent = data.error || 'เกิดข้อผิดพลาด';
+    }
+  });
+}
+
+function deleteAsset(id, filename) {
+  if (!confirm('ลบ ' + filename + ' ?')) return;
+  fetch('/api/assets/' + id + '/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ remove_file: true }),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) loadAssetsList();
   });
 }
 
@@ -6461,6 +6832,16 @@ function loadCredits() {
     <div class="settings-actions">
       <button class="settings-cancel" onclick="closeBrandModal()">ยกเลิก</button>
       <button class="settings-save" onclick="saveBrandFileModal()">บันทึก</button>
+    </div>
+  </div>
+</div>
+<div class="settings-modal-overlay" id="asset-overlay">
+  <div class="settings-modal" style="width:720px;max-height:85vh;overflow-y:auto">
+    <h3>🗂 Asset Library — วัตถุดิบแบรนด์</h3>
+    <p style="font-size:12px;color:#888;margin:0 0 14px 0">อัปโหลดไฟล์ที่ใช้ซ้ำข้ามการรัน (โลโก้ รูปพรีเซนเตอร์ เพลง) — AI บรรยายและติด tag อัตโนมัติ แก้ไข metadata ได้ทุกไฟล์</p>
+    <div id="asset-modal-body"></div>
+    <div class="settings-actions">
+      <button class="settings-cancel" onclick="closeAssetModal()">ปิด</button>
     </div>
   </div>
 </div>

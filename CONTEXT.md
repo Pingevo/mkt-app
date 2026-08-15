@@ -44,9 +44,22 @@
 ### Brand Voice (เสียงแบรนด์)
 ลักษณะเฉพาะของแบรนด์ที่ทำให้คนรู้ว่า "นี่คือแบรนด์นี้" แม้ไม่เห็นโลโก้
 
-ในระบบนี้: เก็บใน `brand/` folder (brand_profile.md, tone_of_voice.md, target_audience.md, visual_guidelines.md) โหลดโดย `brand_loader.py` ส่งให้ทุก agent อัตโนมัติ
+ในระบบนี้: เก็บใน `brand/` folder (voice.json, terms.json, audience.json, brand_profile.md, visual.json) โหลดโดย `brand_loader.py` ส่งให้ทุก agent อัตโนมัติ
 
 ไม่ต้องทำเพิ่ม — มีอยู่แล้วและทำงานอยู่
+
+### Asset (วัตถุดิบแบรนด์)
+ไฟล์ที่ใช้ซ้ำข้ามการรัน ข้ามสินค้า (โลโก้ รูปพรีเซนเตอร์ เพลง แบนเนอร์) ต่างจาก product data (ของเฉพาะสินค้าใน `data/{product}/`) และ brand rules (text กฎใน `brand/*.json`)
+
+ในระบบนี้: เก็บใน `brand/assets/` (ไฟล์จริง) + `cache/assets/db.json` (catalog + embeddings) จัดการโดย `asset_library.py`
+
+### Auto-tagging
+LLM บรรยาย + ติด tag ตาม taxonomy ใน `config/assets.yaml` ครั้งเดียวตอนอัปโหลด — จ่าย LLM ครั้งเดียวต่อไฟล์ ถ้า hash ไม่เปลี่ยนจะข้าม
+
+### Hybrid Search
+วิธีค้น asset: filter ด้วย structured field (type/subject ตาม taxonomy) ก่อน แล้ว rank ด้วย embedding similarity — ใช้ embedding model เดียวกับ content_history
+
+ความสัมพันธ์กับ Auto Mode: agent เรียก `list_assets(query, type, subject)` ผ่าน tool calling เพื่อค้นและเลือก asset เอง เหมือนที่ `select_product_auto` เรียก `list_products()`
 
 ## การตรวจซ้ำ
 
