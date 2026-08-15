@@ -30,6 +30,9 @@ from .brand_loader import load_brand_context
 from .config_loader import get_agent_config, load_config
 from .data_loader import detect_data_files, get_agent_data
 from .llm_client import LLMClient
+
+# Platform display names — ใช้ในหลายที่ นิยามครั้งเดียว
+_PLATFORM_NAMES = {"facebook": "Facebook", "tiktok": "TikTok"}
 from . import product_db
 
 console = Console()
@@ -338,6 +341,467 @@ class Orchestrator:
                 self.results["content_creator"] = raw_result
                 self.results["content_creator_markdown"] = raw_result
             return raw_result
+        finally:
+            if own:
+                llm.close()
+
+    # ------------------------------------------------------------------
+    #  Auto mode — agent เลือกสินค้าเอง + คอนเทนต์ไม่ซ้ำ
+    # ------------------------------------------------------------------
+
+    def select_product_auto(
+        self,
+        llm: LLMClient | None = None,
+        quick_brief: str = "",
+        platforms: list[str] | None = None,
+        product_count: int = 1,
+    ) -> dict[str, Any]:
+        """Phase 1 ของ auto mode — ให้ LLM เลือกสินค้า + แนวคิดที่ยังไม่ซ้ำ.
+
+        ใช้ tool calling — LLM เรียก function เอง:
+          - list_products() → ดูสินค้าทั้งหมด (metadata สั้น)
+          - get_product_detail(product_id) → ดูสเปคเต็มของสินค้าที่สนใจ
+          - get_content_history() → ดูประวัติคอนเทนต์ที่เคยทำ
+
+        Open-ended: LLM สร้างสรรค์ได้อิสระ — เลือก 1 ชิ้น, 2 ชิ้นมาเปรียบเทียบ, หรือหลายชิ้นมารวม
+        user กำหนดทิศทางได้ผ่าน quick_brief (คำสั่งเฉพาะรอบ ไม่ใช่ instruction ถาวร)
+
+        คืน JSON: {product_ids: [...], concept, reason}
+        """
+        import json as _json
+        from . import content_history
+        from . import pillar_manager
+        from .config_loader import get_section
+
+        own = llm is None
+        if own:
+            llm = self._make_client()
+        try:
+            project_root = Path(__file__).resolve().parent.parent
+
+            # อ่าน config
+            auto_cfg = get_section(self.config, "auto_mode")
+            ch_cfg = get_section(self.config, "content_history")
+            pillars = self.config.get("pillars", [])
+
+            # ตรวจว่ามีสินค้า ready อย่างน้อย 1 ชิ้น
+            all_products = product_db.get_all_products()
+            ready_count = sum(
+                1 for p in all_products
+                if p.get("product_id") and not p.get("product_id", "").startswith(".")
+                and p.get("status") == product_db.STATUS_READY
+            )
+            if ready_count == 0:
+                return {"error": "ไม่มีสินค้าที่พร้อมในระบบ — กรุณาอัปโหลดและ ingest สินค้าก่อน"}
+
+            # ค่าจาก config (ไม่ใช่ hardcode)
+            summary_len = auto_cfg.get("list_summary_length", 200)
+            summary_fallback_len = auto_cfg.get("list_summary_fallback", 300)
+            detail_text_len = auto_cfg.get("detail_text_length", 3000)
+            history_limit = ch_cfg.get("default_limit", 50)
+
+            # --- tool definitions (OpenAI schema) ---
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list_products",
+                        "description": "ดูรายการสินค้าทั้งหมดที่พร้อมใช้งาน (metadata สั้น) — เรียกครั้งแรกเพื่อดูตัวเลือก",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "category": {
+                                    "type": "string",
+                                    "description": "กรองตามหมวดหมู่ (optional) — เช่น 'สมาร์ทวอทช์', 'เครื่องดื่ม'",
+                                },
+                            },
+                            "required": [],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_product_detail",
+                        "description": "ดูสเปคสินค้าเต็มของสินค้าที่สนใจ — เรียกหลังจาก list_products แล้วเลือกสินค้าที่อยากดูละเอียด",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "product_id": {
+                                    "type": "string",
+                                    "description": "ชื่อสินค้า (product_id) ที่ได้จาก list_products",
+                                },
+                            },
+                            "required": ["product_id"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_content_history",
+                        "description": "ดูประวัติคอนเทนต์ที่เคยสร้างไปแล้ว — เพื่อหลีกเลี่ยงการทำซ้ำ",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "product_id": {
+                                    "type": "string",
+                                    "description": "ดูประวัติเฉพาะสินค้านี้ (optional) — ถ้าไม่ใส่จะดูทั้งหมด",
+                                },
+                            },
+                            "required": [],
+                        },
+                    },
+                },
+            ]
+
+            # --- tool handlers (function จริง) ---
+            def _list_products(category: str = "") -> list[dict]:
+                products = product_db.get_all_products()
+                result = []
+                for p in products:
+                    pid = p.get("product_id", "")
+                    if not pid or pid.startswith("."):
+                        continue
+                    if p.get("status") != product_db.STATUS_READY:
+                        continue
+                    meta = product_db.get_product_metadata(pid)
+                    if category and category.lower() not in (meta.get("category", "") or "").lower():
+                        continue
+                    # ถ้า summary ว่าง → ดึงส่วนแรกของ text context มาแทน
+                    summary = meta.get("summary", "")
+                    if not summary:
+                        ctx = product_db.get_agent_context(pid)
+                        text = ctx.get("text", "")
+                        summary = text[:summary_fallback_len].replace("\n", " ").strip()
+                    result.append({
+                        "product_id": pid,
+                        "summary": summary[:summary_len],
+                        "category": meta.get("category", ""),
+                        "image_count": meta.get("image_count", 0),
+                    })
+                return result
+
+            def _get_product_detail(product_id: str) -> dict:
+                if not product_db.is_ready(product_id):
+                    return {"error": f"สินค้า {product_id} ไม่พร้อมหรือไม่มีในระบบ"}
+                ctx = product_db.get_agent_context(product_id)
+                return {
+                    "product_id": product_id,
+                    "text_context": ctx.get("text", "")[:detail_text_len],
+                    "image_count": len(ctx.get("image_paths", [])),
+                }
+
+            def _get_content_history(product_id: str = "") -> list[dict]:
+                if product_id:
+                    return content_history.get_entries_for_product(
+                        project_root, product_id, config=ch_cfg,
+                    )
+                return content_history.get_recent_entries(
+                    project_root, config=ch_cfg,
+                )
+
+            tool_handlers = {
+                "list_products": _list_products,
+                "get_product_detail": _get_product_detail,
+                "get_content_history": _get_content_history,
+            }
+
+            # --- prompt สำหรับ LLM (อ่านจาก config) ---
+            platform_str = ""
+            if platforms:
+                platform_names = _PLATFORM_NAMES
+                selected = [platform_names.get(p, p) for p in platforms]
+                platform_str = f"\nแพลตฟอร์มที่ต้องสร้าง: {' หรือ '.join(selected)}"
+
+            brief_section = ""
+            if quick_brief:
+                brief_section = f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
+
+            # Output schema — ใช้ product_ids เสมอ (รองรับทั้ง 1 และหลายชิ้น)
+            count_hint = ""
+            if product_count > 1:
+                count_hint = f"\n\nUser ต้องการให้เลือก {product_count} สินค้ามาทำคอนเทนต์รวมกันใน 1 โพสต์"
+            else:
+                count_hint = "\n\nUser เลือกโหมดแยก — เลือกสินค้า 1 ชิ้นเท่านั้น"
+            output_schema = '{"product_ids": ["สินค้า1", ...], "pillar": "หมวดคอนเทนต์", "concept": "แนวคิด", "reason": "เหตุผล"}'
+
+            # ใช้ prompt จาก config (open-ended) + pillar context
+            base_prompt = auto_cfg.get("selection_prompt", "")
+
+            # เพิ่ม Content Pillars context — บอก LLM ว่ามีหมวดอะไร ใช้ไปกี่ครั้ง
+            pillar_ctx = ""
+            if pillars:
+                history = content_history.load_history(project_root)
+                usage = pillar_manager.get_pillar_usage(history, pillars)
+                pillar_ctx = pillar_manager.build_pillar_context(pillars, usage)
+                pillar_ctx = f"\n\n{pillar_ctx}\n"
+
+            system_prompt = (
+                f"{base_prompt}\n\n"
+                f"{pillar_ctx}"
+                f"รูปแบบคำตอบ JSON:\n   {output_schema}\n"
+                f"{count_hint}"
+            )
+
+            user_prompt = (
+                f"เลือกสินค้าและแนวคิดเพื่อสร้างคอนเทนต์{platform_str}{brief_section}\n\n"
+                f"ขั้นตอน: เรียก list_products() → เรียก get_content_history() → "
+                f"เรียก get_product_detail() สำหรับสินค้าที่สนใจ → ตอบ JSON\n\n"
+                f"สำคัญ: ต้องเลือก Content Pillar จาก list ใน system prompt "
+                f"และส่ง field \"pillar\" ใน JSON ด้วย\n"
+                f"สำคัญ: เลือก pillar ที่เหมาะสมกับจำนวนสินค้าที่เลือก "
+                f"(เช่น ถ้าเลือกสินค้า 1 ชิ้น ห้ามเลือก pillar ที่ต้องเปรียบเทียบหลายชิ้น)"
+            )
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            # --- tool calling loop (ค่าจาก config) ---
+            manager_cfg = get_agent_config(self.config, "manager")
+            response = llm.chat_with_tools(
+                messages,
+                tools=tools,
+                tool_handlers=tool_handlers,
+                model=manager_cfg.get("model"),
+                temperature=manager_cfg.get("temperature", 0.7),
+                max_tokens=auto_cfg.get("max_tokens", 4096),
+                max_retry_limit=manager_cfg.get("max_retry_limit", 3),
+                max_iterations=auto_cfg.get("max_iterations", 10),
+                source="orchestrator.select_product_auto",
+            )
+
+            # parse JSON จากคำตอบสุดท้าย
+            text = response.strip()
+            if text.startswith("```"):
+                lines = text.split("\n")
+                lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                text = "\n".join(lines)
+            try:
+                result = _json.loads(text)
+            except _json.JSONDecodeError:
+                err_len = auto_cfg.get("raw_text_preview_length", 500)
+                return {"error": f"LLM ไม่คืน JSON ที่ถูกต้อง: {response[:err_len]}"}
+
+            # รองรับทั้ง product_id (1 ชิ้น) และ product_ids (หลายชิ้น)
+            if "product_id" in result and "product_ids" not in result:
+                result["product_ids"] = [result["product_id"]]
+            product_ids = result.get("product_ids", [])
+            if not product_ids:
+                return {"error": "LLM ไม่ได้เลือกสินค้า"}
+
+            # ตรวจทุกสินค้าที่เลือก — ต้องมีจริงในระบบ
+            all_ready = [
+                p["product_id"] for p in product_db.get_all_products()
+                if p.get("status") == product_db.STATUS_READY
+                and not p.get("product_id", "").startswith(".")
+            ]
+            validated = []
+            for pid in product_ids:
+                pid = pid.strip() if isinstance(pid, str) else str(pid)
+                if product_db.is_ready(pid):
+                    validated.append(pid)
+                else:
+                    for vpid in all_ready:
+                        if pid.lower() in vpid.lower() or vpid.lower() in pid.lower():
+                            validated.append(vpid)
+                            break
+                    else:
+                        return {"error": f"LLM เลือกสินค้าที่ไม่มีในระบบ: {pid}"}
+            result["product_ids"] = validated
+            result["product_id"] = validated[0]
+
+            # ถ้า LLM ไม่ส่ง pillar กลับมา → infer จาก concept
+            if not result.get("pillar") and pillars:
+                pillar_keywords = self.config.get("pillar_keywords", {})
+                result["pillar"] = pillar_manager.infer_pillar(
+                    result.get("concept", ""), pillars, pillar_keywords,
+                )
+
+            return result
+        finally:
+            if own:
+                llm.close()
+
+    def run_content_creator_auto(
+        self,
+        llm: LLMClient | None = None,
+        quick_brief: str = "",
+        media_type: str = "",
+        platforms: list[str] | None = None,
+        product_count: int = 1,
+        status_callback=None,
+    ) -> dict[str, Any]:
+        """Auto mode — agent เลือกสินค้าเอง + สร้างคอนเทนต์ที่ไม่ซ้ำ.
+
+        2 phase:
+          1. select_product_auto() — LLM เลือกสินค้า + แนวคิด
+          2. run_content_creator() — สร้างคอนเทนต์จากสินค้าที่เลือก
+
+        Dedup ใช้ embeddings + cosine similarity (ตามมาตรฐานตลาด)
+
+        Returns:
+            dict ที่มี:
+            - product_ids: สินค้าที่เลือก (array)
+            - product_id: สินค้าแรก (backward compat)
+            - concept: แนวคิดที่เลือก
+            - reason: เหตุผลที่เลือก
+            - content: ผลลัพธ์ JSON จาก content_creator
+            - markdown: markdown สำหรับ display
+            - is_duplicate: ถ้าคอนเทนต์ซ้ำกับที่เคยทำ
+            - error: ถ้ามีปัญหา
+        """
+        import json as _json
+        from . import content_history
+        from .config_loader import get_section
+
+        own = llm is None
+        if own:
+            llm = self._make_client()
+        try:
+            # อ่าน config
+            auto_cfg = get_section(self.config, "auto_mode")
+            ch_cfg = get_section(self.config, "content_history")
+
+            # --- Phase 1: เลือกสินค้า ---
+            if status_callback:
+                status_callback("กำลังเลือกสินค้าและแนวคิด...")
+            selection = self.select_product_auto(
+                llm=llm, quick_brief=quick_brief, platforms=platforms,
+                product_count=product_count,
+            )
+            if "error" in selection:
+                return selection
+
+            chosen_pids = selection.get("product_ids", [])
+            chosen_concept = selection.get("concept") or selection.get("angle", "")
+            chosen_pillar = selection.get("pillar", "")
+            reason = selection.get("reason", "")
+
+            if status_callback:
+                status_callback(f"เลือก: {', '.join(chosen_pids)} — {chosen_concept}")
+
+            # --- Phase 2: สร้างคอนเทนต์ ---
+            multi_text_len = auto_cfg.get("multi_product_text_length", 2000)
+            if len(chosen_pids) == 1:
+                self.product_id = chosen_pids[0]
+            else:
+                self.product_id = chosen_pids[0]
+                multi_context = "\n\n--- สินค้าเพิ่มเติมสำหรับทำคอนเทนต์รวม ---\n"
+                for i, pid in enumerate(chosen_pids[1:], start=2):
+                    ctx = product_db.get_agent_context(pid)
+                    multi_context += f"\n=== สินค้าที่ {i}: {pid} ===\n"
+                    multi_context += ctx.get("text", "")[:multi_text_len]
+                    multi_context += f"\n--- สิ้นสุดสินค้าที่ {i} ---\n"
+                quick_brief = (quick_brief or "") + multi_context
+
+            # ส่งแนวคิดที่เลือกเป็น quick_brief เพิ่ม
+            auto_brief = f"แนวคิดที่ต้องใช้: {chosen_concept}"
+            if quick_brief:
+                auto_brief += f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
+            if platforms:
+                platform_names = _PLATFORM_NAMES
+                selected = [platform_names.get(p, p) for p in platforms]
+                if len(selected) == 1:
+                    auto_brief += f"\nแพลตฟอร์มที่ต้องสร้าง: {selected[0]} เท่านั้น"
+                else:
+                    auto_brief += f"\nแพลตฟอร์มที่เลือก: {' หรือ '.join(selected)}"
+
+            if status_callback:
+                status_callback(f"กำลังสร้างคอนเทนต์สำหรับ {', '.join(chosen_pids)}...")
+
+            # --- Phase 2: สร้างคอนเทนต์ + ตรวจซ้ำ (retry ถ้าซ้ำ) ---
+            project_root = Path(__file__).resolve().parent.parent
+            max_dedup_retries = int(ch_cfg.get("dedup_max_retries", 3))
+            content = ""
+            caption_summary = ""
+            platform_used = ""
+            dup_result = {"is_duplicate": False, "similarity": 0.0, "matched_entry": None}
+            retry_count = 0
+
+            for attempt in range(max_dedup_retries + 1):
+                # เพิ่ม feedback ให้ LLM รู้ว่าซ้ำ (รอบต่อๆ ไป)
+                attempt_brief = auto_brief
+                if retry_count > 0 and dup_result.get("is_duplicate"):
+                    matched = dup_result.get("matched_entry") or {}
+                    matched_caption = matched.get("caption_summary", "")[:200]
+                    attempt_brief = (
+                        auto_brief + "\n\n"
+                        f"--- คอนเทนต์ที่สร้างครั้งก่อนซ้ำกับที่เคยทำ (similarity {dup_result.get('similarity', 0):.2f}) ---\n"
+                        f"คอนเทนต์เดิมที่ซ้ำ: {matched_caption}\n"
+                        f"--- สิ้นสุด ---\n"
+                        f"สร้างคอนเทนต์ใหม่ที่แตกต่างจากด้านบนอย่างชัดเจน — เปลี่ยนมุมมอง/angle/เนื้อหา"
+                    )
+                    if status_callback:
+                        status_callback(f"คอนเทนต์ซ้ำ (ครั้งที่ {retry_count}) — กำลังสร้างใหม่...")
+
+                content = self.run_content_creator(
+                    "", "", "",
+                    llm=llm, quick_brief=attempt_brief,
+                    media_type=media_type,
+                )
+
+                # ดึง caption เพื่อตรวจซ้ำ
+                caption_summary = ""
+                platform_used = ""
+                try:
+                    parsed = _json.loads(content)
+                    posts = parsed.get("posts", [])
+                    if posts:
+                        first = posts[0]
+                        caption_summary = first.get("caption", "")
+                        platform_used = first.get("platform", "")
+                except (_json.JSONDecodeError, TypeError):
+                    pass
+
+                # ตรวจซ้ำ
+                dup_result = content_history.check_duplicate(
+                    project_root, caption_summary, config=ch_cfg,
+                )
+
+                if not dup_result.get("is_duplicate"):
+                    break  # ไม่ซ้ำ → ใช้ผลงานนี้
+
+                if attempt < max_dedup_retries:
+                    retry_count += 1
+
+            # แจ้ง user ถ้ายังซ้ำหลัง retry หมด
+            if dup_result.get("is_duplicate") and retry_count >= max_dedup_retries:
+                if status_callback:
+                    status_callback(
+                        f"⚠ ยังซ้ำหลังลอง {max_dedup_retries} ครั้ง — ใช้ผลงานล่าสุด (similarity {dup_result.get('similarity', 0):.2f})"
+                    )
+
+            # บันทึก history (1 entry ต่อการสร้าง — เก็บ product_ids ทั้งหมด + pillar)
+            content_history.record_entry(
+                project_root,
+                product_ids=chosen_pids,
+                concept=chosen_concept,
+                pillar=chosen_pillar,
+                platform=platform_used,
+                caption_summary=caption_summary,
+                config=ch_cfg,
+            )
+
+            markdown = self.results.get("content_creator_markdown", content)
+
+            return {
+                "product_ids": chosen_pids,
+                "product_id": chosen_pids[0],
+                "pillar": chosen_pillar,
+                "concept": chosen_concept,
+                "angle": chosen_concept,  # backward compat
+                "reason": reason,
+                "content": content,
+                "markdown": markdown,
+                "is_duplicate": dup_result.get("is_duplicate", False),
+                "similarity": dup_result.get("similarity", 0.0),
+                "dedup_retries": retry_count,
+            }
         finally:
             if own:
                 llm.close()

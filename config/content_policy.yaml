@@ -1,0 +1,50 @@
+content_history:
+  max_entries: 200
+  default_limit: 50
+  caption_summary_length: 500
+  caption_display_length: 150
+  dedup_enabled: true
+  dedup_model: openai/text-embedding-3-small
+  dedup_similarity_threshold: 0.85
+  dedup_window_days: 30
+  dedup_max_retries: 3
+pillars:
+- รีวิวสินค้า
+- เปรียบเทียบ
+- ทดสอบความทน
+- ฟังก์ชันเด่น
+- ไลฟ์สไตล์
+pillar_keywords:
+  รีวิวสินค้า:
+  - รีวิว
+  - แนะนำ
+  - นำเสนอ
+  - สินค้าใหม่
+  เปรียบเทียบ:
+  - เปรียบเทียบ
+  - เทียบ
+  - vs
+  - ต่างกัน
+  - เลือก
+  ทดสอบความทน:
+  - ทดสอบ
+  - ทิ้งน้ำ
+  - ทน
+  - ip68
+  - กันน้ำ
+  - ทิ้งพื้น
+  ฟังก์ชันเด่น:
+  - ฟังก์ชัน
+  - feature
+  - make friends
+  - geo-fence
+  - nio ai
+  - class disable
+  ไลฟ์สไตล์:
+  - ไลฟ์สไตล์
+  - ครอบครัว
+  - เดินทาง
+  - ทุกวัน
+  - ประจำวัน
+  - ห้องนอน
+  - บรรยากาศ

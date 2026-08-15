@@ -1,16 +1,29 @@
+# ============================================================
+# Media Generation — การสร้างรูป/วิดีโอ (operational)
+# ไฟล์เดียว แหล่งเดียว ไม่ซ้ำกับ agents.yaml
+# ============================================================
+
+# Image generation
 image_model: google/gemini-3.1-flash-image
 image_n: 1
 image_aspect_ratio: '16:9'
 image_timeout_seconds: 180
+
+# Video generation
 video_model: bytedance/seedance-2.0-fast
 video_duration: 5
 video_aspect_ratio: '16:9'
 video_resolution: 720p
 video_poll_interval_seconds: 5
 video_max_wait_seconds: 600
+
+# Auto-generate toggle
 auto_generate_image: true
 auto_generate_video: true
+
 # LLM ที่ใช้แก้ prompt เมื่อ auto-gen ถูก reject (copyright, safety, etc.)
 # auto mode: วนแก้จนกว่าจะออก (ไม่มี limit)
 # ask mode: ไม่ auto-retry ส่ง error ให้ user ตัดสินใจ
 media_retry_model: anthropic/claude-sonnet-4
+retry_temperature: 0.3
+retry_max_tokens: 1024

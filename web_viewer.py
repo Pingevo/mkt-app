@@ -27,7 +27,16 @@ from src.file_loader import load_file
 from src.config_loader import get_env
 from src import media_gen
 from src import product_db
-from src import angle_manager
+from src import content_history
+
+
+def _sys_cfg() -> dict:
+    """อ่าน system section จาก config — fallback {} ถ้าโหลดไม่ได้ (lazy, กัน circular import)."""
+    try:
+        from src.config_loader import load_config, get_section
+        return get_section(load_config(), "system", {})
+    except Exception:
+        return {}
 
 # Load .env
 try:
@@ -208,7 +217,7 @@ def api_credits() -> JSONResponse:
         resp = httpx.get(
             "https://openrouter.ai/api/v1/key",
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=10,
+            timeout=int(_sys_cfg().get("api_timeout_credits", 10)),
         )
         resp.raise_for_status()
         data = resp.json().get("data", {})
@@ -1015,6 +1024,65 @@ async def api_brand_save(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+# ============================================================
+# Content Pillars — จัดการเสาหลักคอนเทนต์
+# ============================================================
+
+@app.get("/api/pillars")
+def api_pillars_get() -> JSONResponse:
+    """อ่าน pillars + pillar_keywords จาก config/content_policy.yaml."""
+    import yaml as _yaml
+    cfg_path = PROJECT_ROOT / "config" / "content_policy.yaml"
+    if not cfg_path.exists():
+        return JSONResponse({"pillars": [], "pillar_keywords": {}})
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = _yaml.safe_load(f) or {}
+        pillars = data.get("pillars", [])
+        keywords = data.get("pillar_keywords", {})
+        # รับประกันว่าทุก pillar มี entry ใน keywords
+        for p in pillars:
+            if p not in keywords:
+                keywords[p] = []
+        return JSONResponse({"pillars": pillars, "pillar_keywords": keywords})
+    except Exception as e:
+        return JSONResponse({"error": f"อ่าน config ไม่ได้: {e}"}, status_code=500)
+
+
+@app.post("/api/pillars_save")
+async def api_pillars_save(request: Request) -> JSONResponse:
+    """บันทึก pillars + pillar_keywords กลับลง content_policy.yaml.
+
+    อ่านไฟล์เดิมทั้งหมด แก้เฉพาะส่วน pillars + pillar_keywords เก็บส่วนอื่นไว้
+    """
+    import yaml as _yaml
+    body = await request.json()
+    pillars = body.get("pillars", [])
+    keywords = body.get("pillar_keywords", {})
+
+    # กรอง keywords ให้มีแค่ pillar ที่มีอยู่
+    clean_keywords = {p: keywords.get(p, []) for p in pillars}
+
+    cfg_path = PROJECT_ROOT / "config" / "content_policy.yaml"
+    try:
+        # อ่านไฟล์เดิม (ถ้ามี) เพื่อรักษาส่วนอื่นไว้
+        existing = {}
+        if cfg_path.exists():
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                existing = _yaml.safe_load(f) or {}
+
+        # แทนที่เฉพาะส่วน pillars + pillar_keywords
+        existing["pillars"] = pillars
+        existing["pillar_keywords"] = clean_keywords
+
+        # เขียนกลับ — ใช้ default_flow_style=False เพื่อให้อ่านง่าย
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            _yaml.dump(existing, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"error": f"บันทึกไม่ได้: {e}"}, status_code=500)
+
+
 @app.get("/api/agent_config/{agent_key}")
 def api_agent_config_get(agent_key: str) -> JSONResponse:
     """Get agent config from agents.yaml."""
@@ -1155,11 +1223,11 @@ def api_session_files(session: str) -> JSONResponse:
     return JSONResponse(files)
 
 
-@app.get("/api/angle_summary/{folder}")
-def api_angle_summary(folder: str) -> JSONResponse:
-    """Return angle usage history for a product — ใช้ในระบบหมุนเวียนมุมมอง."""
-    history = angle_manager.load_history(PROJECT_ROOT, folder)
-    return JSONResponse({"history": history})
+@app.get("/api/content_history/{folder}")
+def api_content_history_for_product(folder: str, limit: int = 20) -> JSONResponse:
+    """Return content history for a specific product — ดูว่าสินค้านี้เคยทำอะไรไปแล้ว."""
+    entries = content_history.get_entries_for_product(PROJECT_ROOT, folder, limit=limit)
+    return JSONResponse({"entries": entries})
 
 
 @app.get("/api/file/{session}/{filename:path}")
@@ -1269,7 +1337,8 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                         )
                         for i, (result, filepath) in enumerate(results):
                             set_num = i + 1 if len(results) > 1 else None
-                            q.put_nowait(_sse("agent_done", result[:500], agent=agent_key, file=filepath, set_num=set_num, total_sets=len(results)))
+                            _disp_len = int(_sys_cfg().get("display_preview_length", 500))
+                            q.put_nowait(_sse("agent_done", result[:_disp_len], agent=agent_key, file=filepath, set_num=set_num, total_sets=len(results)))
                     except Exception as e:
                         if _cancel_requested:
                             q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
@@ -1421,14 +1490,14 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
             if auto_video is None:
                 auto_video = media_cfg.get("auto_generate_video", False)
 
-        # --- Angle System: AI-driven ---
-        # โหลดประวัติมุมมองที่เคยใช้ เพื่อบอก AI "ห้ามซ้ำอันเดิม"
-        _angle_history = angle_manager.load_history(PROJECT_ROOT, folder)
-        _used_angles = angle_manager.get_used_angles(_angle_history)
+        # --- Content History: บอก AI "ห้ามซ้ำมุมมองเดิม" ---
+        # ใช้ content_history รวม (manual + auto) แทน angle_manager แยก
+        _product_history_text = content_history.format_product_history_for_prompt(PROJECT_ROOT, folder)
 
         results: list[tuple[str, str | None]] = []
         previous_summaries: list[str] = []
-        used_angle_names: list[str] = []
+        # เก็บข้อมูล post ที่ทำเสร็จ เพื่อบันทึกลง history ทีหลัง
+        completed_posts: list[dict] = []
 
         for i in range(content_count):
             # สร้าง brief พิเศษสำหรับหลายโพสต์ — บอก LLM ว่าโพสต์ที่เท่าไหร่ และโพสต์ก่อนหน้ามีอะไรบ้าง
@@ -1436,8 +1505,9 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                 multi_brief = f"โพสต์ที่ {i+1} จาก {content_count} โพสต์ — สร้างคอนเทนต์ที่แตกต่างจากโพสต์ก่อนหน้า"
                 if previous_summaries:
                     multi_brief += "\n\n--- คอนเทนต์ที่สร้างไปแล้ว (ห้ามซ้ำ) ---\n"
+                    _long_len = int(_sys_cfg().get("display_preview_long", 800))
                     for j, s in enumerate(previous_summaries):
-                        multi_brief += f"\nโพสต์ที่ {j+1}:\n{s[:800]}\n"
+                        multi_brief += f"\nโพสต์ที่ {j+1}:\n{s[:_long_len]}\n"
                     multi_brief += "--- สิ้นสุด ---\n"
                     multi_brief += "สร้างโพสต์ใหม่ที่มีมุมมอง/angle ต่างจากโพสต์ก่อนหน้า"
                 if quick_brief:
@@ -1446,11 +1516,8 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                 multi_brief = quick_brief
 
             # บอก AI ถึงมุมมองที่เคยใช้แล้ว (ห้ามซ้ำ) + ให้ AI เลือกมุมมองเองจากสเปคสินค้า
-            if _used_angles:
-                multi_brief = (multi_brief or "") + "\n\n--- มุมมองที่เคยใช้แล้ว (ห้ามซ้ำ) ---\n"
-                for ua in _used_angles:
-                    multi_brief += f"• {ua}\n"
-                multi_brief += "--- สิ้นสุด ---\n"
+            if _product_history_text:
+                multi_brief = (multi_brief or "") + "\n\n" + _product_history_text + "\n"
                 multi_brief += "วิเคราะห์สินค้านี้แล้วเลือกมุมมองใหม่ที่ต่างจากที่เคยใช้ แล้วสร้างโพสต์จากมุมมองนั้น"
             else:
                 multi_brief = (multi_brief or "") + "\n\nวิเคราะห์สินค้านี้แล้วเลือกมุมมองที่เหมาะสมที่สุด แล้วสร้างโพสต์จากมุมมองนั้น"
@@ -1472,11 +1539,20 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
             )
             orch.results["content_creator"] = result
 
-            # ดึงมุมมองที่ AI ใช้จากผลลัพธ์ (หาบรรทัด "มุมมอง" ใน output)
-            import re as _re
-            angle_match = _re.search(r"มุมมอง[：:]\s*(.+)", result)
-            if angle_match:
-                used_angle_names.append(angle_match.group(1).strip())
+            # ดึงมุมมอง + platform + caption จาก structured output (JSON)
+            # เก็บไว้บันทึกลง content_history หลังทำเสร็จ
+            try:
+                import json as _json_hist
+                _parsed = _json_hist.loads(result)
+                for _post in _parsed.get("posts", []):
+                    completed_posts.append({
+                        "angle": _post.get("angle", ""),
+                        "platform": _post.get("platform", ""),
+                        "caption": _post.get("caption", "")[:int(_sys_cfg().get("caption_display_length", 500))],
+                    })
+            except (_json_hist.JSONDecodeError, TypeError):
+                # fallback: ถ้า LLM ไม่คืน JSON ให้ข้าม
+                pass
 
             saved_path: str | None = None
             if save_output:
@@ -1531,7 +1607,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                             def _img_retry(old_p, new_p, err, idx=j):
                                 if status_callback:
                                     status_callback(f"รูปที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
-                                print(f"[MediaGen] retry รูป {idx+1}: {err[:80]}", flush=True)
+                                print(f"[MediaGen] retry รูป {idx+1}: {err[:int(_sys_cfg().get('error_preview_length', 200))]}", flush=True)
                             r = media_gen.generate_image_with_retry(
                                 img["prompt"], img_path, llm=retry_llm,
                                 on_retry=_img_retry, **img_kwargs,
@@ -1567,7 +1643,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                             def _vid_retry(old_p, new_p, err, idx=j):
                                 if status_callback:
                                     status_callback(f"วิดีโอที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
-                                print(f"[MediaGen] retry วิดีโอ {idx+1}: {err[:80]}", flush=True)
+                                print(f"[MediaGen] retry วิดีโอ {idx+1}: {err[:int(_sys_cfg().get('error_preview_length', 200))]}", flush=True)
                             vid_kwargs["on_retry"] = _vid_retry
                             r = media_gen.generate_video_with_retry(
                                 vid["prompt"], vid_path, llm=retry_llm, **vid_kwargs,
@@ -1592,11 +1668,18 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                     print(f"[MediaGen] {msg}", flush=True)
 
             # เก็บ summary ของชุดนี้เพื่อส่งให้รอบต่อไป
-            previous_summaries.append(result[:800])
+            previous_summaries.append(result[:int(_sys_cfg().get("display_preview_long", 800))])
 
-        # บันทึกประวัติมุมมองที่ AI ใช้
-        if used_angle_names:
-            angle_manager.record_usage(PROJECT_ROOT, folder, used_angle_names)
+        # บันทึกประวัติคอนเทนต์ที่ทำเสร็จ ลง content_history (รวม manual + auto)
+        for _post in completed_posts:
+            if _post.get("angle"):
+                content_history.record_entry(
+                    PROJECT_ROOT,
+                    product_ids=folder,
+                    concept=_post.get("angle", _post.get("concept", "")),
+                    platform=_post.get("platform", ""),
+                    caption_summary=_post.get("caption", ""),
+                )
 
         return results
 
@@ -1660,7 +1743,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                    "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
     now = datetime.now()
     date_str = f"{now.day}_{thai_months[now.month-1]}_{now.year+543}_{now.strftime('%H.%M')}"
-    safe_folders = [f.replace("/", "-")[:30] for f in folders]
+    safe_folders = [f.replace("/", "-")[:int(_sys_cfg().get("filename_max_length", 30))] for f in folders]
     session_ts = f"{date_str} - {' + '.join(safe_folders)}"
 
     async def event_stream():
@@ -1726,7 +1809,8 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                             )
                             for i, (result, filepath) in enumerate(results):
                                 set_num = i + 1 if len(results) > 1 else None
-                                q.put_nowait(_sse("agent_done", result[:500], agent=agent_key, file=filepath, set_num=set_num, total_sets=len(results)))
+                                _dl = int(_sys_cfg().get("display_preview_length", 500))
+                                q.put_nowait(_sse("agent_done", result[:_dl], agent=agent_key, file=filepath, set_num=set_num, total_sets=len(results)))
                         except Exception as e:
                             if _cancel_requested:
                                 q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
@@ -1759,7 +1843,8 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                                 )
                                 for i, (result, filepath) in enumerate(results):
                                     set_num = i + 1 if len(results) > 1 else None
-                                    q.put_nowait(_sse("agent_done", result[:500], agent=agent_key, file=filepath, set_num=set_num, total_sets=len(results)))
+                                    _dl = int(_sys_cfg().get("display_preview_length", 500))
+                                    q.put_nowait(_sse("agent_done", result[:_dl], agent=agent_key, file=filepath, set_num=set_num, total_sets=len(results)))
                             except Exception as e:
                                 if _cancel_requested:
                                     q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
@@ -1803,6 +1888,216 @@ async def api_run_agents(request: Request) -> StreamingResponse:
             yield event
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/run_auto")
+async def api_run_auto(request: Request) -> StreamingResponse:
+    """Auto mode — agent เลือกสินค้าเอง + สร้างคอนเทนต์ที่ไม่ซ้ำ.
+
+    ไม่ต้องส่ง folders — agent จะเลือกสินค้าจาก product DB เอง
+    ส่ง quick_brief, platforms, media_type, auto_image, auto_video ได้เหมือนเดิม
+
+    SSE events:
+      - status: สถานะการทำงาน (เลือกสินค้า → สร้างคอนเทนต์ → สร้างสื่อ)
+      - selection: สินค้าที่เลือก + มุมมอง + เหตุผล
+      - agent_start: content_creator เริ่มทำงาน
+      - agent_done: ผลลัพธ์ (JSON + file path)
+      - error: ถ้ามีปัญหา
+      - done: จบ
+    """
+    body = await request.json()
+    quick_brief = body.get("quick_brief", "")
+    platforms = body.get("platforms", ["facebook", "tiktok"])
+    media_type = body.get("media_type", "")
+    auto_image = body.get("auto_image", None)
+    auto_video = body.get("auto_video", None)
+    content_count = max(1, min(int(body.get("content_count", 1)), 20))
+    product_count = max(1, min(int(body.get("product_count", 1)), 50))
+
+    global _cancel_requested
+    _cancel_requested = False
+
+    thai_months = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+                   "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
+    now = datetime.now()
+    date_str = f"{now.day}_{thai_months[now.month-1]}_{now.year+543}_{now.strftime('%H.%M')}"
+    session_ts = f"{date_str} - AUTO"
+
+    async def event_stream():
+        orch = Orchestrator(brand_dir="brand")
+        q: _queue.Queue[str | None] = _queue.Queue()
+
+        def worker():
+            global _active_llms
+            llm = None
+            try:
+                output_dir = OUTPUT_DIR / session_ts
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                llm = orch._make_client()
+                _active_llms.append(llm)
+
+                def _status_cb(msg):
+                    q.put_nowait(_sse("status", msg, agent="content_creator"))
+
+                # --- สร้างคอนเทนต์ตามจำนวนที่ user ขอ ---
+                all_results: list[tuple[str, str | None]] = []
+                previous_summaries: list[str] = []
+
+                for i in range(content_count):
+                    if _cancel_requested:
+                        q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
+                        break
+
+                    # สำหรับหลายโพสต์ — บอกให้หลีกเลี่ยงโพสต์ก่อนหน้า
+                    multi_brief = quick_brief
+                    if content_count > 1:
+                        multi_brief = f"โพสต์ที่ {i+1} จาก {content_count} โพสต์ — สร้างคอนเทนต์ที่แตกต่างจากโพสต์ก่อนหน้า"
+                        if previous_summaries:
+                            multi_brief += "\n\n--- คอนเทนต์ที่สร้างไปแล้วในรอบนี้ (ห้ามซ้ำ) ---\n"
+                            _ll = int(_sys_cfg().get("display_preview_long", 800))
+                            for j, s in enumerate(previous_summaries):
+                                multi_brief += f"\nโพสต์ที่ {j+1}:\n{s[:_ll]}\n"
+                            multi_brief += "--- สิ้นสุด ---\n"
+                        if quick_brief:
+                            multi_brief += f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
+
+                    q.put_nowait(_sse("agent_start", f"นักสร้างคอนเทนต์ — AUTO (โพสต์ที่ {i+1})", agent="content_creator"))
+
+                    result = orch.run_content_creator_auto(
+                        llm=llm,
+                        quick_brief=multi_brief,
+                        media_type=media_type,
+                        platforms=platforms,
+                        product_count=product_count,
+                        status_callback=_status_cb,
+                    )
+
+                    if "error" in result:
+                        q.put_nowait(_sse("error", result["error"], agent="content_creator"))
+                        break
+
+                    # ส่งข้อมูลการเลือกให้ frontend
+                    q.put_nowait(_sse("selection", json.dumps({
+                        "product_id": result.get("product_id", ""),
+                        "product_ids": result.get("product_ids", []),
+                        "pillar": result.get("pillar", ""),
+                        "concept": result.get("concept", ""),
+                        "angle": result.get("concept", ""),  # backward compat
+                        "reason": result.get("reason", ""),
+                        "is_duplicate": result.get("is_duplicate", False),
+                        "similarity": result.get("similarity", 0.0),
+                    }), agent="content_creator"))
+
+                    content = result.get("content", "")
+                    markdown = result.get("markdown", content)
+                    chosen_pids = result.get("product_ids", [result.get("product_id", "AUTO")])
+                    chosen_pid = " + ".join(chosen_pids) if len(chosen_pids) > 1 else chosen_pids[0]
+
+                    # เซฟไฟล์
+                    timestamp = datetime.now().strftime("%H%M%S")
+                    fname_base = f"04_content_creator_{chosen_pid}_AUTO_โพสต์ที่{i+1}_{timestamp}"
+                    json_path = output_dir / f"{fname_base}.json"
+                    json_path.write_text(content, encoding="utf-8")
+                    md_filepath = output_dir / f"{fname_base}.md"
+                    md_filepath.write_text(markdown, encoding="utf-8")
+                    saved_path = str(md_filepath)
+
+                    all_results.append((content, saved_path))
+                    _ll = int(_sys_cfg().get("display_preview_long", 800))
+                    previous_summaries.append(markdown[:_ll])
+
+                    _dl = int(_sys_cfg().get("display_preview_length", 500))
+                    q.put_nowait(_sse("agent_done", markdown[:_dl], agent="content_creator", file=saved_path, set_num=i+1, total_sets=content_count))
+
+                    # Auto-generate media ถ้าเปิด
+                    if auto_image or auto_video:
+                        try:
+                            parsed_media = media_gen.parse_media_prompts(content)
+                            # ดึง image_paths ของสินค้าที่เลือก
+                            from src import product_db as _pdb
+                            orch.product_id = chosen_pid
+                            product_img_paths = _pdb.get_product_image_paths(chosen_pid) if _pdb.is_ready(chosen_pid) else []
+                            if auto_image:
+                                for j, img in enumerate(parsed_media.get("images", [])):
+                                    img_path = output_dir / f"image_โพสต์{i+1}_{j+1}.png"
+                                    if _status_cb:
+                                        _status_cb(f"กำลังสร้างรูปที่ {j+1}...")
+                                    img_kwargs: dict = {}
+                                    if img.get("aspect_ratio"):
+                                        img_kwargs["aspect_ratio"] = img["aspect_ratio"]
+                                    r = media_gen.generate_image_with_retry(
+                                        img["prompt"], img_path, llm=llm, **img_kwargs,
+                                    )
+                                    media_gen.save_retry_history(output_dir, "image", img_path.name, r)
+                                    if not r.get("ok"):
+                                        _status_cb(f"รูปที่ {j+1}: {r.get('error', 'unknown')}")
+                            if auto_video:
+                                for j, vid in enumerate(parsed_media.get("videos", [])):
+                                    vid_path = output_dir / f"video_โพสต์{i+1}_{j+1}.mp4"
+                                    def _vid_status(s, idx=j):
+                                        _status_cb(f"วิดีโอที่ {idx+1}: {s}")
+                                    vid_kwargs: dict = {"on_status": _vid_status}
+                                    if vid.get("duration"):
+                                        vid_kwargs["duration"] = int(vid["duration"])
+                                    if vid.get("aspect_ratio"):
+                                        vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
+                                    if vid.get("resolution"):
+                                        vid_kwargs["resolution"] = vid["resolution"]
+                                    r = media_gen.generate_video_with_retry(
+                                        vid["prompt"], vid_path, llm=llm, **vid_kwargs,
+                                    )
+                                    media_gen.save_retry_history(output_dir, "video", vid_path.name, r)
+                                    if not r.get("ok"):
+                                        _status_cb(f"วิดีโอที่ {j+1}: {r.get('error', 'unknown')}")
+                        except Exception as e:
+                            _status_cb(f"สร้างสื่อไม่สำเร็จ: {e}")
+
+                if llm:
+                    llm.close()
+                    try:
+                        _active_llms.remove(llm)
+                    except ValueError:
+                        pass
+                q.put_nowait(_sse("done", ""))
+                q.put_nowait(None)
+
+            except Exception as e:
+                if llm:
+                    try:
+                        llm.close()
+                    except Exception:
+                        pass
+                    try:
+                        _active_llms.remove(llm)
+                    except ValueError:
+                        pass
+                q.put_nowait(_sse("error", str(e)))
+                q.put_nowait(_sse("done", ""))
+                q.put_nowait(None)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        while True:
+            try:
+                event = q.get_nowait()
+            except _queue.Empty:
+                await asyncio.sleep(0.05)
+                continue
+            if event is None:
+                break
+            yield event
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/content_history")
+def api_content_history(limit: int = 20) -> JSONResponse:
+    """ดึงประวัติคอนเทนต์ที่สร้างไปแล้ว (สำหรับ auto mode — ดูว่าทำอะไรไปแล้ว)."""
+    from src import content_history
+    entries = content_history.get_recent_entries(PROJECT_ROOT, limit=limit)
+    return JSONResponse({"entries": entries})
 
 
 HTML_PAGE = r"""<!DOCTYPE html>
@@ -1864,6 +2159,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .sidebar-ms-btn { background: #1c1e2a; color: #888; border: 1px solid #2a2d3a; border-radius: 6px; padding: 8px 10px; font-size: 12px; cursor: pointer; white-space: nowrap; }
   .sidebar-ms-btn:hover { border-color: #7c8aff; color: #7c8aff; }
   .sidebar-ms-btn.active { background: #2a1a3a; border-color: #a78bfa; color: #a78bfa; }
+  /* Auto item ใน sidebar — draggable เหมือนสินค้าทั่วไป */
+  .folder-item.auto-item { border: 1px dashed #7c8aff; background: #1a1d2e; }
+  .folder-item.auto-item:hover { border-color: #7c8aff; background: #1a2a4a; }
+  /* Auto chip ใน agent box */
+  .dropped-folder.auto-folder { border-color: #7c8aff; background: #1a2a4a; color: #a5b4ff; }
+  .auto-count-input { width: 42px; padding: 2px 4px; background: #0f1117; border: 1px solid #7c8aff; border-radius: 4px; color: #a5b4ff; font-size: 12px; text-align: center; margin-left: 4px; }
+  .auto-count-input::-webkit-inner-spin-button { opacity: 1; }
   .folder-item-selected { background: #2a1a3a !important; border: 1px solid #a78bfa; }
   .ms-check { width: 20px; height: 20px; border-radius: 5px; border: 1.5px solid #444; display: flex; align-items: center; justify-content: center; font-size: 14px; color: #fff; flex-shrink: 0; }
   .ms-check.checked { background: #a78bfa; border-color: #a78bfa; }
@@ -1898,6 +2200,24 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .brand-save-btn { background: #4ade80; color: #0f1117; border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 8px; }
   .brand-save-btn:hover { background: #45c97c; }
   .brand-back-btn { background: none; border: 1px solid #2a2d3a; color: #888; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; margin-bottom: 10px; }
+
+  /* Pillars modal */
+  .pillar-card { background: #1c1e2a; border: 1px solid #2a2d3a; border-radius: 10px; padding: 14px; margin-bottom: 10px; }
+  .pillar-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .pillar-card-name { flex: 1; background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; padding: 8px 10px; color: #e0e0e0; font-size: 14px; font-weight: 500; }
+  .pillar-card-name:focus { outline: none; border-color: #7c8aff; }
+  .pillar-del-btn { background: none; border: 1px solid #3a2030; color: #ff6b6b; border-radius: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer; flex-shrink: 0; }
+  .pillar-del-btn:hover { background: #2a1520; border-color: #ff6b6b; }
+  .pillar-keywords-label { font-size: 11px; color: #888; margin-bottom: 6px; }
+  .pillar-keywords-box { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; padding: 8px; min-height: 38px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .pillar-keyword-chip { display: inline-flex; align-items: center; gap: 4px; background: #2a2d4a; color: #a0a8ff; border-radius: 12px; padding: 4px 10px; font-size: 12px; }
+  .pillar-keyword-chip .chip-x { cursor: pointer; color: #666; font-size: 14px; line-height: 1; }
+  .pillar-keyword-chip .chip-x:hover { color: #ff6b6b; }
+  .pillar-keyword-add { display: inline-flex; align-items: center; gap: 4px; }
+  .pillar-keyword-add input { background: transparent; border: 1px dashed #3a3d5a; border-radius: 12px; padding: 4px 10px; color: #e0e0e0; font-size: 12px; width: 120px; }
+  .pillar-keyword-add input:focus { outline: none; border-color: #7c8aff; border-style: solid; }
+  .pillar-add-btn { background: #1a1d2e; border: 1px dashed #7c8aff; color: #7c8aff; border-radius: 10px; padding: 14px; font-size: 14px; cursor: pointer; width: 100%; margin-top: 8px; }
+  .pillar-add-btn:hover { background: #1a2a4a; }
 
   .folder-item { display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 10px; background: #1c1e2a; margin-bottom: 8px; cursor: grab; transition: all 0.15s; }
   .folder-item:hover { background: #252836; transform: translateY(-1px); }
@@ -2109,6 +2429,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .quick-brief-box label { font-size: 12px; color: #7c8aff; margin-bottom: 6px; display: block; }
   .quick-brief-box textarea { width: 100%; min-height: 50px; background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; padding: 8px; color: #e0e0e0; font-size: 13px; resize: vertical; }
   .quick-brief-box textarea::placeholder { color: #555; font-style: italic; opacity: 1; }
+  .brief-actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+  .brief-mode-divider { width: 1px; height: 24px; background: #2a2d3a; margin: 0 4px; }
+  .brief-hint { font-size: 11px; color: #666; margin-left: auto; }
   .context-options { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #2a2d3a; }
   .context-label { font-size: 12px; color: #888; margin-bottom: 0 !important; }
   .context-chk { font-size: 12px; color: #ccc; display: flex; align-items: center; gap: 4px; margin-bottom: 0 !important; cursor: pointer; }
@@ -2215,13 +2538,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   .hint-bar { background: #161821; border: 1px solid #2a2d3a; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 13px; color: #888; display: flex; align-items: center; justify-content: space-between; }
   .hint-bar b { color: #7c8aff; }
-  .global-confirm-btn { background: #4ade80; color: #0f1117; border: none; border-radius: 8px; padding: 8px 24px; font-size: 14px; font-weight: 600; cursor: pointer; }
-  .global-confirm-btn:hover { background: #45c97c; }
+  .global-confirm-btn { background: #4ade80; color: #0f1117; border: none; border-radius: 8px; padding: 8px 24px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+  .global-confirm-btn:hover:not(:disabled) { background: #45c97c; }
   .global-confirm-btn:disabled { background: #3a3d5a; color: #888; cursor: not-allowed; }
+  .global-confirm-btn.running { background: #e04848; color: #fff; }
+  .global-confirm-btn.running:hover { background: #c03838; }
   .global-clear-btn { background: none; border: 1px solid #2a2d3a; color: #888; border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; margin-left: 8px; }
   .global-clear-btn:hover:not(:disabled) { border-color: #ff6b6b; color: #ff6b6b; }
   .global-clear-btn:disabled { border-color: #2a2d3a; color: #444; cursor: not-allowed; }
-  .global-stop-btn { background: #e04848; color: #fff; border: none; border-radius: 8px; padding: 8px 24px; font-size: 14px; cursor: pointer; display: none; }
   .flow-display { background: #161821; border: 1px solid #2a2d3a; border-radius: 10px; padding: 20px; margin-bottom: 20px; display: none; }
   .flow-display.visible { display: block; }
   .flow-title { font-size: 14px; color: #888; margin-bottom: 12px; }
@@ -2266,6 +2590,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
   <div class="header-right">
     <div class="credits-badge" id="credits-badge" style="display:none">กำลังโหลด...</div>
+    <button class="home-header-btn" onclick="openPillarsModal()">🎯 Pillars</button>
     <button class="home-header-btn" onclick="goHome()">🏠 หน้าหลัก</button>
   </div>
 </div>
@@ -2280,15 +2605,19 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
   <div id="main-area" class="main">
     <div class="hint-bar">
-      <span><b>วิธีใช้:</b> ลากโฟลเดอร์สินค้าจากแถบซ้าย → โยนลงกล่อง agent → กด <b>ยืนยัน</b></span>
-      <span><button class="global-confirm-btn" id="global-confirm" onclick="confirmAndRun()" disabled>ยืนยัน</button><button class="global-clear-btn" id="global-clear" onclick="clearAll()">ล้างทั้งหมด</button><button class="global-stop-btn" id="global-stop" onclick="stopAll()">หยุด</button></span>
+      <span><b>วิธีใช้:</b> ลากโฟลเดอร์สินค้าจากแถบซ้าย → โยนลงกล่อง agent → กด <b>ยืนยัน</b> หรือกด <b>⚡ Auto</b> ในแถบซ้ายเพื่อให้ AI เลือกสินค้าเอง</span>
     </div>
     <div class="quick-brief-box">
+      <div class="flow-display" id="flow-display"></div>
+      <div class="agents-grid" id="agents-grid"></div>
       <label>💬 มีอะไรที่อยากให้ทีมเน้นเป็นพิเศษไหม? (ไม่ใส่ก็ได้)</label>
       <textarea id="quick-brief-input" placeholder="เช่น 'เจาะกลุ่มวัย 25-35 และเน้นขายผ่าน TikTok' — คำสั่งนี้ใช้ครั้งเดียวทิ้ง ไม่เซฟถาวร"></textarea>
+      <div class="brief-actions">
+        <button class="global-confirm-btn" id="global-confirm" onclick="onConfirmClick()" disabled>ยืนยัน</button>
+        <button class="global-clear-btn" id="global-clear" onclick="clearAll()">ล้าง</button>
+        <span class="brief-hint" id="brief-hint">เลือกสินค้าก่อนกดยืนยัน</span>
+      </div>
     </div>
-    <div class="flow-display" id="flow-display"></div>
-    <div class="agents-grid" id="agents-grid"></div>
   </div>
 </div>
 <script>
@@ -2302,6 +2631,8 @@ let _currentMediaFile = '';
 let _currentMediaContent = '';
 let _currentMediaPost = null;
 let multiSelectMode = false;
+const AUTO_ITEM = '__auto__';  // special "product" ที่แทน Auto mode
+let readyProductCount = 0;  // จำนวนสินค้า ready — สำหรับ max ใน Auto count input
 let selectedFolders = new Set();
 let _sidebarPollTimer = null;
 
@@ -2346,6 +2677,8 @@ function switchSidebarTab(tab, ev) {
 function loadFolderList() {
   fetch('/api/data_folders').then(r => r.json()).then(folders => {
     const el = document.getElementById('sidebar-content');
+    // นับสินค้า ready สำหรับ max ใน Auto count input
+    readyProductCount = folders.filter(f => f.status === 'ready').length;
     let html = '<div class="sidebar-toolbar">';
     html += '<div class="sidebar-toolbar-row">';
     html += '<input type="text" class="sidebar-search" id="folder-search" placeholder="ค้นหาสินค้า..." oninput="filterFolders()">';
@@ -2354,6 +2687,16 @@ function loadFolderList() {
     const msBtnClass = multiSelectMode ? 'sidebar-ms-btn active' : 'sidebar-ms-btn';
     html += '<div class="sidebar-toolbar-row"><button class="' + msBtnClass + '" style="flex:1" onclick="toggleMultiSelect()" title="เลือกหลายรายการเพื่อส่งไป agent พร้อมกัน">☑ เลือกหลายรายการ</button></div>';
     html += '</div>';
+    // Auto item — draggable เหมือนสินค้าทั่วไป แต่ AI เลือกสินค้าเอง
+    if (!multiSelectMode) {
+      html += '<div class="folder-item auto-item" data-name="__auto__" draggable="true" ondragstart="onDragStart(event,\'' + AUTO_ITEM + '\')" ondragend="onDragEnd(event)" title="AI เลือกสินค้าเอง — ลากไปลงนักสร้างคอนเทนต์">';
+      html += '<span class="folder-icon" style="font-size:20px">⚡</span>';
+      html += '<div class="folder-info" style="cursor:grab">';
+      html += '<div class="folder-name" style="color:#a5b4ff">Auto</div>';
+      html += '<div class="folder-meta"><span style="font-size:11px;color:#888">AI เลือกสินค้าเอง</span></div>';
+      html += '</div>';
+      html += '</div>';
+    }
     if (!folders.length) {
       html += '<div style="color:#555;font-size:12px;padding:12px">ยังไม่มีโฟลเดอร์ — กด + เพิ่ม เพื่อสร้าง</div>';
     } else {
@@ -2999,6 +3342,146 @@ function saveBrandFileModal() {
   });
 }
 
+// ============================================================
+// Content Pillars modal
+// ============================================================
+let _pillarsData = { pillars: [], pillar_keywords: {} };
+
+function openPillarsModal() {
+  const status = document.getElementById('pillars-save-status');
+  status.className = 'upload-status';
+  status.textContent = 'กำลังโหลด...';
+  fetch('/api/pillars').then(r => r.json()).then(data => {
+    if (data.error) {
+      status.className = 'upload-status err';
+      status.textContent = data.error;
+      return;
+    }
+    _pillarsData = data;
+    renderPillarsList();
+    status.textContent = '';
+    status.className = 'upload-status';
+    document.getElementById('pillars-overlay').className = 'settings-modal-overlay visible';
+  });
+}
+
+function closePillarsModal() {
+  document.getElementById('pillars-overlay').className = 'settings-modal-overlay';
+}
+
+function renderPillarsList() {
+  const list = document.getElementById('pillars-list');
+  list.innerHTML = '';
+  _pillarsData.pillars.forEach((pillar, i) => {
+    const keywords = _pillarsData.pillar_keywords[pillar] || [];
+    const card = document.createElement('div');
+    card.className = 'pillar-card';
+    card.innerHTML = `
+      <div class="pillar-card-header">
+        <input class="pillar-card-name" value="${escapeHtml(pillar)}" onchange="updatePillarName(${i}, this.value)" placeholder="ชื่อ pillar">
+        <button class="pillar-del-btn" onclick="removePillar(${i})">🗑️</button>
+      </div>
+      <div class="pillar-keywords-label">Keywords (คำที่ทำให้ระบบเดาได้ว่าอยู่ในหมวดนี้):</div>
+      <div class="pillar-keywords-box" id="pillar-kw-${i}"></div>
+    `;
+    list.appendChild(card);
+    renderKeywordChips(i, keywords);
+  });
+}
+
+function renderKeywordChips(pillarIdx, keywords) {
+  const box = document.getElementById('pillar-kw-' + pillarIdx);
+  box.innerHTML = '';
+  keywords.forEach((kw, j) => {
+    const chip = document.createElement('span');
+    chip.className = 'pillar-keyword-chip';
+    chip.innerHTML = `${escapeHtml(kw)} <span class="chip-x" onclick="removeKeyword(${pillarIdx}, ${j})">×</span>`;
+    box.appendChild(chip);
+  });
+  // input สำหรับเพิ่ม keyword
+  const addWrap = document.createElement('span');
+  addWrap.className = 'pillar-keyword-add';
+  addWrap.innerHTML = `<input placeholder="+ เพิ่มคำ" onkeydown="if(event.key==='Enter'){addKeyword(${pillarIdx}, this.value); this.value='';}">`;
+  box.appendChild(addWrap);
+}
+
+function addKeyword(pillarIdx, kw) {
+  kw = kw.trim();
+  if (!kw) return;
+  const pillar = _pillarsData.pillars[pillarIdx];
+  if (!_pillarsData.pillar_keywords[pillar]) _pillarsData.pillar_keywords[pillar] = [];
+  if (!_pillarsData.pillar_keywords[pillar].includes(kw)) {
+    _pillarsData.pillar_keywords[pillar].push(kw);
+    renderKeywordChips(pillarIdx, _pillarsData.pillar_keywords[pillar]);
+  }
+}
+
+function removeKeyword(pillarIdx, kwIdx) {
+  const pillar = _pillarsData.pillars[pillarIdx];
+  if (_pillarsData.pillar_keywords[pillar]) {
+    _pillarsData.pillar_keywords[pillar].splice(kwIdx, 1);
+    renderKeywordChips(pillarIdx, _pillarsData.pillar_keywords[pillar]);
+  }
+}
+
+function updatePillarName(idx, newName) {
+  newName = newName.trim();
+  if (!newName) return;
+  const oldName = _pillarsData.pillars[idx];
+  // ย้าย keywords ไปชื่อใหม่
+  if (_pillarsData.pillar_keywords[oldName]) {
+    _pillarsData.pillar_keywords[newName] = _pillarsData.pillar_keywords[oldName];
+    delete _pillarsData.pillar_keywords[oldName];
+  }
+  _pillarsData.pillars[idx] = newName;
+}
+
+function removePillar(idx) {
+  const pillar = _pillarsData.pillars[idx];
+  delete _pillarsData.pillar_keywords[pillar];
+  _pillarsData.pillars.splice(idx, 1);
+  renderPillarsList();
+}
+
+function addPillarCard() {
+  const name = 'Pillar ใหม่';
+  let n = 1;
+  let finalName = name;
+  while (_pillarsData.pillars.includes(finalName)) {
+    n++;
+    finalName = name + ' ' + n;
+  }
+  _pillarsData.pillars.push(finalName);
+  _pillarsData.pillar_keywords[finalName] = [];
+  renderPillarsList();
+  // focus ช่องสุดท้าย
+  const inputs = document.querySelectorAll('.pillar-card-name');
+  if (inputs.length) inputs[inputs.length - 1].focus();
+}
+
+function savePillars() {
+  const status = document.getElementById('pillars-save-status');
+  status.className = 'upload-status';
+  status.textContent = 'กำลังบันทึก...';
+  fetch('/api/pillars_save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      pillars: _pillarsData.pillars,
+      pillar_keywords: _pillarsData.pillar_keywords,
+    }),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      status.className = 'upload-status ok';
+      status.textContent = 'บันทึกแล้ว ✓';
+      setTimeout(closePillarsModal, 800);
+    } else {
+      status.className = 'upload-status err';
+      status.textContent = data.error || 'เกิดข้อผิดพลาด';
+    }
+  });
+}
+
 function onDragStart(ev, folderPath) {
   ev.dataTransfer.setData('text/plain', folderPath);
   // บันทึก source: 'sidebar' หรือ 'agent' + ชื่อ agent ต้นทาง
@@ -3270,8 +3753,15 @@ function updateDropZone(agentKey) {
   if (comb.length) {
     for (const fpath of comb) {
       const safe = fpath.replace(/'/g, "\\'");
-      html += '<div class="dropped-folder combined-folder" draggable="true" ondragstart="onDragStart(event,\'' + safe + '\')" ondragend="onDragEnd(event)">';
-      html += '<span>📦</span><span>' + escapeHtml(fpath) + '</span>';
+      const isAuto = fpath === AUTO_ITEM;
+      const icon = isAuto ? '⚡' : '📦';
+      const label = isAuto ? 'Auto' : escapeHtml(fpath);
+      const cls = isAuto ? 'dropped-folder combined-folder auto-folder' : 'dropped-folder combined-folder';
+      html += '<div class="' + cls + '" draggable="true" ondragstart="onDragStart(event,\'' + safe + '\')" ondragend="onDragEnd(event)">';
+      html += '<span>' + icon + '</span><span>' + label + '</span>';
+      if (isAuto) {
+        html += '<input type="number" class="auto-count-input" min="2" max="' + readyProductCount + '" value="' + Math.min(2, readyProductCount) + '" onclick="event.stopPropagation()" onchange="showFlow()" title="จำนวนสินค้าที่ AI จะเลือก">';
+      }
       html += '<span class="remove-btn" onclick="removeFolder(\'' + agentKey + '\',\'' + safe + '\',\'combined\')">×</span>';
       html += '</div>';
     }
@@ -3283,15 +3773,19 @@ function updateDropZone(agentKey) {
   if (sep.length) {
     for (const fpath of sep) {
       const safe = fpath.replace(/'/g, "\\'");
-      html += '<div class="dropped-folder" draggable="true" ondragstart="onDragStart(event,\'' + safe + '\')" ondragend="onDragEnd(event)">';
-      html += '<span>📁</span><span>' + escapeHtml(fpath) + '</span>';
+      const isAuto = fpath === AUTO_ITEM;
+      const icon = isAuto ? '⚡' : '📁';
+      const label = isAuto ? 'Auto' : escapeHtml(fpath);
+      const cls = isAuto ? 'dropped-folder auto-folder' : 'dropped-folder';
+      html += '<div class="' + cls + '" draggable="true" ondragstart="onDragStart(event,\'' + safe + '\')" ondragend="onDragEnd(event)">';
+      html += '<span>' + icon + '</span><span>' + label + '</span>';
       html += '<span class="remove-btn" onclick="removeFolder(\'' + agentKey + '\',\'' + safe + '\',\'separate\')">×</span>';
       html += '</div>';
     }
   }
   html += '</div>';
   dz.innerHTML = html;
-  // โชว์/ซ่อน toggle chips ของ content_creator — โผล่เฉพาะตอนมีสินค้า
+  // โชว์/ซ่อน toggle chips ของ content_creator — โผล่ตอนมีสินค้า (รวม Auto)
   if (agentKey === 'content_creator') {
     const hasProduct = sep.length > 0 || comb.length > 0;
     const optEl = document.getElementById('options-content_creator');
@@ -3344,19 +3838,22 @@ function buildExecutionPlan() {
     if (comb.length >= 2) {
       const info = AGENT_INFO[key] || {};
       const step = buildStep(key, info);
-      plans.push({ folder: comb.join(' + '), folders: comb, mode: 'combined', steps: [step] });
+      const folderLabel = comb.map(f => f === AUTO_ITEM ? '⚡ Auto' : f).join(' + ');
+      plans.push({ folder: folderLabel, folders: comb, mode: 'combined', steps: [step] });
     } else if (comb.length === 1) {
       // รวม 1 ชิ้น = แยก 1 ชิ้น (ไม่มีอะไรให้รวม) → ทำเป็น separate
       const info = AGENT_INFO[key] || {};
       const step = buildStep(key, info);
-      plans.push({ folder: comb[0], folders: [comb[0]], mode: 'separate', steps: [step] });
+      const folderLabel = comb[0] === AUTO_ITEM ? '⚡ Auto' : comb[0];
+      plans.push({ folder: folderLabel, folders: [comb[0]], mode: 'separate', steps: [step] });
     }
 
     // Separate plans: one per folder
     for (const folder of sep) {
       const info = AGENT_INFO[key] || {};
       const step = buildStep(key, info);
-      plans.push({ folder, folders: [folder], mode: 'separate', steps: [step] });
+      const folderLabel = folder === AUTO_ITEM ? '⚡ Auto' : folder;
+      plans.push({ folder: folderLabel, folders: [folder], mode: 'separate', steps: [step] });
     }
   }
 
@@ -3386,8 +3883,8 @@ function buildStep(key, info) {
 }
 
 function showFlow(plansArg) {
-  const plans = plansArg || buildExecutionPlan();
   const flowEl = document.getElementById('flow-display');
+  const plans = plansArg || buildExecutionPlan();
   if (!plans.length) {
     flowEl.className = 'flow-display';
     flowEl.innerHTML = '';
@@ -3491,6 +3988,23 @@ async function checkProductStatus(folder) {
   }
 }
 
+function onConfirmClick() {
+  const confirmBtn = document.getElementById('global-confirm');
+  if (confirmBtn && confirmBtn.classList.contains('running')) {
+    // กำลังทำงานอยู่ → กด = หยุด
+    stopAll();
+  } else {
+    // ตรวจว่า content_creator มี Auto item ไหม → ถ้ามี ทำ auto mode
+    const cc = agentFolders['content_creator'] || { separate: [], combined: [] };
+    const allCC = [...(cc.separate || []), ...(cc.combined || [])];
+    if (allCC.includes(AUTO_ITEM)) {
+      runAutoMode();
+    } else {
+      confirmAndRun();
+    }
+  }
+}
+
 async function confirmAndRun() {
   const plans = buildExecutionPlan();
   if (!plans.length) return;
@@ -3504,6 +4018,7 @@ async function confirmAndRun() {
     if (!needsDb) continue;
     // เช็คทุก folder ใน plan แยก (combined mode มีหลาย folder)
     for (const folder of plan.folders) {
+      if (folder === AUTO_ITEM) continue;  // Auto ไม่ต้องเช็ค status
       const status = await checkProductStatus(folder);
       if (status !== 'ready' && status !== 'stale') {
         notReady.push({folder, status});
@@ -3523,11 +4038,15 @@ async function confirmAndRun() {
   }
 
   const confirmBtn = document.getElementById('global-confirm');
-  const stopBtn = document.getElementById('global-stop');
-  confirmBtn.disabled = true;
+  const autoBtn = document.getElementById('global-auto');
   const clearBtn = document.getElementById('global-clear');
+  const hintEl = document.getElementById('brief-hint');
+  // toggle เป็นโหมด "กำลังทำงาน" — ปุ่มยืนยันกลายเป็นปุ่มหยุด
+  confirmBtn.classList.add('running');
+  confirmBtn.textContent = 'หยุด';
+  if (autoBtn) autoBtn.disabled = true;
   if (clearBtn) clearBtn.disabled = true;
-  stopBtn.style.display = 'inline-block';
+  if (hintEl) hintEl.textContent = 'กำลังทำงาน...';
 
   // ไม่เคลียร์ agent boxes และ agentFolders — ผู้ใช้ต้องกด "ล้าง" เอง
   // แค่เคลียร์ status เพื่อแสดง progress ใหม่
@@ -3542,9 +4061,161 @@ async function confirmAndRun() {
   const promises = plans.map((plan, planIdx) => runPlan(plan, planIdx, abortController.signal));
   await Promise.allSettled(promises);
 
-  confirmBtn.disabled = false;
+  // คืนค่าปุ่ม
+  confirmBtn.classList.remove('running');
+  confirmBtn.textContent = 'ยืนยัน';
+  if (autoBtn) autoBtn.disabled = false;
   if (clearBtn) clearBtn.disabled = false;
-  stopBtn.style.display = 'none';
+  if (hintEl) hintEl.textContent = 'เลือกสินค้าก่อนกดยืนยัน';
+}
+
+async function runAutoMode() {
+  // Auto mode — agent เลือกสินค้าเอง + คอนเทนต์ไม่ซ้ำ
+  const confirmBtn = document.getElementById('global-confirm');
+  const clearBtn = document.getElementById('global-clear');
+  const hintEl = document.getElementById('brief-hint');
+  // toggle ปุ่มยืนยันเป็น "หยุด" ตอนกำลังทำงาน
+  confirmBtn.classList.add('running');
+  confirmBtn.textContent = 'หยุด';
+  if (clearBtn) clearBtn.disabled = true;
+  if (hintEl) hintEl.textContent = 'AI กำลังเลือกสินค้าและสร้างคอนเทนต์...';
+
+  // เคลียร์ status
+  for (const key of AGENT_ORDER) {
+    const status = document.getElementById('status-' + key);
+    if (status) { status.className = 'agent-status'; status.textContent = ''; }
+  }
+
+  // แสดง flow แบบ auto (1 step: content_creator)
+  const flowDisplay = document.getElementById('flow-display');
+  if (flowDisplay) {
+    flowDisplay.innerHTML = '<div class="flow-plan">' +
+      '<div class="flow-step running auto" id="flow-auto-0">' +
+      '<span class="flow-step-name">⚡ Auto — เลือกสินค้าเอง</span>' +
+      '<span class="flow-step-status" id="flow-auto-0-status"><span class="typing">●</span></span>' +
+      '</div></div>';
+  }
+
+  const quickBrief = document.getElementById('quick-brief-input').value.trim();
+  const opts = getContentCreatorOptions();
+  // ดึง product_count จาก Auto chip ใน "รวม" (ถ้ามี)
+  const autoCountInput = document.querySelector('.auto-folder .auto-count-input');
+  const productCount = autoCountInput ? parseInt(autoCountInput.value) || 2 : 1;
+
+  abortController = new AbortController();
+  try {
+    const res = await fetch('/api/run_auto', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        quick_brief: quickBrief,
+        platforms: opts.platforms,
+        media_type: opts.media_type,
+        auto_image: opts.auto_image,
+        auto_video: opts.auto_video,
+        content_count: opts.content_count,
+        product_count: productCount,
+      }),
+      signal: abortController.signal,
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      const stepEl = document.getElementById('flow-auto-0');
+      const statusEl = document.getElementById('flow-auto-0-status');
+      if (stepEl) stepEl.className = 'flow-step error auto';
+      if (statusEl) statusEl.textContent = err.error || 'ผิดพลาด';
+    } else {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            handleAutoSSE(data);
+          } catch (e) {}
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      const stepEl = document.getElementById('flow-auto-0');
+      const statusEl = document.getElementById('flow-auto-0-status');
+      if (stepEl) stepEl.className = 'flow-step error auto';
+      if (statusEl) statusEl.textContent = 'ผิดพลาด: ' + e.message;
+    }
+  }
+
+  if (confirmBtn) { confirmBtn.classList.remove('running'); confirmBtn.textContent = 'ยืนยัน'; confirmBtn.disabled = false; }
+  if (clearBtn) clearBtn.disabled = false;
+  if (hintEl) hintEl.textContent = 'เลือกสินค้าก่อนกดยืนยัน';
+}
+
+function handleAutoSSE(data) {
+  const stepEl = document.getElementById('flow-auto-0');
+  const statusEl = document.getElementById('flow-auto-0-status');
+  if (!stepEl) return;
+
+  if (data.type === 'status') {
+    stepEl.className = 'flow-step running auto';
+    if (statusEl) statusEl.innerHTML = escapeHtml(data.message || '') + ' <span class="typing">●</span>';
+  } else if (data.type === 'selection') {
+    // แสดงสินค้าที่เลือก
+    try {
+      const sel = JSON.parse(data.message || '{}');
+      if (statusEl) {
+        statusEl.innerHTML = 'เลือก: <b>' + escapeHtml(sel.product_id || '') + '</b> — ' + escapeHtml(sel.concept || sel.angle || '') + ' <span class="typing">●</span>';
+      }
+    } catch (e) {}
+  } else if (data.type === 'agent_start') {
+    stepEl.className = 'flow-step running auto';
+    if (statusEl) statusEl.innerHTML = '<span class="typing">●</span>';
+  } else if (data.type === 'agent_done') {
+    const totalSets = data.total_sets || 1;
+    const setNum = data.set_num;
+    const isLastSet = !setNum || setNum >= totalSets;
+    if (totalSets > 1 && setNum && !isLastSet) {
+      stepEl.className = 'flow-step running auto';
+      if (statusEl) statusEl.textContent = setNum + '/' + totalSets;
+      if (data.file) {
+        const link = document.createElement('span');
+        link.className = 'flow-step-link';
+        link.textContent = ' 📄' + setNum;
+        link.style.cursor = 'pointer';
+        link.style.color = '#7c8aff';
+        link.style.marginLeft = '4px';
+        link.onclick = () => viewResult(data.file);
+        stepEl.appendChild(link);
+      }
+    } else {
+      stepEl.className = 'flow-step done auto';
+      if (statusEl) statusEl.textContent = totalSets > 1 ? '✓ ' + totalSets + ' โพสต์' : '✓';
+      if (data.file) {
+        const titleEl = stepEl.querySelector('.flow-step-name');
+        if (titleEl && !stepEl.querySelector('.flow-step-link')) {
+          const link = document.createElement('span');
+          link.className = 'flow-step-link';
+          link.textContent = ' 📄';
+          link.style.cursor = 'pointer';
+          link.style.color = '#7c8aff';
+          link.onclick = () => viewResult(data.file);
+          stepEl.appendChild(link);
+        }
+      }
+      // โหลด session ใหม่
+      loadSessions();
+    }
+  } else if (data.type === 'error') {
+    stepEl.className = 'flow-step error auto';
+    if (statusEl) statusEl.textContent = data.message || 'ผิดพลาด';
+  }
 }
 
 async function runPlan(plan, planIdx, signal) {
@@ -3629,8 +4300,13 @@ function stopAll() {
   });
   document.querySelectorAll('.flow-step-status').forEach(el => { el.textContent = ''; });
   runningAgents = {};
-  document.getElementById('global-confirm').disabled = false;
-  document.getElementById('global-stop').style.display = 'none';
+  // คืนค่าปุ่ม toggle
+  const confirmBtn = document.getElementById('global-confirm');
+  const clearBtn = document.getElementById('global-clear');
+  const hintEl = document.getElementById('brief-hint');
+  if (confirmBtn) { confirmBtn.classList.remove('running'); confirmBtn.textContent = 'ยืนยัน'; confirmBtn.disabled = false; }
+  if (clearBtn) clearBtn.disabled = false;
+  if (hintEl) hintEl.textContent = 'เลือกสินค้าก่อนกดยืนยัน';
 }
 
 function handleFlowSSE(data, agentKey, planIdx, plan) {
@@ -4750,6 +5426,19 @@ function loadCredits() {
     </div>
   </div>
 </div>
+<div class="settings-modal-overlay" id="pillars-overlay">
+  <div class="settings-modal" style="width:560px;max-height:85vh">
+    <h3>🎯 Content Pillars (เสาหลักคอนเทนต์)</h3>
+    <p style="font-size:12px;color:#888;margin:0 0 14px 0">หมวดใหญ่ที่แบรนด์พูดเสมอ — AI จะหมุนเวียน ไม่ซ้ำหมวดเดิมบ่อยเกินไป ใส่ keywords ที่ทำให้ระบบเดาได้ว่าคอนเทนต์ไหนอยู่ในหมวดนี้</p>
+    <div id="pillars-list" style="max-height:50vh;overflow-y:auto"></div>
+    <button class="pillar-add-btn" onclick="addPillarCard()">+ เพิ่ม Pillar</button>
+    <div class="upload-status" id="pillars-save-status"></div>
+    <div class="settings-actions">
+      <button class="settings-cancel" onclick="closePillarsModal()">ยกเลิก</button>
+      <button class="settings-save" onclick="savePillars()">บันทึก</button>
+    </div>
+  </div>
+</div>
 <div class="settings-modal-overlay" id="sendto-overlay">
   <div class="settings-modal" style="width:480px">
     <h3>ส่งสินค้าไป agent</h3>
@@ -4783,6 +5472,9 @@ function loadCredits() {
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("VIEWER_PORT", "8778"))
+    from src.config_loader import load_config, get_section
+    _cfg = load_config()
+    _main_sys_cfg = get_section(_cfg, "system", {"web_port": 8778})
+    port = int(os.environ.get("VIEWER_PORT", str(_main_sys_cfg.get("web_port", 8778))))
     print(f"\n  MKTApp Viewer → http://localhost:{port}\n")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")

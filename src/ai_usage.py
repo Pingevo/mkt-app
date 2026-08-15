@@ -28,6 +28,15 @@ except ImportError:
 _DEFAULT_URL = "https://digital.in.th"
 
 
+def _system_cfg() -> dict:
+    """อ่าน system section จาก config — fallback {} ถ้าโหลดไม่ได้ (lazy, กัน circular import)."""
+    try:
+        from .config_loader import load_config, get_section
+        return get_section(load_config(), "system", {})
+    except Exception:
+        return {}
+
+
 def _read_cfg() -> tuple[str | None, str | None]:
     """คืน (url, token) — ถ้ายังไม่ตั้งค่า คืน (None, None) แล้วข้ามเงียบๆ."""
     url = get_env("AI_USAGE_HUB_URL", _DEFAULT_URL)
@@ -75,7 +84,7 @@ def _post(endpoint: str, token: str, payload: dict[str, Any]) -> None:
     if not _HTTPX_OK:
         return
     try:
-        with httpx.Client(timeout=5) as client:
+        with httpx.Client(timeout=int(_system_cfg().get("api_timeout_ai_usage", 5))) as client:
             client.post(
                 endpoint,
                 json=payload,

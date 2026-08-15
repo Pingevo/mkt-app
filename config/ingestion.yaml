@@ -40,10 +40,26 @@ max_file_size_mb:
   # audio:   100
 
 # --- สถานะสินค้า ---
-# 5 สถานะ: empty / no_usable_data / processing / ready / stale
+# 6 สถานะ: empty / pending / no_usable_data / processing / ready / stale
 status_labels:
   empty:           "ว่าง"
+  pending:         "รอ ingest"
   no_usable_data:  "ไม่มีข้อมูลใช้ได้"
   processing:      "กำลังประมวลผล"
   ready:           "พร้อม"
   stale:           "ข้อมูลเก่า"
+
+# --- LLM params สำหรับ ingestion ---
+# model ที่ใช้สร้าง description + summary จากข้อมูลดิบ
+model: google/gemini-2.5-flash
+temperature: 0.3
+max_tokens_description: 1024      # max tokens สำหรับ description generation
+max_tokens_summary: 512           # max tokens สำหรับ summary generation
+timeout_seconds: 180              # timeout สำหรับ LLM ingestion (วินาที)
+video_description_words: 200      # จำกัดคำใน description วิดีโอ
+raw_text_length: 3000             # ความยาว raw_text ที่ส่งให้ LLM (ตัวอักษร)
+summary_length: 200               # ความยาว summary ที่เก็บใน metadata (ตัวอักษร)
+default_max_file_mb: 100          # ขนาดไฟล์สูงสุด default (MB)
+
+# --- Product DB ---
+raw_text_max_length: 12000        # ความยาว raw_text สูงสุดที่เก็บ (ตัวอักษร)

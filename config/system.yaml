@@ -1,0 +1,31 @@
+# ============================================================
+# System-wide operational settings
+# ค่า operational ที่เคย hardcode ในโค้ด — timeouts, ports, display lengths
+# แยกจาก agents.yaml เพื่อ separation of concerns
+# ============================================================
+
+web_port: 8778                    # port ของ web viewer
+
+# Timeouts (วินาที)
+api_timeout_credits: 10           # เช็ค OpenRouter credits
+api_timeout_ai_usage: 5           # AI Usage Hub
+api_timeout_capabilities: 30      # ดึง model capabilities
+api_timeout_video: 60             # video API
+api_timeout_video_download: 120   # ดาวน์โหลดวิดีโอ
+ffmpeg_timeout: 120               # FFmpeg
+
+# Cache
+cache_ttl_capabilities: 3600      # TTL cache model capabilities (วินาที)
+
+# Streaming
+stream_refresh_rate: 15           # refresh rate (fps)
+
+# File processing
+file_hash_chunk_size: 8192        # chunk size สำหรับ hash ไฟล์ (bytes)
+
+# Display lengths (ตัวอักษร)
+error_preview_length: 200         # error message preview
+display_preview_length: 500       # preview สั้น
+display_preview_long: 800         # preview ยาว
+caption_display_length: 500       # caption สำหรับ display
+filename_max_length: 30           # ชื่อไฟล์สูงสุด

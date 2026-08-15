@@ -251,11 +251,12 @@ def extract_video_frames(file_path: Path, config: dict, llm: LLMClient | None = 
 
             messages = [{"role": "user", "content": content}]
             try:
+                ing_cfg = _ingestion_cfg()
                 return llm.chat(
                     messages,
-                    model="google/gemini-2.5-flash",
-                    temperature=0.3,
-                    max_tokens=1024,
+                    model=ing_cfg.get("model", "google/gemini-2.5-flash"),
+                    temperature=ing_cfg.get("temperature", 0.3),
+                    max_tokens=ing_cfg.get("max_tokens_description", 1024),
                     stream=False,
                     source="ingestion.describe_video_frames",
                 )
@@ -290,16 +291,26 @@ PREPROCESSORS = {
 
 def _make_llm() -> LLMClient | None:
     """สร้าง LLM client สำหรับ ingestion (ใช้สำหรับ image/video/field extraction)."""
-    from .config_loader import get_env
+    from .config_loader import get_env, load_config, get_section
     api_key = get_env("OPENROUTER_API_KEY")
     if not api_key:
         return None
+    try:
+        cfg = load_config()
+        ing_cfg = get_section(cfg, "ingestion", {})
+    except Exception:
+        ing_cfg = {}
     return LLMClient(
         api_key=api_key,
         base_url="https://openrouter.ai/api/v1",
-        default_model="google/gemini-2.5-flash",
-        timeout=180,
+        default_model=ing_cfg.get("model", "google/gemini-2.5-flash"),
+        timeout=ing_cfg.get("timeout_seconds", 180),
     )
+
+
+def _ingestion_cfg() -> dict:
+    """Get ingestion config from config/ingestion.yaml (lazy load)."""
+    return _load_config()
 
 
 def _scan_product_files(product_id: str, config: dict) -> list[dict[str, Any]]:
@@ -566,21 +577,23 @@ def _generate_metadata_summary(product_id: str, llm: LLMClient | None = None) ->
     # ถ้ามี LLM และมี raw_text → สรุปสั้นๆ
     if llm is not None and raw_text.strip():
         try:
+            ing_cfg = _ingestion_cfg()
+            raw_len = ing_cfg.get("raw_text_length", 3000)
             messages = [
                 {
                     "role": "user",
                     "content": (
                         "สรุปสินค้านี้เป็นภาษาไทย กระชับ ไม่เกิน 100 คำ จากข้อมูลต่อไปนี้:\n"
-                        f"{raw_text[:3000]}\n\n"
+                        f"{raw_text[:raw_len]}\n\n"
                         "ระบุ: ชื่อสินค้า, ประเภท, ลักษณะเด่น"
                     ),
                 }
             ]
             summary = llm.chat(
                 messages,
-                model="google/gemini-2.5-flash",
-                temperature=0.3,
-                max_tokens=512,
+                model=ing_cfg.get("model", "google/gemini-2.5-flash"),
+                temperature=ing_cfg.get("temperature", 0.3),
+                max_tokens=ing_cfg.get("max_tokens_summary", 512),
                 stream=False,
                 source="ingestion.metadata_summary",
             )
@@ -590,7 +603,8 @@ def _generate_metadata_summary(product_id: str, llm: LLMClient | None = None) ->
 
     # ถ้าไม่มี LLM → ใช้ text preview เป็น summary
     if not metadata["summary"] and raw_text:
-        metadata["summary"] = raw_text[:200].replace("\n", " ")
+        ing_cfg = _ingestion_cfg()
+        metadata["summary"] = raw_text[:ing_cfg.get("summary_length", 200)].replace("\n", " ")
 
     record["metadata"] = metadata
     product_db.save(product_id, record)

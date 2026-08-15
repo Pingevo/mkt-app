@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -16,6 +17,15 @@ except ImportError:
     from ai_usage import log_ai_usage, make_entry  # type: ignore
 
 console = Console()
+
+
+def _system_cfg() -> dict:
+    """อ่าน system section จาก config — fallback {} ถ้าโหลดไม่ได้ (lazy, กัน circular import)."""
+    try:
+        from .config_loader import load_config, get_section
+        return get_section(load_config(), "system", {})
+    except Exception:
+        return {}
 
 
 class LLMClient:
@@ -171,7 +181,7 @@ class LLMClient:
 
         with self._client.stream("POST", "/chat/completions", json=payload) as resp:
             resp.raise_for_status()
-            with Live(text, console=console, refresh_per_second=15, transient=False) as live:
+            with Live(text, console=console, refresh_per_second=int(_system_cfg().get("stream_refresh_rate", 15)), transient=False) as live:
                 for line in resp.iter_lines():
                     if not line or not line.startswith("data: "):
                         continue
@@ -263,6 +273,114 @@ class LLMClient:
 
     def close(self) -> None:
         self._client.close()
+
+    def chat_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tool_handlers: dict[str, Any],
+        *,
+        model: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        max_retry_limit: int = 3,
+        max_iterations: int = 10,
+        source: str = "llm_client.chat_with_tools",
+    ) -> str:
+        """Tool calling loop — LLM เรียก function เอง เรา execute แล้วส่งผลกลับ.
+
+        ใช้ openai SDK (point ไป OpenRouter) เพราะมี tool calling parsing พร้อม.
+
+        Args:
+            messages: ประวัติการสนทนา (system + user)
+            tools: tool definitions แบบ OpenAI schema
+            tool_handlers: dict {tool_name: callable} — function จริงที่จะ execute
+            max_iterations: จำกัดรอบ tool calling (กัน LLM วนไม่จบ)
+            source: label สำหรับ log
+
+        Returns:
+            ข้อความตอบสุดท้ายของ LLM (หลังใช้ tool จนจบ)
+        """
+        from openai import OpenAI
+
+        client = OpenAI(
+            base_url=self._base_url,
+            api_key=self._api_key,
+            timeout=self._timeout,
+        )
+        used_model = model or self._default_model
+
+        # copy messages เพื่อไม่แก้ของเดิม
+        convo = list(messages)
+
+        for iteration in range(max_iterations):
+            t0 = time.time()
+            try:
+                response = client.chat.completions.create(
+                    model=used_model,
+                    messages=convo,
+                    tools=tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                msg = response.choices[0].message
+                usage = response.usage
+                self._log_usage(used_model, source, usage.model_dump() if usage else None,
+                                duration_ms=int((time.time() - t0) * 1000), attempt=iteration + 1)
+
+                # ถ้า LLM ไม่ขอเรียก tool → ตอบจบ
+                if not msg.tool_calls:
+                    return msg.content or ""
+
+                # append assistant message (มี tool_calls) เข้า conversation
+                # ต้องแปลงเป็น dict เพราะ openai SDK ต้องการ dict ตอนส่งกลับ
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": msg.content,
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.function.name,
+                                "arguments": call.function.arguments,
+                            },
+                        }
+                        for call in msg.tool_calls
+                    ],
+                }
+                convo.append(assistant_msg)
+
+                # execute ทุก tool call แล้วส่งผลกลับ
+                for call in msg.tool_calls:
+                    tool_name = call.function.name
+                    handler = tool_handlers.get(tool_name)
+                    if handler is None:
+                        result = json.dumps({"error": f"unknown tool: {tool_name}"})
+                    else:
+                        try:
+                            args = json.loads(call.function.arguments)
+                            handler_result = handler(**args)
+                            result = json.dumps(handler_result, ensure_ascii=False)
+                        except Exception as e:
+                            result = json.dumps({"error": str(e)}, ensure_ascii=False)
+                    convo.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": result,
+                    })
+
+            except Exception as exc:
+                last_error = exc
+                self._log_usage(used_model, source, None,
+                                duration_ms=int((time.time() - t0) * 1000),
+                                attempt=iteration + 1, status="error", error_message=str(exc))
+                if iteration < max_retry_limit:
+                    time.sleep(2 ** (iteration + 1))
+                    continue
+                raise RuntimeError(f"tool calling failed: {last_error}")
+
+        return "ครบจำนวนรอบสูงสุดแล้ว แต่ LLM ยังไม่ตอบจบ"
 
     def abort(self) -> None:
         """Force-close the connection, aborting any in-flight request."""

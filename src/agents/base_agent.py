@@ -19,6 +19,15 @@ from ..llm_client import LLMClient
 console = Console()
 
 
+def _web_search_cfg() -> dict:
+    """อ่าน web_search section จาก config — fallback {} ถ้าโหลดไม่ได้ (lazy, กัน circular import)."""
+    try:
+        from ..config_loader import load_config, get_section
+        return get_section(load_config(), "web_search", {})
+    except Exception:
+        return {}
+
+
 class BaseAgent:
     """Base class for all marketing team agents.
 
@@ -272,7 +281,7 @@ class BaseAgent:
             ]
             tools = None
             if web_search and not response_format:
-                tools = [{"type": "openrouter:web_search", "max_results": 5}]
+                tools = [{"type": "openrouter:web_search", "max_results": int(_web_search_cfg().get("max_results", 5))}]
             output = self.llm.chat(
                 messages,
                 model=self.config.get("model"),
@@ -347,7 +356,7 @@ class BaseAgent:
         ส่ง product spec + brand context + instructions ให้ LLM
         แล้วให้มันคืน list ของ search queries (JSON array)
         """
-        max_queries = self.config.get("web_search_max_queries", 5)
+        max_queries = self.config.get("web_search_max_queries", int(_web_search_cfg().get("max_queries", 5)))
         # ส่ง instructions ของ user แยกชัด เพื่อให้ planning ใช้คำสั่ง user ในการวางแผน query
         instruction_block = self._format_instructions()
         plan_system = (
@@ -375,8 +384,8 @@ class BaseAgent:
             [{"role": "system", "content": plan_system},
              {"role": "user", "content": plan_user}],
             model=self.config.get("model"),
-            temperature=0.2,
-            max_tokens=512,
+            temperature=float(_web_search_cfg().get("planning_temperature", 0.2)),
+            max_tokens=int(_web_search_cfg().get("planning_max_tokens", 512)),
             max_retry_limit=self.config.get("max_retry_limit", 3),
             stream=False,
             source=f"{self.agent_name}.plan_search",
@@ -412,7 +421,7 @@ class BaseAgent:
         """
         if not queries:
             return ""
-        tools = [{"type": "openrouter:web_search", "max_results": 3}]
+        tools = [{"type": "openrouter:web_search", "max_results": int(_web_search_cfg().get("max_results_detailed", 3))}]
         all_results: list[str] = []
         for i, q in enumerate(queries, 1):
             console.print(f"[yellow]  ค้นหา [{i}/{len(queries)}]: {q}[/yellow]")
@@ -421,8 +430,8 @@ class BaseAgent:
                     [{"role": "system", "content": "คุณคือผู้ช่วยค้นข้อมูล ค้น web แล้วสรุปผลแบบกระชับ พร้อมลิงก์อ้างอิง"},
                      {"role": "user", "content": f"ค้นหา: {q}\nสรุปข้อมูลที่เกี่ยวข้อง พร้อมลิงก์ [ชื่อเว็บ](URL)"}],
                     model=self.config.get("model"),
-                    temperature=0.1,
-                    max_tokens=1500,
+                    temperature=float(_web_search_cfg().get("execution_temperature", 0.1)),
+                    max_tokens=int(_web_search_cfg().get("execution_max_tokens", 1500)),
                     max_retry_limit=self.config.get("max_retry_limit", 3),
                     stream=False,
                     tools=tools,

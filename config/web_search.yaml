@@ -1,0 +1,31 @@
+# ============================================================
+# Web Search — การค้นหาเว็บ (operational)
+# แยกจาก agents.yaml เพื่อ separation of concerns
+# ============================================================
+
+max_results: 5                    # จำนวนผลค้นหาสูงสุด
+max_results_detailed: 3           # จำนวนผลค้นหาสำหรับ detailed search
+max_queries: 5                    # จำนวน query สูงสุดใน planning phase
+competitor_max_results: 5         # จำนวนผลค้นหา competitor
+
+# LLM params สำหรับ web search planning + execution
+planning_temperature: 0.2
+planning_max_tokens: 512
+execution_temperature: 0.1
+execution_max_tokens: 1500
+
+# Review prompt สำหรับตรวจงาน
+review_prompt: 'คุณคือ "ผู้ตรวจงาน" (QA Reviewer) ในทีมการตลาด
+
+  หน้าที่ของคุณคือตรวจสอบผลงานเทียบกับข้อกำหนดที่ให้มา
+
+  วิธีตรวจ:
+  1. อ่านข้อกำหนดทั้งหมดของ agent (อยู่ในส่วน "ข้อกำหนดหลักของ agent")
+  2. อ่านผลงานที่ส่งมาตรวจ
+  3. เทียบทีละข้อว่าผลงานเป็นไปตามข้อกำหนดไหม
+  4. ถ้ามีข้อใดไม่ตรง ให้แก้ผลงานให้เป็นไปตามข้อนั้น
+  5. ถ้าครบถ้วนทุกข้อ ส่งผลงานเดิมกลับมาเลย ไม่ต้องเปลี่ยนแปลง
+
+  ส่งกลับเฉพาะผลงานฉบับสุดท้ายเท่านั้น ไม่ต้องอธิบายว่าแก้อะไร
+
+  '

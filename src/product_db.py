@@ -18,9 +18,21 @@ import base64
 import hashlib
 import json
 import mimetypes
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+
+def _get_raw_text_max_length() -> int:
+    """Read raw_text max length from config/ingestion.yaml (lazy load)."""
+    try:
+        from .config_loader import load_config, get_section
+        cfg = load_config()
+        ing_cfg = get_section(cfg, "ingestion", {"raw_text_max_length": 12000})
+        return int(ing_cfg.get("raw_text_max_length", 12000))
+    except Exception:
+        return int(os.environ.get("PRODUCT_DB_RAW_TEXT_MAX", "12000"))
 
 # สถานะสินค้า 6 แบบ
 STATUS_EMPTY = "empty"                # ไม่มีไฟล์เลย
@@ -301,7 +313,7 @@ def get_agent_context_text(product_id: str) -> str:
 
     if data["raw_text"]:
         parts.append("--- ข้อมูลดิบ (text) ---")
-        parts.append(data["raw_text"][:12000])  # จำกัดป้องกัน token เกิน
+        parts.append(data["raw_text"][:_get_raw_text_max_length()])  # จำกัดป้องกัน token เกิน
         parts.append("--- สิ้นสุดข้อมูลดิบ ---\n")
 
     # สถาปัตยกรรมใหม่: ไม่ส่งคำบรรยายรูปแล้ว (agent เห็นรูปจริงผ่าน get_agent_context)
@@ -350,7 +362,7 @@ def get_agent_context(product_id: str) -> dict[str, Any]:
     text_parts = []
     if record.get("raw_text"):
         text_parts.append("--- ข้อมูลดิบ (text) ---")
-        text_parts.append(record["raw_text"][:12000])
+        text_parts.append(record["raw_text"][:_get_raw_text_max_length()])
         text_parts.append("--- สิ้นสุดข้อมูลดิบ ---\n")
 
     for t in record.get("video_transcripts", []):

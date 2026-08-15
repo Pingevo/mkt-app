@@ -63,13 +63,13 @@ def _paths_to_input_references(paths: list[str]) -> list[dict]:
 from .config_loader import get_env
 
 
-# Default models — override ได้ใน config/media.yaml
-DEFAULT_IMAGE_MODEL = "google/gemini-3.1-flash-image"
-DEFAULT_VIDEO_MODEL = "bytedance/seedance-2.0-fast"
+# ---------------------------------------------------------------------------
+# Lazy config loaders — อ่านจาก config/agents.yaml (sections: media_gen, system)
+# ใช้ lazy loading เพื่อหลีกเลี่ยง circular import
+# ---------------------------------------------------------------------------
 
-
-def _load_media_config() -> dict[str, Any]:
-    """อ่าน config/media.yaml — มีไม่มีก็ได้ ใช้ default ถ้าไม่มี."""
+def _media_cfg() -> dict:
+    """อ่าน media config จาก config/media.yaml — fallback {} ถ้าโหลดไม่ได้."""
     cfg_path = Path("config/media.yaml")
     if not cfg_path.exists():
         return {}
@@ -78,6 +78,40 @@ def _load_media_config() -> dict[str, Any]:
             return yaml.safe_load(f) or {}
     except Exception:
         return {}
+
+
+def _system_cfg() -> dict:
+    """อ่าน system section จาก config — fallback {} ถ้าโหลดไม่ได้."""
+    try:
+        from .config_loader import load_config, get_section
+        return get_section(load_config(), "system", {})
+    except Exception:
+        return {}
+
+
+# Default models — fallback ถ้า config ไม่มี (override ได้ใน config/agents.yaml → media_gen)
+_FALLBACK_IMAGE_MODEL = "google/gemini-3.1-flash-image"
+_FALLBACK_VIDEO_MODEL = "bytedance/seedance-2.0-fast"
+
+
+def _default_image_model() -> str:
+    """คืน default image model — อ่านจาก config ก่อน ถ้าไม่มีใช้ fallback."""
+    return _media_cfg().get("image_model", _FALLBACK_IMAGE_MODEL)
+
+
+def _default_video_model() -> str:
+    """คืน default video model — อ่านจาก config ก่อน ถ้าไม่มีใช้ fallback."""
+    return _media_cfg().get("video_model", _FALLBACK_VIDEO_MODEL)
+
+
+# Backward-compatible module-level constants (lazy — อ่านจาก config ตอน import)
+DEFAULT_IMAGE_MODEL = _default_image_model()
+DEFAULT_VIDEO_MODEL = _default_video_model()
+
+
+def _load_media_config() -> dict[str, Any]:
+    """อ่าน config/media.yaml — alias สำหรับ backward compat."""
+    return _media_cfg()
 
 
 def _get_api_key() -> str:
@@ -96,7 +130,11 @@ _CAPABILITIES_CACHE: dict[str, dict[str, Any]] = {}
 
 # cache ไฟล์ — ข้ามเซสชั่น อยู่ใน cache/ เพื่อไม่ปน data/
 _CAPABILITIES_CACHE_DIR = Path("cache") / "_media_capabilities"
-_CAPABILITIES_CACHE_TTL = 3600  # 1 ชม.
+
+
+def _capabilities_cache_ttl() -> int:
+    """คืน cache TTL — อ่านจาก config (system.cache_ttl_capabilities), fallback 3600."""
+    return int(_system_cfg().get("cache_ttl_capabilities", 3600))
 
 
 def get_model_capabilities(model_id: str, kind: str = "video") -> dict[str, Any]:
@@ -118,7 +156,7 @@ def get_model_capabilities(model_id: str, kind: str = "video") -> dict[str, Any]
     cache_file = _CAPABILITIES_CACHE_DIR / f"{cache_key.replace('/', '_')}.json"
     if cache_file.exists():
         age = time.time() - cache_file.stat().st_mtime
-        if age < _CAPABILITIES_CACHE_TTL:
+        if age < _capabilities_cache_ttl():
             try:
                 data = json.loads(cache_file.read_text(encoding="utf-8"))
                 _CAPABILITIES_CACHE[cache_key] = data
@@ -136,7 +174,7 @@ def get_model_capabilities(model_id: str, kind: str = "video") -> dict[str, Any]
     headers = {"Authorization": f"Bearer {api_key}"}
 
     try:
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=int(_system_cfg().get("api_timeout_capabilities", 30))) as client:
             resp = client.get(endpoint, headers=headers)
             resp.raise_for_status()
             data = resp.json()
@@ -267,8 +305,8 @@ def generate_image(
     output_path: Path,
     *,
     model: str | None = None,
-    aspect_ratio: str = "16:9",
-    timeout: float = 180,
+    aspect_ratio: str | None = None,
+    timeout: float | None = None,
     input_references: list[dict] | list[str] | None = None,
 ) -> dict[str, Any]:
     """สร้างรูปจาก prompt — เซฟลง output_path แล้วคืน metadata.
@@ -280,7 +318,12 @@ def generate_image(
     คืน: {ok, path, model, prompt, error?, warnings?}
     """
     cfg = _load_media_config()
-    model = model or cfg.get("image_model", DEFAULT_IMAGE_MODEL)
+    mcfg = _media_cfg()
+    model = model or mcfg.get("image_model", DEFAULT_IMAGE_MODEL)
+    if aspect_ratio is None:
+        aspect_ratio = mcfg.get("image_aspect_ratio", "16:9")
+    if timeout is None:
+        timeout = float(mcfg.get("image_timeout_seconds", 180))
     api_key = _get_api_key()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -298,8 +341,8 @@ def generate_image(
         "prompt": prompt,
         "aspect_ratio": aspect_ratio,
     }
-    # n: จำนวนภาพ — default 1
-    n = cfg.get("image_n", 1)
+    # n: จำนวนภาพ — default จาก config (media_gen.image_n)
+    n = cfg.get("image_n", mcfg.get("image_n", 1))
     if n > 1:
         payload["n"] = n
 
@@ -367,7 +410,8 @@ def generate_image(
         }
     except httpx.HTTPStatusError as e:
         _log_media_usage("image", model, None, duration_ms=int((time.time() - t0) * 1000), status="error", error_message=str(e))
-        return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:200]}", "model": model, "prompt": prompt, "warnings": warnings}
+        _err_len = int(_system_cfg().get("error_preview_length", 200))
+        return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:_err_len]}", "model": model, "prompt": prompt, "warnings": warnings}
     except Exception as e:
         _log_media_usage("image", model, None, duration_ms=int((time.time() - t0) * 1000), status="error", error_message=str(e))
         return {"ok": False, "error": str(e), "model": model, "prompt": prompt, "warnings": warnings}
@@ -382,11 +426,11 @@ def generate_video(
     output_path: Path,
     *,
     model: str | None = None,
-    duration: int = 5,
-    aspect_ratio: str = "16:9",
-    resolution: str = "720p",
-    poll_interval: float = 5.0,
-    max_wait: float = 600.0,
+    duration: int | None = None,
+    aspect_ratio: str | None = None,
+    resolution: str | None = None,
+    poll_interval: float | None = None,
+    max_wait: float | None = None,
     on_status=None,
     input_references: list[dict] | list[str] | None = None,
     frame_images: list[dict] | list[str] | None = None,
@@ -403,7 +447,18 @@ def generate_video(
     คืน: {ok, path, model, prompt, error?, warnings?}
     """
     cfg = _load_media_config()
-    model = model or cfg.get("video_model", DEFAULT_VIDEO_MODEL)
+    mcfg = _media_cfg()
+    model = model or mcfg.get("video_model", DEFAULT_VIDEO_MODEL)
+    if duration is None:
+        duration = int(mcfg.get("video_duration", 5))
+    if aspect_ratio is None:
+        aspect_ratio = mcfg.get("video_aspect_ratio", "16:9")
+    if resolution is None:
+        resolution = mcfg.get("video_resolution", "720p")
+    if poll_interval is None:
+        poll_interval = float(mcfg.get("video_poll_interval_seconds", 5.0))
+    if max_wait is None:
+        max_wait = float(mcfg.get("video_max_wait_seconds", 600.0))
     api_key = _get_api_key()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -469,7 +524,7 @@ def generate_video(
     try:
         if on_status:
             on_status("submitting")
-        with httpx.Client(timeout=60) as client:
+        with httpx.Client(timeout=int(_system_cfg().get("api_timeout_video", 60))) as client:
             resp = client.post(
                 "https://openrouter.ai/api/v1/videos",
                 headers=headers,
@@ -486,7 +541,7 @@ def generate_video(
 
         # Poll จนเสร็จ
         elapsed = 0.0
-        with httpx.Client(timeout=60) as client:
+        with httpx.Client(timeout=int(_system_cfg().get("api_timeout_video", 60))) as client:
             while elapsed < max_wait:
                 if on_status:
                     on_status(f"generating ({int(elapsed)}s)")
@@ -511,7 +566,7 @@ def generate_video(
                     video_resp = httpx.get(
                         urls[0],
                         headers={"Authorization": f"Bearer {api_key}"},
-                        timeout=120,
+                        timeout=int(_system_cfg().get("api_timeout_video_download", 120)),
                     )
                     video_resp.raise_for_status()
                     output_path.write_bytes(video_resp.content)
@@ -532,7 +587,8 @@ def generate_video(
         return {"ok": False, "error": f"timeout after {max_wait}s", "model": model, "prompt": prompt, "warnings": warnings}
     except httpx.HTTPStatusError as e:
         _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error", error_message=str(e))
-        return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:200]}", "model": model, "prompt": prompt, "warnings": warnings}
+        _err_len = int(_system_cfg().get("error_preview_length", 200))
+        return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:_err_len]}", "model": model, "prompt": prompt, "warnings": warnings}
     except Exception as e:
         _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error", error_message=str(e))
         return {"ok": False, "error": str(e), "model": model, "prompt": prompt, "warnings": warnings}
@@ -627,14 +683,15 @@ def _rewrite_prompt_with_llm(
         f"Rewrite the prompt to avoid rejection. Output only the new prompt."
     )
     try:
+        mcfg = _media_cfg()
         new_prompt = llm.chat(
             [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_msg},
             ],
             model=model,
-            temperature=0.3,
-            max_tokens=1024,
+            temperature=float(mcfg.get("retry_temperature", 0.3)),
+            max_tokens=int(mcfg.get("retry_max_tokens", 1024)),
             stream=False,
             source="media_gen.rewrite_prompt",
         )
@@ -652,8 +709,8 @@ def generate_image_with_retry(
     *,
     llm=None,
     model: str | None = None,
-    aspect_ratio: str = "16:9",
-    timeout: float = 180,
+    aspect_ratio: str | None = None,
+    timeout: float | None = None,
     on_retry=None,
     input_references: list[dict] | list[str] | None = None,
 ) -> dict[str, Any]:
@@ -665,7 +722,8 @@ def generate_image_with_retry(
     คืน: เหมือน generate_image + เพิ่ม retry_count, original_prompt, retry_history
     """
     cfg = _load_media_config()
-    retry_model = cfg.get("media_retry_model", "anthropic/claude-sonnet-4")
+    mcfg = _media_cfg()
+    retry_model = cfg.get("media_retry_model", mcfg.get("media_retry_model", "anthropic/claude-sonnet-4"))
 
     current_prompt = prompt
     attempt = 0
@@ -720,11 +778,11 @@ def generate_video_with_retry(
     *,
     llm=None,
     model: str | None = None,
-    duration: int = 5,
-    aspect_ratio: str = "16:9",
-    resolution: str = "720p",
-    poll_interval: float = 5.0,
-    max_wait: float = 600.0,
+    duration: int | None = None,
+    aspect_ratio: str | None = None,
+    resolution: str | None = None,
+    poll_interval: float | None = None,
+    max_wait: float | None = None,
     on_status=None,
     on_retry=None,
     input_references: list[dict] | list[str] | None = None,
@@ -739,7 +797,8 @@ def generate_video_with_retry(
     คืน: เหมือน generate_video + เพิ่ม retry_count, original_prompt, retry_history
     """
     cfg = _load_media_config()
-    retry_model = cfg.get("media_retry_model", "anthropic/claude-sonnet-4")
+    mcfg = _media_cfg()
+    retry_model = cfg.get("media_retry_model", mcfg.get("media_retry_model", "anthropic/claude-sonnet-4"))
 
     current_prompt = prompt
     attempt = 0
