@@ -1120,6 +1120,70 @@ async def api_brand_migrate(request: Request) -> JSONResponse:
 
 
 # ============================================================
+# Voice Learning — วิเคราะห์ตัวอย่างโพสต์ → voice profile
+# ============================================================
+
+@app.post("/api/voice_learn")
+async def api_voice_learn(request: Request) -> JSONResponse:
+    """รับตัวอย่าง (paste + files + URLs) → LLM วิเคราะห์ → คืน voice profile.
+
+    Body: {pasted_texts: [str], file_paths: [str], urls: [str]}
+    คืน: {ok: true, voice: {...}} หรือ {ok: false, error: "..."}
+    """
+    from src.voice_learner import collect_examples, analyze_voice
+    body = await request.json()
+    pasted = body.get("pasted_texts", [])
+    files = body.get("file_paths", [])
+    urls = body.get("urls", [])
+
+    # รวมตัวอย่างจากทุกแหล่ง
+    examples = collect_examples(pasted_texts=pasted, file_paths=files, urls=urls)
+    if not examples:
+        return JSONResponse({"ok": False, "error": "ไม่มีตัวอย่างให้วิเคราะห์ — กรุณา paste text, upload ไฟล์, หรือใส่ URL"}, status_code=400)
+
+    # สร้าง LLM client
+    try:
+        orch = Orchestrator(brand_dir="brand")
+        llm = orch._make_client()
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"สร้าง LLM client ไม่ได้: {e}"}, status_code=500)
+
+    try:
+        voice = analyze_voice(examples, llm)
+        if not voice:
+            return JSONResponse({"ok": False, "error": "LLM วิเคราะห์ไม่สำเร็จ — ลองใหม่อีกครั้ง"}, status_code=500)
+        return JSONResponse({"ok": True, "voice": voice, "example_count": len(examples)})
+    finally:
+        try:
+            llm.close()
+        except Exception:
+            pass
+
+
+@app.post("/api/voice_learn_upload")
+async def api_voice_learn_upload(request: Request) -> JSONResponse:
+    """รับไฟล์ upload (multipart) → เซฟ temp → คืน path สำหรับส่งให้ /api/voice_learn."""
+    from fastapi import UploadFile, File, Form
+    # ใช้ Request โดยตรงเพราะเราใช้ JSONResponse ไม่ใช่ fastapi Form
+    form = await request.form()
+    files = form.getlist("files")
+    if not files:
+        return JSONResponse({"ok": False, "error": "ไม่มีไฟล์"}, status_code=400)
+
+    import tempfile
+    saved: list[str] = []
+    tmp_dir = Path(tempfile.mkdtemp(prefix="voice_learn_"))
+    for f in files:
+        if hasattr(f, "filename") and f.filename:
+            dest = tmp_dir / f.filename
+            content = await f.read()
+            dest.write_bytes(content)
+            saved.append(str(dest))
+
+    return JSONResponse({"ok": True, "paths": saved, "tmp_dir": str(tmp_dir)})
+
+
+# ============================================================
 # Content Pillars — จัดการเสาหลักคอนเทนต์
 # ============================================================
 
@@ -3405,6 +3469,8 @@ function loadBrandFiles() {
     if (!data) { el.innerHTML = '<div style="color:#555;font-size:12px;padding:12px">ยังไม่มีข้อมูลแบรนด์</div>'; return; }
     _brandData = data;
     let html = '';
+    html += '<div class="brand-file-item" onclick="openVoiceLearnModal()" style="color:#7c8aff;font-weight:600">🎓 ฝึก AI จากตัวอย่าง (Voice Learning)</div>';
+    html += '<div style="border-top:1px solid #2a2d3a;margin:8px 0"></div>';
     html += '<div class="brand-file-item" onclick="editBrandSection(\'voice\')">🎤 โทนเสียง (Voice)</div>';
     html += '<div class="brand-file-item" onclick="editBrandSection(\'terms\')">📝 คำที่ใช้/ห้ามใช้ (Terms)</div>';
     html += '<div class="brand-file-item" onclick="editBrandSection(\'profile\')">📋 ประวัติแบรนด์ (Profile)</div>';
@@ -3568,6 +3634,152 @@ function saveBrandFileModal() {
     } else {
       status.className = 'upload-status err';
       status.textContent = data.error || 'เกิดข้อผิดพลาด';
+    }
+  });
+}
+
+// ============================================================
+// Voice Learning modal — upload ตัวอย่าง → AI วิเคราะห์โทนเสียง
+// ============================================================
+let _voiceLearnFiles = [];
+
+function openVoiceLearnModal() {
+  _voiceLearnFiles = [];
+  const overlay = document.getElementById('voice-learn-overlay');
+  document.getElementById('voice-learn-pasted').value = '';
+  document.getElementById('voice-learn-urls').value = '';
+  document.getElementById('voice-learn-file-list').innerHTML = '';
+  document.getElementById('voice-learn-status').textContent = '';
+  document.getElementById('voice-learn-status').className = 'upload-status';
+  document.getElementById('voice-learn-result').innerHTML = '';
+  overlay.className = 'settings-modal-overlay visible';
+}
+
+function closeVoiceLearnModal() {
+  document.getElementById('voice-learn-overlay').className = 'settings-modal-overlay';
+}
+
+function handleVoiceLearnFiles(input) {
+  const files = Array.from(input.files);
+  for (const f of files) {
+    _voiceLearnFiles.push(f);
+  }
+  renderVoiceLearnFiles();
+}
+
+function removeVoiceLearnFile(idx) {
+  _voiceLearnFiles.splice(idx, 1);
+  renderVoiceLearnFiles();
+}
+
+function renderVoiceLearnFiles() {
+  const el = document.getElementById('voice-learn-file-list');
+  if (!_voiceLearnFiles.length) { el.innerHTML = ''; return; }
+  el.innerHTML = _voiceLearnFiles.map((f, i) =>
+    '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#1e2030;border-radius:6px;margin-bottom:4px">' +
+    '<span style="font-size:12px;color:#ccc;flex:1">' + escapeHtml(f.name) + ' (' + Math.round(f.size/1024) + 'KB)</span>' +
+    '<button onclick="removeVoiceLearnFile(' + i + ')" style="background:none;border:none;color:#f44;cursor:pointer;font-size:14px">✕</button>' +
+    '</div>'
+  ).join('');
+}
+
+function runVoiceLearn() {
+  const status = document.getElementById('voice-learn-status');
+  const result = document.getElementById('voice-learn-result');
+  const pasted = document.getElementById('voice-learn-pasted').value.trim();
+  const urls = document.getElementById('voice-learn-urls').value.trim();
+
+  // แยก pasted text ตามบรรทัดว่าง
+  const pastedTexts = pasted ? pasted.split(/\n\s*\n/).map(s => s.trim()).filter(s => s) : [];
+  const urlList = urls ? urls.split('\n').map(s => s.trim()).filter(s => s) : [];
+
+  if (!pastedTexts.length && !_voiceLearnFiles.length && !urlList.length) {
+    status.className = 'upload-status err';
+    status.textContent = 'กรุณาใส่ตัวอย่างอย่างน้อย 1 อย่าง (paste text, upload ไฟล์, หรือ URL)';
+    return;
+  }
+
+  status.className = 'upload-status';
+  status.textContent = 'กำลังวิเคราะห์...';
+
+  // ถ้ามีไฟล์ → upload ก่อน แล้วค่อยส่งรวม
+  const uploadPromise = _voiceLearnFiles.length > 0
+    ? uploadVoiceLearnFiles().then(paths => paths)
+    : Promise.resolve([]);
+
+  uploadPromise.then(filePaths => {
+    return fetch('/api/voice_learn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pasted_texts: pastedTexts,
+        file_paths: filePaths,
+        urls: urlList,
+      }),
+    }).then(r => r.json());
+  }).then(data => {
+    if (data.ok) {
+      status.className = 'upload-status ok';
+      status.textContent = 'วิเคราะห์สำเร็จ ✓ (จาก ' + data.example_count + ' ตัวอย่าง)';
+      renderVoiceLearnResult(data.voice);
+    } else {
+      status.className = 'upload-status err';
+      status.textContent = data.error || 'วิเคราะห์ไม่สำเร็จ';
+    }
+  }).catch(e => {
+    status.className = 'upload-status err';
+    status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+  });
+}
+
+function uploadVoiceLearnFiles() {
+  const formData = new FormData();
+  for (const f of _voiceLearnFiles) {
+    formData.append('files', f);
+  }
+  return fetch('/api/voice_learn_upload', {
+    method: 'POST',
+    body: formData,
+  }).then(r => r.json()).then(data => {
+    if (data.ok) return data.paths;
+    throw new Error(data.error || 'upload ไม่สำเร็จ');
+  });
+}
+
+function renderVoiceLearnResult(voice) {
+  const el = document.getElementById('voice-learn-result');
+  let html = '<div style="margin-top:16px;border-top:1px solid #2a2d3a;padding-top:12px">';
+  html += '<div style="font-size:13px;color:#7c8aff;margin-bottom:8px">ผลการวิเคราะห์ Voice Profile</div>';
+  if (voice.personality) html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">บุคลิก:</span> <span style="color:#e0e0e0">' + escapeHtml(voice.personality) + '</span></div>';
+  if (voice.tone_description) html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">โทนเสียง:</span> <span style="color:#e0e0e0">' + escapeHtml(voice.tone_description) + '</span></div>';
+  if (voice.formality_level) html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">ระดับทางการ:</span> <span style="color:#e0e0e0">' + voice.formality_level + '/5</span></div>';
+  if (voice.language) html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">ภาษา:</span> <span style="color:#e0e0e0">' + escapeHtml(voice.language) + '</span></div>';
+  if (voice.banned_phrases && voice.banned_phrases.length) html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">คำต้องห้าม:</span> <span style="color:#e0e0e0">' + escapeHtml(voice.banned_phrases.join(', ')) + '</span></div>';
+  if (voice.examples && voice.examples.length) {
+    html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">ตัวอย่างที่ดี:</span></div>';
+    html += '<div style="margin-left:12px;margin-bottom:6px">' + voice.examples.map(e => '<div style="color:#ccc;font-size:12px;margin-bottom:4px">• ' + escapeHtml(e.substring(0, 150)) + (e.length > 150 ? '...' : '') + '</div>').join('') + '</div>';
+  }
+  html += '<button class="settings-save" style="margin-top:12px" onclick="saveVoiceLearnResult(' + JSON.stringify(voice).replace(/"/g, '&quot;') + ')">บันทึกเป็น Voice Profile</button>';
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function saveVoiceLearnResult(voice) {
+  fetch('/api/brand_json_save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ voice: voice }),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      _brandData.voice = voice;
+      const status = document.getElementById('voice-learn-status');
+      status.className = 'upload-status ok';
+      status.textContent = 'บันทึก Voice Profile แล้ว ✓';
+      setTimeout(closeVoiceLearnModal, 1200);
+    } else {
+      const status = document.getElementById('voice-learn-status');
+      status.className = 'upload-status err';
+      status.textContent = data.error || 'บันทึกไม่สำเร็จ';
     }
   });
 }
@@ -5653,6 +5865,31 @@ function loadCredits() {
     <div class="settings-actions">
       <button class="settings-cancel" onclick="closeBrandModal()">ยกเลิก</button>
       <button class="settings-save" onclick="saveBrandFileModal()">บันทึก</button>
+    </div>
+  </div>
+</div>
+<div class="settings-modal-overlay" id="voice-learn-overlay">
+  <div class="settings-modal" style="width:600px;max-height:85vh;overflow-y:auto">
+    <h3>🎓 Voice Learning — ฝึก AI จากตัวอย่าง</h3>
+    <p style="font-size:12px;color:#888;margin:0 0 14px 0">ใส่ตัวอย่างโพสต์ที่สะท้อนโทนเสียงแบรนด์ AI จะวิเคราะห์และสร้าง Voice Profile ให้อัตโนมัติ (เหมือน Jasper Brand Voice)</p>
+    <div style="margin-bottom:14px">
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">📝 Paste ตัวอย่างโพสต์ (คั่นแต่ละตัวอย่างด้วยบรรทัดว่าง)</label>
+      <textarea id="voice-learn-pasted" placeholder="วางตัวอย่างโพสต์ที่นี่...&#10;&#10;ตัวอย่างที่ 1: ...&#10;&#10;ตัวอย่างที่ 2: ..." style="width:100%;min-height:120px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:12px;color:#e0e0e0;font-size:13px;line-height:1.6;resize:vertical"></textarea>
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">📎 Upload ไฟล์ (.txt, .md, .pdf, .docx)</label>
+      <input type="file" multiple accept=".txt,.md,.pdf,.docx" onchange="handleVoiceLearnFiles(this)" style="font-size:12px;color:#ccc;margin-bottom:8px">
+      <div id="voice-learn-file-list"></div>
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">🔗 URL (บรรทัดละ URL)</label>
+      <textarea id="voice-learn-urls" placeholder="https://example.com/blog/post-1&#10;https://example.com/blog/post-2" style="width:100%;min-height:60px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:12px;color:#e0e0e0;font-size:13px;resize:vertical"></textarea>
+    </div>
+    <div class="upload-status" id="voice-learn-status"></div>
+    <div id="voice-learn-result"></div>
+    <div class="settings-actions">
+      <button class="settings-cancel" onclick="closeVoiceLearnModal()">ยกเลิก</button>
+      <button class="settings-save" onclick="runVoiceLearn()">วิเคราะห์</button>
     </div>
   </div>
 </div>
