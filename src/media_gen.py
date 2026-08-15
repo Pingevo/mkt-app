@@ -20,9 +20,9 @@ import httpx
 import yaml
 
 try:
-    from .ai_usage import log_ai_usage, make_entry
+    from .ai_usage import log_ai_usage, log_local_usage, make_entry
 except ImportError:
-    from ai_usage import log_ai_usage, make_entry  # type: ignore
+    from ai_usage import log_ai_usage, log_local_usage, make_entry  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -663,7 +663,7 @@ def _log_media_usage(
     status: str = "success",
     error_message: str | None = None,
 ) -> None:
-    """ยิง log ไป AI Usage Hub สำหรับ image/video gen — fire-and-forget."""
+    """ยิง log ไป AI Usage Hub + เซฟ local สำหรับ image/video gen — fire-and-forget."""
     operation = "images.generate" if media_type == "image" else "videos.generate"
     entry = make_entry(
         provider="openrouter",
@@ -684,7 +684,10 @@ def _log_media_usage(
         if usage.get("completion_tokens") is not None:
             entry["completion_tokens"] = usage.get("completion_tokens")
         entry["raw_usage"] = usage
+    # 1. ยิงไป Hub (ถ้ามี token)
     log_ai_usage(entry)
+    # 2. เซฟ local (เสมอ — ไม่ต้องมี token)
+    log_local_usage(entry)
 
 
 # ---------------------------------------------------------------------------

@@ -530,12 +530,20 @@ class Orchestrator:
 
             def _get_content_history(product_id: str = "") -> list[dict]:
                 if product_id:
-                    return content_history.get_entries_for_product(
+                    entries = content_history.get_entries_for_product(
                         project_root, product_id, config=ch_cfg,
                     )
-                return content_history.get_recent_entries(
-                    project_root, config=ch_cfg,
-                )
+                else:
+                    entries = content_history.get_recent_entries(
+                        project_root, config=ch_cfg,
+                    )
+                # strip embedding — LLM ไม่ได้ใช้ vector ทำอะไร
+                # แต่ละ entry มี embedding 1536 floats = ~31K chars
+                # ถ้าส่งไป LLM จะกิน tokens มหาศาล (340K+ tokens ต่อ call)
+                return [
+                    {k: v for k, v in e.items() if k != "embedding"}
+                    for e in entries
+                ]
 
             tool_handlers = {
                 "list_products": _list_products,

@@ -8,8 +8,11 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 try:
@@ -26,6 +29,24 @@ except ImportError:
 
 
 _DEFAULT_URL = "https://digital.in.th"
+
+# Local usage log — เก็บทุก AI call ลงไฟล์เพื่อ track ค่าใช้จ่าย (ไม่ต้องมี Hub token)
+_USAGE_LOG_PATH = Path(__file__).resolve().parent.parent / "logs" / "llm_usage.jsonl"
+
+
+def log_local_usage(entry: dict[str, Any]) -> None:
+    """เซฟ usage ลง local file (JSONL) — ไม่ต้อง Hub ก็ดูย้อนหลังได้.
+
+    เพิ่ม timestamp อัตโนมัติ ไม่มีวัน throw ออกมา
+    """
+    try:
+        _USAGE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        entry = dict(entry)  # copy ไม่แก้ของเดิม
+        entry["timestamp"] = datetime.now().isoformat()
+        with open(_USAGE_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # ไม่ให้ logging error ทำลาย main flow
 
 
 def _system_cfg() -> dict:

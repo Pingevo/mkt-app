@@ -28,9 +28,15 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+try:
+    from .ai_usage import log_ai_usage, log_local_usage, make_entry
+except ImportError:
+    from ai_usage import log_ai_usage, log_local_usage, make_entry  # type: ignore
 
 # Default config — ใช้ตอนที่ไม่มี config ส่งเข้ามา (backward compat)
 _DEFAULTS = {
@@ -212,6 +218,35 @@ def format_product_history_for_prompt(
     return "\n".join(lines)
 
 
+def _log_embedding(
+    model: str,
+    usage: dict[str, Any] | None,
+    *,
+    duration_ms: int,
+    status: str = "success",
+    error_message: str | None = None,
+) -> None:
+    """ยิง log ไป AI Usage Hub + เซฟ local สำหรับ embeddings — fire-and-forget."""
+    entry = make_entry(
+        provider="openrouter",
+        model=model,
+        operation="embeddings.create",
+        source="content_history.generate_embedding",
+        duration_ms=duration_ms,
+        status=status,
+        error_message=error_message,
+    )
+    if usage:
+        cost = usage.get("cost") or usage.get("total_cost")
+        if cost is not None:
+            entry["cost_usd"] = float(cost)
+        if usage.get("prompt_tokens") is not None:
+            entry["prompt_tokens"] = usage.get("prompt_tokens")
+        entry["raw_usage"] = usage
+    log_ai_usage(entry)
+    log_local_usage(entry)
+
+
 # ============================================================
 # Embeddings dedup — ตามมาตรฐานตลาด
 # ============================================================
@@ -223,6 +258,7 @@ def _generate_embedding(text: str, config: dict[str, Any]) -> list[float] | None
     Returns None if API call fails (graceful degradation).
     """
     model = config.get("dedup_model", "openai/text-embedding-3-small")
+    t0 = time.time()
     try:
         import os
         from dotenv import load_dotenv
@@ -246,8 +282,11 @@ def _generate_embedding(text: str, config: dict[str, Any]) -> list[float] | None
             )
             resp.raise_for_status()
             data = resp.json()
+            # log usage (Hub + local)
+            _log_embedding(model, data.get("usage"), duration_ms=int((time.time() - t0) * 1000))
             return data["data"][0]["embedding"]
-    except Exception:
+    except Exception as e:
+        _log_embedding(model, None, duration_ms=int((time.time() - t0) * 1000), status="error", error_message=str(e))
         # Graceful degradation — ถ้า embedding API ไม่ได้ ก็ไม่เก็บ embedding
         return None
 

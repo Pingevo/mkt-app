@@ -12,9 +12,9 @@ from rich.live import Live
 from rich.text import Text
 
 try:
-    from .ai_usage import log_ai_usage, make_entry
+    from .ai_usage import log_ai_usage, log_local_usage, make_entry
 except ImportError:
-    from ai_usage import log_ai_usage, make_entry  # type: ignore
+    from ai_usage import log_ai_usage, log_local_usage, make_entry  # type: ignore
 
 console = Console()
 
@@ -143,7 +143,7 @@ class LLMClient:
         status: str = "success",
         error_message: str | None = None,
     ) -> None:
-        """ยิง log ไป AI Usage Hub — fire-and-forget.
+        """ยิง log ไป AI Usage Hub + เซฟ local — fire-and-forget.
 
         ห้ามให้ error ใน logging ทำลาย LLM call หลัก — wrap ด้วย try/except
         """
@@ -164,7 +164,10 @@ class LLMClient:
                 if cost is not None:
                     entry["cost_usd"] = float(cost)
                 entry["raw_usage"] = usage
+            # 1. ยิงไป Hub (ถ้ามี token)
             log_ai_usage(entry)
+            # 2. เซฟ local (เสมอ — ไม่ต้องมี token)
+            log_local_usage(entry)
         except Exception:
             pass  # fire-and-forget — ไม่ให้ logging error ทำลาย main flow
 

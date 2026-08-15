@@ -2265,6 +2265,9 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                     img_kwargs: dict = {}
                                     if img.get("aspect_ratio"):
                                         img_kwargs["aspect_ratio"] = img["aspect_ratio"]
+                                    # ส่งรูปสินค้าจริงเป็น reference — image-to-image
+                                    if product_img_paths:
+                                        img_kwargs["input_references"] = product_img_paths
                                     # Visual brand injection
                                     visual = _get_brand_visual()
                                     if visual:
@@ -2287,6 +2290,9 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                         vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
                                     if vid.get("resolution"):
                                         vid_kwargs["resolution"] = vid["resolution"]
+                                    # ส่งรูปสินค้าจริงเป็น reference — reference-to-video
+                                    if product_img_paths:
+                                        vid_kwargs["input_references"] = product_img_paths
                                     # Visual brand injection
                                     visual = _get_brand_visual()
                                     if visual:
@@ -5019,6 +5025,8 @@ async function confirmAndRun() {
   if (autoBtn) autoBtn.disabled = false;
   if (clearBtn) clearBtn.disabled = false;
   if (hintEl) hintEl.textContent = 'เลือกสินค้าก่อนกดยืนยัน';
+  // รีเฟรชเครดิตหลังจบการทำงาน
+  loadCredits();
 }
 
 async function runAutoMode() {
@@ -5108,6 +5116,8 @@ async function runAutoMode() {
   if (confirmBtn) { confirmBtn.classList.remove('running'); confirmBtn.textContent = 'ยืนยัน'; confirmBtn.disabled = false; }
   if (clearBtn) clearBtn.disabled = false;
   if (hintEl) hintEl.textContent = 'เลือกสินค้าก่อนกดยืนยัน';
+  // รีเฟรชเครดิตหลังจบการทำงาน
+  loadCredits();
 }
 
 function handleAutoSSE(data) {
@@ -6188,6 +6198,8 @@ function generateMediaFromOutput(mediaType) {
       }).catch(() => renderMediaActionBar(session, filename, _currentMediaPost, media));
       // รีเฟรช sidebar file list ด้วย
       loadSessions();
+      // รีเฟรชเครดิตหลัง media gen เสร็จ
+      loadCredits();
     });
   }
 
@@ -6370,6 +6382,8 @@ function saveAgentSettings() {
 renderAgentBoxes();
 loadFolderList();
 loadCredits();
+// รีเฟรชเครดิตทุก 60 วินาที (auto-update โดยไม่ต้องรีเฟรชหน้า)
+setInterval(loadCredits, 60000);
 
 function loadCredits() {
   const badge = document.getElementById('credits-badge');

@@ -326,15 +326,17 @@ class BaseAgent:
 
         สถาปัตยกรรมใหม่ (retrieve-then-read):
           - ถ้ามี image_paths → ส่งเป็น list: [{type: text}, {type: image_url}, ...]
-            LLM vision เห็นรูปจริง (lossless — เหมือนมนุษย์เห็น)
+            LLM vision เห็นรูปจริง (resize ลด token — ความแม่นยำใกล้เดิม)
           - ถ้าไม่มี → ส่งเป็น string (backward compatible)
 
-        ใช้ pattern เดียวกับ ingestion.py (ส่งรูปเข้า LLM เป็น base64)
+        รูปใหญ่เกิน 1024px จะถูก resize ลง (preserve aspect ratio) ก่อน encode
+        เพื่อลด image tokens ที่ LLM คิด (1 tile = 256x256 = ~258 tokens)
         """
         if not image_paths:
             return text
 
         import base64
+        import io
         import mimetypes
         from pathlib import Path
 
@@ -345,10 +347,8 @@ class BaseAgent:
             if not p.exists():
                 continue
             try:
-                b64 = base64.b64encode(p.read_bytes()).decode("ascii")
-                mime, _ = mimetypes.guess_type(str(p))
-                if not mime or not mime.startswith("image/"):
-                    mime = "image/png"
+                # Resize รูปใหญ่ก่อน encode — ลด image tokens 74%
+                b64, mime = self._encode_image_resized(p)
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:{mime};base64,{b64}"},
@@ -362,6 +362,52 @@ class BaseAgent:
 
         console.print(f"[dim]ส่งรูปจริง {len(content) - 1} รูปให้ LLM vision ({self.display_name})[/dim]")
         return content
+
+    def _encode_image_resized(self, p: Any, max_dim: int = 1024) -> tuple[str, str]:
+        """Encode รูปเป็น base64 — resize ถ้าใหญ่เกิน max_dim (preserve aspect ratio).
+
+        คืน (base64_str, mime_type)
+        รูปเล็กกว่า max_dim ส่งต้นฉบับเลย (lossless)
+        รูปใหญ่กว่า resize ลง (ลด image tokens ~74%)
+        """
+        import base64
+        import io
+        import mimetypes
+
+        mime, _ = mimetypes.guess_type(str(p))
+        if not mime or not mime.startswith("image/"):
+            mime = "image/png"
+
+        # อ่านขนาดรูป
+        try:
+            from PIL import Image
+            img = Image.open(p)
+            w, h = img.size
+        except Exception:
+            # ไม่มี PIL หรืออ่านไม่ได้ → ส่งต้นฉบับ
+            return base64.b64encode(p.read_bytes()).decode("ascii"), mime
+
+        # ถ้าเล็กอยู่แล้ว → ส่งต้นฉบับ
+        if w <= max_dim and h <= max_dim:
+            return base64.b64encode(p.read_bytes()).decode("ascii"), mime
+
+        # Resize (preserve aspect ratio)
+        scale = max_dim / max(w, h)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        img_resized = img.resize((new_w, new_h), Image.LANCZOS)
+
+        # Convert BMP → PNG (เล็กกว่ามาก)
+        buf = io.BytesIO()
+        save_format = "PNG" if mime in ("image/png", "image/bmp", "image/x-ms-bmp") else "JPEG"
+        if save_format == "JPEG":
+            # JPEG ไม่รองรับ alpha → convert
+            if img_resized.mode in ("RGBA", "LA", "P"):
+                img_resized = img_resized.convert("RGB")
+            mime = "image/jpeg"
+        img_resized.save(buf, format=save_format)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return b64, mime
 
     def _plan_search_queries(self, user_prompt: str, system_prompt: str) -> list[str]:
         """Phase 0: ให้ LLM วางแผนว่าจะค้น web ว่าอะไรบ้าง.

@@ -54,3 +54,4 @@ brand/audience.json
 *.swp
 *.swo
 *~
+logs/
