@@ -31,9 +31,9 @@ CONTENT_SCHEMA: dict = {
                             "type": "string",
                             "description": "แพลตฟอร์ม เช่น Facebook, TikTok, Instagram",
                         },
-                        "angle": {
+                        "concept": {
                             "type": "string",
-                            "description": "มุมมองที่ใช้ (เช่น ราคา, คุณสมบัติ, lifestyle)",
+                            "description": "แนวคิด/มุมมองที่ใช้ (เช่น ราคา, คุณสมบัติ, lifestyle)",
                         },
                         "title": {
                             "type": "string",
@@ -104,7 +104,7 @@ CONTENT_SCHEMA: dict = {
                     },
                     "required": [
                         "platform",
-                        "angle",
+                        "concept",
                         "title",
                         "caption",
                         "script",
@@ -148,7 +148,7 @@ def render_posts_to_markdown(parsed: dict) -> str:
         # ## 1. ข้อมูลโพสต์
         parts.append(f"## {idx}. ข้อมูลโพสต์")
         parts.append(f"- **แพลตฟอร์ม** — {post.get('platform', '')}")
-        parts.append(f"- **มุมมอง** — {post.get('angle', '')}")
+        parts.append(f"- **มุมมอง** — {post.get('concept', '')}")
         parts.append(f"- **หัวข้อ** — {post.get('title', '')}")
         parts.append(f"- **Caption (พร้อมโพสต์)** — ")
         parts.append(post.get("caption", ""))

@@ -1509,7 +1509,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                     for j, s in enumerate(previous_summaries):
                         multi_brief += f"\nโพสต์ที่ {j+1}:\n{s[:_long_len]}\n"
                     multi_brief += "--- สิ้นสุด ---\n"
-                    multi_brief += "สร้างโพสต์ใหม่ที่มีมุมมอง/angle ต่างจากโพสต์ก่อนหน้า"
+                    multi_brief += "สร้างโพสต์ใหม่ที่มีมุมมอง/concept ต่างจากโพสต์ก่อนหน้า"
                 if quick_brief:
                     multi_brief += f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
             else:
@@ -1546,7 +1546,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                 _parsed = _json_hist.loads(result)
                 for _post in _parsed.get("posts", []):
                     completed_posts.append({
-                        "angle": _post.get("angle", ""),
+                        "concept": _post.get("concept", _post.get("angle", "")),
                         "platform": _post.get("platform", ""),
                         "caption": _post.get("caption", "")[:int(_sys_cfg().get("caption_display_length", 500))],
                     })
@@ -1672,11 +1672,11 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
 
         # บันทึกประวัติคอนเทนต์ที่ทำเสร็จ ลง content_history (รวม manual + auto)
         for _post in completed_posts:
-            if _post.get("angle"):
+            if _post.get("concept"):
                 content_history.record_entry(
                     PROJECT_ROOT,
                     product_ids=folder,
-                    concept=_post.get("angle", _post.get("concept", "")),
+                    concept=_post.get("concept", ""),
                     platform=_post.get("platform", ""),
                     caption_summary=_post.get("caption", ""),
                 )
@@ -1983,7 +1983,6 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                         "product_ids": result.get("product_ids", []),
                         "pillar": result.get("pillar", ""),
                         "concept": result.get("concept", ""),
-                        "angle": result.get("concept", ""),  # backward compat
                         "reason": result.get("reason", ""),
                         "is_duplicate": result.get("is_duplicate", False),
                         "similarity": result.get("similarity", 0.0),
@@ -4171,7 +4170,7 @@ function handleAutoSSE(data) {
     try {
       const sel = JSON.parse(data.message || '{}');
       if (statusEl) {
-        statusEl.innerHTML = 'เลือก: <b>' + escapeHtml(sel.product_id || '') + '</b> — ' + escapeHtml(sel.concept || sel.angle || '') + ' <span class="typing">●</span>';
+        statusEl.innerHTML = 'เลือก: <b>' + escapeHtml(sel.product_id || '') + '</b> — ' + escapeHtml(sel.concept || '') + ' <span class="typing">●</span>';
       }
     } catch (e) {}
   } else if (data.type === 'agent_start') {
@@ -4638,7 +4637,7 @@ function renderPostsToMarkdownJS(parsed) {
     const n = idx + 1;
     parts.push('## ' + n + '. ข้อมูลโพสต์');
     parts.push('- **แพลตฟอร์ม** — ' + (post.platform || ''));
-    parts.push('- **มุมมอง** — ' + (post.angle || ''));
+    parts.push('- **มุมมอง** — ' + (post.concept || ''));
     parts.push('- **หัวข้อ** — ' + (post.title || ''));
     parts.push('- **Caption (พร้อมโพสต์)** — ');
     parts.push(post.caption || post.content || '');
@@ -4690,7 +4689,7 @@ function parseContentPost(text) {
       const p = parsed.posts[0];
       const post = {
         platform: p.platform || '',
-        angle: p.angle || '',
+        concept: p.concept || p.angle || '',
         title: p.title || '',
         // schema ใหม่: caption + script แยก / schema เก่า: content
         caption: p.caption || p.content || '',
@@ -4709,13 +4708,13 @@ function parseContentPost(text) {
   }
 
   // --- Path 2: Markdown (regex parser) ---
-  const post = { platform: '', angle: '', title: '', content: '', hashtags: '', imagePrompt: '', videoPrompt: '', raw: text };
+  const post = { platform: '', concept: '', title: '', content: '', hashtags: '', imagePrompt: '', videoPrompt: '', raw: text };
   // แพลตฟอร์ม — รองรับช่องว่างก่อนเครื่องหมาย: "**แพลตฟอร์ม** — Facebook"
   let m = text.match(/\*\*แพลตฟอร์ม\*\*\s*[—\-:]\s*(.+)/i);
   if (m) post.platform = m[1].trim();
   // มุมมอง
   m = text.match(/\*\*มุมมอง\*\*\s*[—\-:]\s*(.+)/i);
-  if (m) post.angle = m[1].trim();
+  if (m) post.concept = m[1].trim();
   // หัวข้อ
   m = text.match(/\*\*หัวข้อ\*\*\s*[—\-:]\s*(.+)/i);
   if (m) post.title = m[1].trim();
@@ -4983,7 +4982,7 @@ function renderContentResult(session, filename, content) {
   // Meta tags
   html += '<div class="preview-meta">';
   if (post.platform) html += '<span class="meta-tag">แพลตฟอร์ม: <b>' + escapeHtml(post.platform) + '</b></span>';
-  if (post.angle) html += '<span class="meta-tag">มุมมอง: <b>' + escapeHtml(post.angle) + '</b></span>';
+  if (post.concept) html += '<span class="meta-tag">มุมมอง: <b>' + escapeHtml(post.concept) + '</b></span>';
   html += '</div>';
   // Media actions bar — แสดงปุ่มสร้างรูป/วิดีโอ ถ้ายังไม่มี
   html += '<div class="media-action-bar" id="media-action-bar">กำลังตรวจสอบ media...</div>';

@@ -734,7 +734,7 @@ class Orchestrator:
                         f"--- คอนเทนต์ที่สร้างครั้งก่อนซ้ำกับที่เคยทำ (similarity {dup_result.get('similarity', 0):.2f}) ---\n"
                         f"คอนเทนต์เดิมที่ซ้ำ: {matched_caption}\n"
                         f"--- สิ้นสุด ---\n"
-                        f"สร้างคอนเทนต์ใหม่ที่แตกต่างจากด้านบนอย่างชัดเจน — เปลี่ยนมุมมอง/angle/เนื้อหา"
+                        f"สร้างคอนเทนต์ใหม่ที่แตกต่างจากด้านบนอย่างชัดเจน — เปลี่ยนมุมมอง/concept/เนื้อหา"
                     )
                     if status_callback:
                         status_callback(f"คอนเทนต์ซ้ำ (ครั้งที่ {retry_count}) — กำลังสร้างใหม่...")
@@ -794,7 +794,6 @@ class Orchestrator:
                 "product_id": chosen_pids[0],
                 "pillar": chosen_pillar,
                 "concept": chosen_concept,
-                "angle": chosen_concept,  # backward compat
                 "reason": reason,
                 "content": content,
                 "markdown": markdown,
