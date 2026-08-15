@@ -66,6 +66,101 @@ def collect_examples(
     return examples
 
 
+def _run_llm_json(
+    llm: Any,
+    system_prompt: str,
+    user_prompt: str,
+    schema_name: str,
+    schema: dict[str, Any],
+    source: str,
+) -> dict[str, Any]:
+    """ส่ง prompt ให้ LLM พร้อม Structured Outputs → คืน parsed JSON dict.
+
+    ถ้า LLM คืน JSON ไม่ valid → คืน {} (ไม่ crash)
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {"name": schema_name, "strict": True, "schema": schema},
+    }
+    try:
+        raw = llm.chat(
+            messages,
+            temperature=0.3,
+            max_tokens=2048,
+            stream=False,
+            response_format=response_format,
+            source=source,
+        )
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = re.sub(r"^```(?:json)?\s*", "", clean)
+            clean = re.sub(r"\s*```$", "", clean)
+        return json.loads(clean)
+    except (json.JSONDecodeError, TypeError, Exception):
+        return {}
+
+
+def _examples_to_text(examples: list[str]) -> str:
+    """รวมตัวอย่างเป็น text block สำหรับส่งให้ LLM."""
+    return "\n\n---\n\n".join(
+        f"ตัวอย่างที่ {i+1}:\n{ex}" for i, ex in enumerate(examples)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Schemas สำหรับ Structured Outputs
+# ---------------------------------------------------------------------------
+
+_VOICE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "personality": {"type": "string"},
+        "tone_description": {"type": "string"},
+        "formality_level": {"type": "integer"},
+        "language": {"type": "string"},
+        "banned_phrases": {"type": "array", "items": {"type": "string"}},
+        "examples": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["personality", "tone_description", "formality_level",
+                 "language", "banned_phrases", "examples"],
+    "additionalProperties": False,
+}
+
+_TERMS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "approved": {"type": "array", "items": {"type": "string"}},
+        "restricted": {"type": "array", "items": {"type": "string"}},
+        "replacements": {"type": "object", "additionalProperties": {"type": "string"}},
+    },
+    "required": ["approved", "restricted", "replacements"],
+    "additionalProperties": False,
+}
+
+_AUDIENCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "primary": {
+            "type": "object",
+            "properties": {
+                "age": {"type": "string"},
+                "role": {"type": "string"},
+            },
+            "required": ["age", "role"],
+            "additionalProperties": True,
+        },
+        "pain_points": {"type": "array", "items": {"type": "string"}},
+        "channels": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["primary", "pain_points", "channels"],
+    "additionalProperties": True,
+}
+
+
 def analyze_voice(examples: list[str], llm: Any) -> dict[str, Any]:
     """ส่งตัวอย่างให้ LLM วิเคราะห์ → คืน voice profile dict.
 
@@ -76,11 +171,6 @@ def analyze_voice(examples: list[str], llm: Any) -> dict[str, Any]:
     """
     if not examples:
         return {}
-
-    # รวมตัวอย่างเป็น text block
-    examples_text = "\n\n---\n\n".join(
-        f"ตัวอย่างที่ {i+1}:\n{ex}" for i, ex in enumerate(examples)
-    )
 
     system_prompt = (
         "คุณเป็นนักวิเคราะห์โทนเสียงแบรนด์ (Brand Voice Analyst)\n"
@@ -96,54 +186,84 @@ def analyze_voice(examples: list[str], llm: Any) -> dict[str, Any]:
         '{"personality": "...", "tone_description": "...", "formality_level": 3, '
         '"language": "...", "banned_phrases": ["..."], "examples": ["..."]}'
     )
+    user_prompt = f"วิเคราะห์โทนเสียงจากตัวอย่างต่อไปนี้:\n\n{_examples_to_text(examples)}"
 
-    user_prompt = f"วิเคราะห์โทนเสียงจากตัวอย่างต่อไปนี้:\n\n{examples_text}"
+    return _run_llm_json(
+        llm, system_prompt, user_prompt,
+        "voice_profile", _VOICE_SCHEMA, "voice_learner.analyze_voice",
+    )
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
 
-    # Structured Outputs schema — บังคับให้ LLM คืน JSON ที่ตรงรูปแบบ
-    response_format = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "voice_profile",
-            "strict": True,
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "personality": {"type": "string"},
-                    "tone_description": {"type": "string"},
-                    "formality_level": {"type": "integer"},
-                    "language": {"type": "string"},
-                    "banned_phrases": {"type": "array", "items": {"type": "string"}},
-                    "examples": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["personality", "tone_description", "formality_level",
-                             "language", "banned_phrases", "examples"],
-                "additionalProperties": False,
-            },
-        },
-    }
+def analyze_terms(examples: list[str], llm: Any) -> dict[str, Any]:
+    """ส่งตัวอย่างให้ LLM ดึงคำที่ใช้บ่อย/คำต้องห้าม → คืน terms dict.
 
-    try:
-        raw = llm.chat(
-            messages,
-            temperature=0.3,
-            max_tokens=2048,
-            stream=False,
-            response_format=response_format,
-            source="voice_learner.analyze_voice",
-        )
-        # ลอง parse JSON — อาจมี ```json wrapper (บาง model ไม่รองรับ strict schema)
-        clean = raw.strip()
-        if clean.startswith("```"):
-            clean = re.sub(r"^```(?:json)?\s*", "", clean)
-            clean = re.sub(r"\s*```$", "", clean)
-        return json.loads(clean)
-    except (json.JSONDecodeError, TypeError, Exception):
+    คืน: {approved: [str], restricted: [str], replacements: {old: new}}
+    ถ้า examples ว่าง → คืน {} (ไม่เรียก LLM)
+    ถ้า LLM คืน JSON ไม่ valid → คืน {} (ไม่ crash)
+    """
+    if not examples:
         return {}
+
+    system_prompt = (
+        "คุณเป็นนักวิเคราะห์คำศัพท์แบรนด์ (Brand Terminology Analyst)\n"
+        "หน้าที่: อ่านตัวอย่างโพสต์แล้วดึงคำที่ใช้บ่อยและคำที่ควรห้ามใช้\n\n"
+        "วิเคราะห์:\n"
+        "1. approved — คำ/วลีที่ปรากฏบ่อยในตัวอย่าง และสะท้อนแบรนด์ (เช่น 'นวัตกรรม', 'คุณภาพ')\n"
+        "2. restricted — คำที่ไม่ปรากฏในตัวอย่าง และน่าจะขัดโทนเสียง (เช่น 'ถูกที่สุด', 'ของแถม')\n"
+        "3. replacements — คำที่ควรเปลี่ยน (เช่น {'ถูกมาก': 'ราคาคุ้ม'})\n\n"
+        "คืนเป็น JSON เท่านั้น:\n"
+        '{"approved": ["..."], "restricted": ["..."], "replacements": {"คำเก่า": "คำใหม่"}}'
+    )
+    user_prompt = f"ดึงคำศัพท์จากตัวอย่างต่อไปนี้:\n\n{_examples_to_text(examples)}"
+
+    return _run_llm_json(
+        llm, system_prompt, user_prompt,
+        "terms_profile", _TERMS_SCHEMA, "voice_learner.analyze_terms",
+    )
+
+
+def analyze_audience(examples: list[str], llm: Any) -> dict[str, Any]:
+    """ส่งตัวอย่างให้ LLM เดากลุ่มเป้าหมาย → คืน audience dict.
+
+    คืน: {primary: {age, role}, pain_points: [str], channels: [str]}
+    ถ้า examples ว่าง → คืน {} (ไม่เรียก LLM)
+    ถ้า LLM คืน JSON ไม่ valid → คืน {} (ไม่ crash)
+    """
+    if not examples:
+        return {}
+
+    system_prompt = (
+        "คุณเป็นนักวิเคราะห์กลุ่มเป้าหมาย (Audience Analyst)\n"
+        "หน้าที่: อ่านตัวอย่างโพสต์แล้วเดาว่าแบรนด์กำลังพูดกับใคร\n\n"
+        "วิเคราะห์:\n"
+        "1. primary — กลุ่มเป้าหมายหลัก {age: 'ช่วงอายุ', role: 'บทบาท เช่น ผู้ปกครอง/นักธุรกิจ'}\n"
+        "2. pain_points — ปัญหาที่กลุ่มเป้าหมายมี (จากบริบทในตัวอย่าง)\n"
+        "3. channels — ช่องทางที่น่าจะใช้ (เช่น Facebook, TikTok, Instagram)\n\n"
+        "คืนเป็น JSON เท่านั้น:\n"
+        '{"primary": {"age": "...", "role": "..."}, "pain_points": ["..."], "channels": ["..."]}'
+    )
+    user_prompt = f"เดากลุ่มเป้าหมายจากตัวอย่างต่อไปนี้:\n\n{_examples_to_text(examples)}"
+
+    return _run_llm_json(
+        llm, system_prompt, user_prompt,
+        "audience_profile", _AUDIENCE_SCHEMA, "voice_learner.analyze_audience",
+    )
+
+
+def analyze_brand(examples: list[str], llm: Any) -> dict[str, dict[str, Any]]:
+    """วิเคราะห์ทั้ง 3 ส่วนในครั้งเดียว → คืน {voice, terms, audience}.
+
+    ถ้าส่วนไหนพัง → คืน {} ในส่วนนั้น (ไม่ crash ทั้งระบบ)
+    ถ้า examples ว่าง → คืน {} (ไม่เรียก LLM)
+    """
+    if not examples:
+        return {}
+
+    return {
+        "voice": analyze_voice(examples, llm),
+        "terms": analyze_terms(examples, llm),
+        "audience": analyze_audience(examples, llm),
+    }
 
 
 def fetch_url_content(url: str) -> str:

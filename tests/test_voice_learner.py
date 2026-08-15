@@ -246,6 +246,159 @@ def test_collect_examples_all_empty():
     assert result == []
 
 
+# ---------------------------------------------------------------------------
+# analyze_terms — ดึงคำที่ใช้บ่อย/คำต้องห้ามจากตัวอย่าง
+# ---------------------------------------------------------------------------
+
+def test_analyze_terms_returns_profile():
+    """ส่ง examples → LLM คืน terms dict ที่มี approved + restricted + replacements."""
+    from src.voice_learner import analyze_terms
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = (
+        '{"approved": ["นวัตกรรม", "คุณภาพ"], '
+        '"restricted": ["ถูกที่สุด", "ของแถม"], '
+        '"replacements": {"ถูกมาก": "ราคาคุ้ม"}}'
+    )
+
+    result = analyze_terms(["โพสต์ตัวอย่างที่ใช้คำว่า นวัตกรรม"], mock_llm)
+
+    assert isinstance(result, dict)
+    assert "approved" in result
+    assert "restricted" in result
+    assert "replacements" in result
+    assert "นวัตกรรม" in result["approved"]
+    assert "ถูกที่สุด" in result["restricted"]
+
+
+def test_analyze_terms_empty_examples():
+    """ส่ง examples ว่าง → คืน {} ไม่เรียก LLM."""
+    from src.voice_learner import analyze_terms
+
+    mock_llm = MagicMock()
+    result = analyze_terms([], mock_llm)
+
+    assert result == {}
+    mock_llm.chat.assert_not_called()
+
+
+def test_analyze_terms_invalid_json():
+    """LLM คืน JSON ไม่ valid → คืน {} ไม่ crash."""
+    from src.voice_learner import analyze_terms
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = 'not json {{{'
+
+    result = analyze_terms(["example"], mock_llm)
+
+    assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# analyze_audience — เดากลุ่มเป้าหมายจากโทนเสียง/ภาษาที่ใช้
+# ---------------------------------------------------------------------------
+
+def test_analyze_audience_returns_profile():
+    """ส่ง examples → LLM คืน audience dict ที่มี primary + pain_points + channels."""
+    from src.voice_learner import analyze_audience
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = (
+        '{"primary": {"age": "30-45 ปี", "role": "ผู้ปกครอง"}, '
+        '"pain_points": ["ไม่สบายใจให้ลูกเล่นมือถือ"], '
+        '"channels": ["Facebook", "TikTok"]}'
+    )
+
+    result = analyze_audience(["โพสต์สำหรับผู้ปกครอง"], mock_llm)
+
+    assert isinstance(result, dict)
+    assert "primary" in result
+    assert "pain_points" in result
+    assert "channels" in result
+    assert result["primary"]["role"] == "ผู้ปกครอง"
+    assert "Facebook" in result["channels"]
+
+
+def test_analyze_audience_empty_examples():
+    """ส่ง examples ว่าง → คืน {} ไม่เรียก LLM."""
+    from src.voice_learner import analyze_audience
+
+    mock_llm = MagicMock()
+    result = analyze_audience([], mock_llm)
+
+    assert result == {}
+    mock_llm.chat.assert_not_called()
+
+
+def test_analyze_audience_invalid_json():
+    """LLM คืน JSON ไม่ valid → คืน {} ไม่ crash."""
+    from src.voice_learner import analyze_audience
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = 'broken'
+
+    result = analyze_audience(["example"], mock_llm)
+
+    assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# analyze_brand — วิเคราะห์ทั้ง 3 ส่วนในครั้งเดียว
+# ---------------------------------------------------------------------------
+
+def test_analyze_brand_returns_three_sections():
+    """ส่ง examples → คืน dict ที่มี voice + terms + audience ครบ."""
+    from src.voice_learner import analyze_brand
+
+    mock_llm = MagicMock()
+    # LLM ถูกเรียก 3 ครั้ง (voice, terms, audience) — แต่ละครั้งคืน JSON ต่างกัน
+    mock_llm.chat.side_effect = [
+        '{"personality": "เป็นมิตร", "tone_description": "อบอุ่น", "formality_level": 3, "language": "ไทย", "banned_phrases": [], "examples": []}',
+        '{"approved": ["นวัตกรรม"], "restricted": ["ถูกที่สุด"], "replacements": {}}',
+        '{"primary": {"age": "30-45", "role": "ผู้ปกครอง"}, "pain_points": [], "channels": ["Facebook"]}',
+    ]
+
+    result = analyze_brand(["ตัวอย่างโพสต์"], mock_llm)
+
+    assert "voice" in result
+    assert "terms" in result
+    assert "audience" in result
+    assert result["voice"]["personality"] == "เป็นมิตร"
+    assert "นวัตกรรม" in result["terms"]["approved"]
+    assert result["audience"]["primary"]["role"] == "ผู้ปกครอง"
+
+
+def test_analyze_brand_empty_examples():
+    """ส่ง examples ว่าง → คืน {} ไม่เรียก LLM."""
+    from src.voice_learner import analyze_brand
+
+    mock_llm = MagicMock()
+    result = analyze_brand([], mock_llm)
+
+    assert result == {}
+    mock_llm.chat.assert_not_called()
+
+
+def test_analyze_brand_partial_failure():
+    """ถ้า terms วิเคราะห์พัง แต่ voice + audience ผ่าน → ยังคืน voice + audience (ไม่ crash)."""
+    from src.voice_learner import analyze_brand
+
+    mock_llm = MagicMock()
+    mock_llm.chat.side_effect = [
+        '{"personality": "เป็นมิตร", "tone_description": "อบอุ่น", "formality_level": 3, "language": "ไทย", "banned_phrases": [], "examples": []}',
+        'broken json {{{',  # terms พัง
+        '{"primary": {"age": "30-45", "role": "ผู้ปกครอง"}, "pain_points": [], "channels": ["Facebook"]}',
+    ]
+
+    result = analyze_brand(["ตัวอย่าง"], mock_llm)
+
+    assert "voice" in result
+    assert result["voice"]["personality"] == "เป็นมิตร"
+    # terms พัง → คืน {} ไม่ใช่ crash
+    assert result.get("terms") == {}
+    assert "audience" in result
+
+
 if __name__ == "__main__":
     tests = [
         test_analyze_voice_returns_profile,
@@ -262,6 +415,15 @@ if __name__ == "__main__":
         test_extract_file_text_empty_file,
         test_collect_examples_mixed_sources,
         test_collect_examples_all_empty,
+        test_analyze_terms_returns_profile,
+        test_analyze_terms_empty_examples,
+        test_analyze_terms_invalid_json,
+        test_analyze_audience_returns_profile,
+        test_analyze_audience_empty_examples,
+        test_analyze_audience_invalid_json,
+        test_analyze_brand_returns_three_sections,
+        test_analyze_brand_empty_examples,
+        test_analyze_brand_partial_failure,
     ]
     passed = 0
     failed = 0

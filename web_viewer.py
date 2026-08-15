@@ -1125,12 +1125,12 @@ async def api_brand_migrate(request: Request) -> JSONResponse:
 
 @app.post("/api/voice_learn")
 async def api_voice_learn(request: Request) -> JSONResponse:
-    """รับตัวอย่าง (paste + files + URLs) → LLM วิเคราะห์ → คืน voice profile.
+    """รับตัวอย่าง (paste + files + URLs) → LLM วิเคราะห์ → คืน brand profile (voice + terms + audience).
 
     Body: {pasted_texts: [str], file_paths: [str], urls: [str]}
-    คืน: {ok: true, voice: {...}} หรือ {ok: false, error: "..."}
+    คืน: {ok: true, brand: {voice, terms, audience}, example_count} หรือ {ok: false, error}
     """
-    from src.voice_learner import collect_examples, analyze_voice
+    from src.voice_learner import collect_examples, analyze_brand, fetch_url_content, extract_file_text
     body = await request.json()
     pasted = body.get("pasted_texts", [])
     files = body.get("file_paths", [])
@@ -1139,7 +1139,23 @@ async def api_voice_learn(request: Request) -> JSONResponse:
     # รวมตัวอย่างจากทุกแหล่ง
     examples = collect_examples(pasted_texts=pasted, file_paths=files, urls=urls)
     if not examples:
-        return JSONResponse({"ok": False, "error": "ไม่มีตัวอย่างให้วิเคราะห์ — กรุณา paste text, upload ไฟล์, หรือใส่ URL"}, status_code=400)
+        # บอก user ว่าอะไรพัง — ไม่ใช่ "ไม่มีตัวอย่าง" แบบสับสน
+        errors = []
+        for url in urls:
+            content = fetch_url_content(url)
+            if content.startswith("[error]"):
+                errors.append(f"URL {url}: {content[7:80]}")
+        for fp in files:
+            content = extract_file_text(__import__("pathlib").Path(fp))
+            if content.startswith("[error]"):
+                errors.append(f"ไฟล์ {fp}: {content[7:80]}")
+        if errors:
+            msg = "ดึงตัวอย่างไม่สำเร็จ:\n" + "\n".join(errors)
+            if any("facebook.com" in u for u in urls):
+                msg += "\n\nFacebook บล็อก scraper — กรุณา paste text จากโพสต์ Facebook โดยตรง"
+        else:
+            msg = "ไม่มีตัวอย่างให้วิเคราะห์ — กรุณา paste text, upload ไฟล์, หรือใส่ URL"
+        return JSONResponse({"ok": False, "error": msg}, status_code=400)
 
     # สร้าง LLM client
     try:
@@ -1149,10 +1165,11 @@ async def api_voice_learn(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": f"สร้าง LLM client ไม่ได้: {e}"}, status_code=500)
 
     try:
-        voice = analyze_voice(examples, llm)
-        if not voice:
+        brand = analyze_brand(examples, llm)
+        # ตรวจว่าอย่างน้อย 1 ส่วนสำเร็จ
+        if not any(brand.values()):
             return JSONResponse({"ok": False, "error": "LLM วิเคราะห์ไม่สำเร็จ — ลองใหม่อีกครั้ง"}, status_code=500)
-        return JSONResponse({"ok": True, "voice": voice, "example_count": len(examples)})
+        return JSONResponse({"ok": True, "brand": brand, "example_count": len(examples)})
     finally:
         try:
             llm.close()
@@ -3469,7 +3486,7 @@ function loadBrandFiles() {
     if (!data) { el.innerHTML = '<div style="color:#555;font-size:12px;padding:12px">ยังไม่มีข้อมูลแบรนด์</div>'; return; }
     _brandData = data;
     let html = '';
-    html += '<div class="brand-file-item" onclick="openVoiceLearnModal()" style="color:#7c8aff;font-weight:600">🎓 ฝึก AI จากตัวอย่าง (Voice Learning)</div>';
+    html += '<div class="brand-file-item" onclick="openVoiceLearnModal()" style="color:#7c8aff;font-weight:600">🎓 ฝึก AI จากตัวอย่าง (Brand Learning)</div>';
     html += '<div style="border-top:1px solid #2a2d3a;margin:8px 0"></div>';
     html += '<div class="brand-file-item" onclick="editBrandSection(\'voice\')">🎤 โทนเสียง (Voice)</div>';
     html += '<div class="brand-file-item" onclick="editBrandSection(\'terms\')">📝 คำที่ใช้/ห้ามใช้ (Terms)</div>';
@@ -3642,28 +3659,137 @@ function saveBrandFileModal() {
 // Voice Learning modal — upload ตัวอย่าง → AI วิเคราะห์โทนเสียง
 // ============================================================
 let _voiceLearnFiles = [];
+let _voiceLearnUrls = [];
+let _voiceLearnTexts = [];  // ตัวอย่างโพสต์ที่ paste แล้วเป็น card แยก
+let _voiceLearnAbort = null;  // AbortController สำหรับ cancel request
 
 function openVoiceLearnModal() {
   _voiceLearnFiles = [];
+  _voiceLearnUrls = [];
+  _voiceLearnTexts = [];
+  _voiceLearnAbort = null;
   const overlay = document.getElementById('voice-learn-overlay');
-  document.getElementById('voice-learn-pasted').value = '';
-  document.getElementById('voice-learn-urls').value = '';
+  document.getElementById('voice-learn-text-input').value = '';
+  document.getElementById('voice-learn-url-input').value = '';
   document.getElementById('voice-learn-file-list').innerHTML = '';
+  renderVoiceLearnTextCards();
+  renderVoiceLearnUrlChips();
   document.getElementById('voice-learn-status').textContent = '';
   document.getElementById('voice-learn-status').className = 'upload-status';
   document.getElementById('voice-learn-result').innerHTML = '';
+  // รีเซ็ตปุ่ม
+  document.getElementById('voice-learn-analyze-btn').textContent = 'วิเคราะห์';
+  document.getElementById('voice-learn-analyze-btn').disabled = false;
   overlay.className = 'settings-modal-overlay visible';
 }
 
 function closeVoiceLearnModal() {
+  // ถ้ากำลังวิเคราะห์อยู่ → cancel request ก่อนปิด
+  if (_voiceLearnAbort) {
+    _voiceLearnAbort.abort();
+    _voiceLearnAbort = null;
+  }
   document.getElementById('voice-learn-overlay').className = 'settings-modal-overlay';
 }
 
+// --- Text example cards ---
+function addVoiceLearnText() {
+  const input = document.getElementById('voice-learn-text-input');
+  const text = input.value.trim();
+  if (!text) return;
+  _voiceLearnTexts.push(text);
+  input.value = '';
+  renderVoiceLearnTextCards();
+}
+
+function removeVoiceLearnText(idx) {
+  _voiceLearnTexts.splice(idx, 1);
+  renderVoiceLearnTextCards();
+}
+
+function renderVoiceLearnTextCards() {
+  const el = document.getElementById('voice-learn-text-cards');
+  if (!_voiceLearnTexts.length) { el.innerHTML = ''; return; }
+  el.innerHTML = _voiceLearnTexts.map((text, i) => {
+    const preview = text.length > 120 ? text.substring(0, 120) + '...' : text;
+    return '<div style="display:flex;align-items:flex-start;gap:8px;padding:10px 12px;background:#1e2030;border:1px solid #2a2d3a;border-radius:8px;margin-bottom:6px">' +
+      '<span style="font-size:14px;color:#7c8aff;flex-shrink:0">📝</span>' +
+      '<span style="flex:1;font-size:12px;color:#ccc;line-height:1.5;white-space:pre-wrap;word-break:break-word">' + escapeHtml(preview) + '</span>' +
+      '<button onclick="removeVoiceLearnText(' + i + ')" style="background:none;border:none;color:#f44;cursor:pointer;font-size:14px;padding:0 2px;flex-shrink:0">✕</button>' +
+    '</div>';
+  }).join('');
+}
+
+// --- URL chip input ---
+function handleVoiceLearnUrlKeydown(input, event) {
+  // กด Enter → เพิ่มเป็น chip
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    if (input.value.trim()) {
+      addVoiceLearnUrl(input.value);
+      input.value = '';
+    }
+  // กด comma → เพิ่มเป็น chip (ละเว้น comma ออก)
+  } else if (event.key === ',') {
+    event.preventDefault();
+    if (input.value.trim()) {
+      addVoiceLearnUrl(input.value);
+      input.value = '';
+    }
+  // Backspace ตอนช่องว่าง → ลบ chip สุดท้าย
+  } else if (event.key === 'Backspace' && input.value === '' && _voiceLearnUrls.length) {
+    _voiceLearnUrls.pop();
+    renderVoiceLearnUrlChips();
+  }
+}
+
+function handleVoiceLearnUrlPaste(input, event) {
+  event.preventDefault();
+  const text = (event.clipboardData || window.clipboardData).getData('text');
+  // แยกด้วย comma หรือ newline เท่านั้น — ไม่ใช่ space (เพราะ URL มี space ไม่ได้แต่อาจมี path สับสน)
+  // ถ้าไม่มี separator → ถือว่าเป็น URL เดียว ให้อยู่ใน input รอกด Enter
+  if (/[\n,]/.test(text)) {
+    const urls = text.split(/[\n,]+/).map(s => s.trim()).filter(s => s);
+    for (const u of urls) addVoiceLearnUrl(u);
+    input.value = '';
+  } else {
+    // URL เดียว → ใส่ใน input ให้ user ตรวจก่อนกด Enter
+    input.value = text.trim();
+  }
+}
+
+function addVoiceLearnUrl(url) {
+  url = url.trim();
+  if (!url) return;
+  if (!url.startsWith('http')) url = 'https://' + url;
+  if (_voiceLearnUrls.includes(url)) return;
+  _voiceLearnUrls.push(url);
+  renderVoiceLearnUrlChips();
+}
+
+function removeVoiceLearnUrl(idx) {
+  _voiceLearnUrls.splice(idx, 1);
+  renderVoiceLearnUrlChips();
+}
+
+function renderVoiceLearnUrlChips() {
+  const el = document.getElementById('voice-learn-url-chips');
+  if (!_voiceLearnUrls.length) { el.innerHTML = ''; return; }
+  el.innerHTML = _voiceLearnUrls.map((url, i) =>
+    '<span style="display:inline-flex;align-items:center;gap:4px;background:#1e2030;border:1px solid #2a2d3a;border-radius:16px;padding:4px 10px;margin:2px 4px 2px 0;font-size:12px;color:#e0e0e0;max-width:280px">' +
+    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(url) + '</span>' +
+    '<button onclick="removeVoiceLearnUrl(' + i + ')" style="background:none;border:none;color:#f44;cursor:pointer;font-size:14px;padding:0 2px">✕</button>' +
+    '</span>'
+  ).join('');
+}
+
+// --- File chips ---
 function handleVoiceLearnFiles(input) {
   const files = Array.from(input.files);
   for (const f of files) {
     _voiceLearnFiles.push(f);
   }
+  input.value = '';  // clear so same file can be re-added
   renderVoiceLearnFiles();
 }
 
@@ -3676,22 +3802,32 @@ function renderVoiceLearnFiles() {
   const el = document.getElementById('voice-learn-file-list');
   if (!_voiceLearnFiles.length) { el.innerHTML = ''; return; }
   el.innerHTML = _voiceLearnFiles.map((f, i) =>
-    '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#1e2030;border-radius:6px;margin-bottom:4px">' +
-    '<span style="font-size:12px;color:#ccc;flex:1">' + escapeHtml(f.name) + ' (' + Math.round(f.size/1024) + 'KB)</span>' +
-    '<button onclick="removeVoiceLearnFile(' + i + ')" style="background:none;border:none;color:#f44;cursor:pointer;font-size:14px">✕</button>' +
-    '</div>'
+    '<span style="display:inline-flex;align-items:center;gap:4px;background:#1e2030;border:1px solid #2a2d3a;border-radius:16px;padding:4px 10px;margin:2px 4px 2px 0;font-size:12px;color:#e0e0e0;max-width:280px">' +
+    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(f.name) + ' (' + Math.round(f.size/1024) + 'KB)</span>' +
+    '<button onclick="removeVoiceLearnFile(' + i + ')" style="background:none;border:none;color:#f44;cursor:pointer;font-size:14px;padding:0 2px">✕</button>' +
+    '</span>'
   ).join('');
 }
 
 function runVoiceLearn() {
   const status = document.getElementById('voice-learn-status');
   const result = document.getElementById('voice-learn-result');
-  const pasted = document.getElementById('voice-learn-pasted').value.trim();
-  const urls = document.getElementById('voice-learn-urls').value.trim();
+  const btn = document.getElementById('voice-learn-analyze-btn');
 
-  // แยก pasted text ตามบรรทัดว่าง
-  const pastedTexts = pasted ? pasted.split(/\n\s*\n/).map(s => s.trim()).filter(s => s) : [];
-  const urlList = urls ? urls.split('\n').map(s => s.trim()).filter(s => s) : [];
+  // ถ้ากำลังวิเคราะห์อยู่ → กดปุ่ม = หยุด
+  if (_voiceLearnAbort) {
+    _voiceLearnAbort.abort();
+    _voiceLearnAbort = null;
+    status.className = 'upload-status';
+    status.textContent = 'ยกเลิกการวิเคราะห์แล้ว';
+    btn.textContent = 'วิเคราะห์';
+    btn.disabled = false;
+    return;
+  }
+
+  // ตัวอย่างมาจาก card array + URL chip array + file array
+  const pastedTexts = _voiceLearnTexts.slice();
+  const urlList = _voiceLearnUrls.slice();
 
   if (!pastedTexts.length && !_voiceLearnFiles.length && !urlList.length) {
     status.className = 'upload-status err';
@@ -3700,11 +3836,16 @@ function runVoiceLearn() {
   }
 
   status.className = 'upload-status';
-  status.textContent = 'กำลังวิเคราะห์...';
+  status.textContent = 'กำลังวิเคราะห์... (3 ส่วน: voice + terms + audience) — กด "หยุด" เพื่อยกเลิก';
+  btn.textContent = 'หยุด';
+  result.innerHTML = '';
+
+  // สร้าง AbortController
+  _voiceLearnAbort = new AbortController();
 
   // ถ้ามีไฟล์ → upload ก่อน แล้วค่อยส่งรวม
   const uploadPromise = _voiceLearnFiles.length > 0
-    ? uploadVoiceLearnFiles().then(paths => paths)
+    ? uploadVoiceLearnFiles(_voiceLearnAbort.signal).then(paths => paths)
     : Promise.resolve([]);
 
   uploadPromise.then(filePaths => {
@@ -3716,23 +3857,35 @@ function runVoiceLearn() {
         file_paths: filePaths,
         urls: urlList,
       }),
+      signal: _voiceLearnAbort.signal,
     }).then(r => r.json());
   }).then(data => {
+    _voiceLearnAbort = null;
+    btn.textContent = 'วิเคราะห์';
+    btn.disabled = false;
     if (data.ok) {
       status.className = 'upload-status ok';
       status.textContent = 'วิเคราะห์สำเร็จ ✓ (จาก ' + data.example_count + ' ตัวอย่าง)';
-      renderVoiceLearnResult(data.voice);
+      renderBrandLearnResult(data.brand);
     } else {
       status.className = 'upload-status err';
       status.textContent = data.error || 'วิเคราะห์ไม่สำเร็จ';
     }
   }).catch(e => {
-    status.className = 'upload-status err';
-    status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+    _voiceLearnAbort = null;
+    btn.textContent = 'วิเคราะห์';
+    btn.disabled = false;
+    if (e.name === 'AbortError') {
+      status.className = 'upload-status';
+      status.textContent = 'ยกเลิกการวิเคราะห์แล้ว';
+    } else {
+      status.className = 'upload-status err';
+      status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+    }
   });
 }
 
-function uploadVoiceLearnFiles() {
+function uploadVoiceLearnFiles(signal) {
   const formData = new FormData();
   for (const f of _voiceLearnFiles) {
     formData.append('files', f);
@@ -3740,44 +3893,88 @@ function uploadVoiceLearnFiles() {
   return fetch('/api/voice_learn_upload', {
     method: 'POST',
     body: formData,
+    signal: signal,
   }).then(r => r.json()).then(data => {
     if (data.ok) return data.paths;
     throw new Error(data.error || 'upload ไม่สำเร็จ');
   });
 }
 
-function renderVoiceLearnResult(voice) {
+function renderBrandLearnResult(brand) {
   const el = document.getElementById('voice-learn-result');
   let html = '<div style="margin-top:16px;border-top:1px solid #2a2d3a;padding-top:12px">';
-  html += '<div style="font-size:13px;color:#7c8aff;margin-bottom:8px">ผลการวิเคราะห์ Voice Profile</div>';
-  if (voice.personality) html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">บุคลิก:</span> <span style="color:#e0e0e0">' + escapeHtml(voice.personality) + '</span></div>';
-  if (voice.tone_description) html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">โทนเสียง:</span> <span style="color:#e0e0e0">' + escapeHtml(voice.tone_description) + '</span></div>';
-  if (voice.formality_level) html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">ระดับทางการ:</span> <span style="color:#e0e0e0">' + voice.formality_level + '/5</span></div>';
-  if (voice.language) html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">ภาษา:</span> <span style="color:#e0e0e0">' + escapeHtml(voice.language) + '</span></div>';
-  if (voice.banned_phrases && voice.banned_phrases.length) html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">คำต้องห้าม:</span> <span style="color:#e0e0e0">' + escapeHtml(voice.banned_phrases.join(', ')) + '</span></div>';
-  if (voice.examples && voice.examples.length) {
-    html += '<div style="margin-bottom:6px"><span style="color:#888;font-size:12px">ตัวอย่างที่ดี:</span></div>';
-    html += '<div style="margin-left:12px;margin-bottom:6px">' + voice.examples.map(e => '<div style="color:#ccc;font-size:12px;margin-bottom:4px">• ' + escapeHtml(e.substring(0, 150)) + (e.length > 150 ? '...' : '') + '</div>').join('') + '</div>';
+  html += '<div style="font-size:13px;color:#7c8aff;margin-bottom:12px">ผลการวิเคราะห์ Brand Profile (3 ส่วน)</div>';
+
+  // Voice card
+  const v = brand.voice || {};
+  if (Object.keys(v).length) {
+    html += '<div style="background:#1e2030;border-radius:8px;padding:12px;margin-bottom:10px">';
+    html += '<div style="font-size:12px;color:#7c8aff;margin-bottom:6px">🎤 Voice</div>';
+    if (v.personality) html += '<div style="margin-bottom:4px"><span style="color:#888;font-size:11px">บุคลิก:</span> <span style="color:#e0e0e0;font-size:12px">' + escapeHtml(v.personality) + '</span></div>';
+    if (v.tone_description) html += '<div style="margin-bottom:4px"><span style="color:#888;font-size:11px">โทน:</span> <span style="color:#e0e0e0;font-size:12px">' + escapeHtml(v.tone_description) + '</span></div>';
+    if (v.formality_level) html += '<div style="margin-bottom:4px"><span style="color:#888;font-size:11px">ทางการ:</span> <span style="color:#e0e0e0;font-size:12px">' + v.formality_level + '/5</span></div>';
+    if (v.language) html += '<div style="margin-bottom:4px"><span style="color:#888;font-size:11px">ภาษา:</span> <span style="color:#e0e0e0;font-size:12px">' + escapeHtml(v.language) + '</span></div>';
+    if (v.banned_phrases && v.banned_phrases.length) html += '<div style="margin-bottom:4px"><span style="color:#888;font-size:11px">คำต้องห้าม:</span> <span style="color:#e0e0e0;font-size:12px">' + escapeHtml(v.banned_phrases.join(', ')) + '</span></div>';
+    html += '</div>';
   }
-  html += '<button class="settings-save" style="margin-top:12px" onclick="saveVoiceLearnResult(' + JSON.stringify(voice).replace(/"/g, '&quot;') + ')">บันทึกเป็น Voice Profile</button>';
+
+  // Terms card
+  const t = brand.terms || {};
+  if (Object.keys(t).length) {
+    html += '<div style="background:#1e2030;border-radius:8px;padding:12px;margin-bottom:10px">';
+    html += '<div style="font-size:12px;color:#7c8aff;margin-bottom:6px">📝 Terms</div>';
+    if (t.approved && t.approved.length) html += '<div style="margin-bottom:4px"><span style="color:#888;font-size:11px">คำที่ใช้:</span> <span style="color:#e0e0e0;font-size:12px">' + escapeHtml(t.approved.join(', ')) + '</span></div>';
+    if (t.restricted && t.restricted.length) html += '<div style="margin-bottom:4px"><span style="color:#888;font-size:11px">คำต้องห้าม:</span> <span style="color:#e0e0e0;font-size:12px">' + escapeHtml(t.restricted.join(', ')) + '</span></div>';
+    if (t.replacements && Object.keys(t.replacements).length) {
+      const reps = Object.entries(t.replacements).map(([k, val]) => escapeHtml(k) + ' → ' + escapeHtml(val)).join(', ');
+      html += '<div style="margin-bottom:4px"><span style="color:#888;font-size:11px">คำที่ควรเปลี่ยน:</span> <span style="color:#e0e0e0;font-size:12px">' + reps + '</span></div>';
+    }
+    html += '</div>';
+  }
+
+  // Audience card
+  const a = brand.audience || {};
+  if (Object.keys(a).length) {
+    html += '<div style="background:#1e2030;border-radius:8px;padding:12px;margin-bottom:10px">';
+    html += '<div style="font-size:12px;color:#7c8aff;margin-bottom:6px">👥 Audience</div>';
+    if (a.primary) {
+      html += '<div style="margin-bottom:4px"><span style="color:#888;font-size:11px">กลุ่มหลัก:</span> <span style="color:#e0e0e0;font-size:12px">' + escapeHtml(a.primary.age || '') + ' ' + escapeHtml(a.primary.role || '') + '</span></div>';
+    }
+    if (a.pain_points && a.pain_points.length) html += '<div style="margin-bottom:4px"><span style="color:#888;font-size:11px">ปัญหา:</span> <span style="color:#e0e0e0;font-size:12px">' + escapeHtml(a.pain_points.join(', ')) + '</span></div>';
+    if (a.channels && a.channels.length) html += '<div style="margin-bottom:4px"><span style="color:#888;font-size:11px">ช่องทาง:</span> <span style="color:#e0e0e0;font-size:12px">' + escapeHtml(a.channels.join(', ')) + '</span></div>';
+    html += '</div>';
+  }
+
+  // Save buttons
+  html += '<div style="display:flex;gap:8px;margin-top:12px">';
+  html += '<button class="settings-save" onclick="saveBrandLearnResult(' + JSON.stringify(brand).replace(/"/g, '&quot;') + ', \'all\')">บันทึกทั้ง 3 ส่วน</button>';
+  html += '</div>';
   html += '</div>';
   el.innerHTML = html;
 }
 
-function saveVoiceLearnResult(voice) {
+function saveBrandLearnResult(brand, section) {
+  const status = document.getElementById('voice-learn-status');
+  let payload;
+  if (section === 'all') {
+    payload = { voice: brand.voice || {}, terms: brand.terms || {}, audience: brand.audience || {} };
+  } else {
+    payload = {};
+    payload[section] = brand[section] || {};
+  }
   fetch('/api/brand_json_save', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ voice: voice }),
+    body: JSON.stringify(payload),
   }).then(r => r.json()).then(data => {
     if (data.ok) {
-      _brandData.voice = voice;
-      const status = document.getElementById('voice-learn-status');
+      if (brand.voice) _brandData.voice = brand.voice;
+      if (brand.terms) _brandData.terms = brand.terms;
+      if (brand.audience) _brandData.audience = brand.audience;
       status.className = 'upload-status ok';
-      status.textContent = 'บันทึก Voice Profile แล้ว ✓';
+      status.textContent = 'บันทึก Brand Profile แล้ว ✓';
       setTimeout(closeVoiceLearnModal, 1200);
     } else {
-      const status = document.getElementById('voice-learn-status');
       status.className = 'upload-status err';
       status.textContent = data.error || 'บันทึกไม่สำเร็จ';
     }
@@ -5870,11 +6067,12 @@ function loadCredits() {
 </div>
 <div class="settings-modal-overlay" id="voice-learn-overlay">
   <div class="settings-modal" style="width:600px;max-height:85vh;overflow-y:auto">
-    <h3>🎓 Voice Learning — ฝึก AI จากตัวอย่าง</h3>
-    <p style="font-size:12px;color:#888;margin:0 0 14px 0">ใส่ตัวอย่างโพสต์ที่สะท้อนโทนเสียงแบรนด์ AI จะวิเคราะห์และสร้าง Voice Profile ให้อัตโนมัติ (เหมือน Jasper Brand Voice)</p>
+    <h3>🎓 Brand Learning — ฝึก AI จากตัวอย่าง</h3>
+    <p style="font-size:12px;color:#888;margin:0 0 14px 0">ใส่ตัวอย่างโพสต์ที่สะท้อนแบรนด์ AI จะวิเคราะห์และสร้าง <b>3 ส่วนพร้อมกัน</b>: Voice (โทนเสียง) + Terms (คำที่ใช้/ห้ามใช้) + Audience (กลุ่มเป้าหมาย) — ส่วน Profile และ Visual ต้องกรอกเอง</p>
     <div style="margin-bottom:14px">
-      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">📝 Paste ตัวอย่างโพสต์ (คั่นแต่ละตัวอย่างด้วยบรรทัดว่าง)</label>
-      <textarea id="voice-learn-pasted" placeholder="วางตัวอย่างโพสต์ที่นี่...&#10;&#10;ตัวอย่างที่ 1: ...&#10;&#10;ตัวอย่างที่ 2: ..." style="width:100%;min-height:120px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:12px;color:#e0e0e0;font-size:13px;line-height:1.6;resize:vertical"></textarea>
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">📝 ตัวอย่างโพสต์ (พิมพ์แล้วกด Enter เพื่อเพิ่มเป็น card แยก)</label>
+      <div id="voice-learn-text-cards" style="margin-bottom:8px"></div>
+      <textarea id="voice-learn-text-input" placeholder="วางตัวอย่างโพสต์ที่นี่ แล้วกด Enter..." style="width:100%;min-height:60px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:12px;color:#e0e0e0;font-size:13px;line-height:1.6;resize:vertical" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();addVoiceLearnText()}"></textarea>
     </div>
     <div style="margin-bottom:14px">
       <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">📎 Upload ไฟล์ (.txt, .md, .pdf, .docx)</label>
@@ -5882,14 +6080,17 @@ function loadCredits() {
       <div id="voice-learn-file-list"></div>
     </div>
     <div style="margin-bottom:14px">
-      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">🔗 URL (บรรทัดละ URL)</label>
-      <textarea id="voice-learn-urls" placeholder="https://example.com/blog/post-1&#10;https://example.com/blog/post-2" style="width:100%;min-height:60px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:12px;color:#e0e0e0;font-size:13px;resize:vertical"></textarea>
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">🔗 URL (กด Enter หรือ paste หลายอันพร้อมกันได้)</label>
+      <div style="width:100%;min-height:44px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:8px;display:flex;flex-wrap:wrap;align-items:center;gap:2px;cursor:text" onclick="document.getElementById('voice-learn-url-input').focus()">
+        <div id="voice-learn-url-chips" style="display:flex;flex-wrap:wrap;align-items:center"></div>
+        <input id="voice-learn-url-input" type="text" placeholder="วาง URL ที่นี่..." style="flex:1;min-width:120px;background:none;border:none;outline:none;color:#e0e0e0;font-size:13px;padding:4px" onkeydown="handleVoiceLearnUrlKeydown(this, event)" onpaste="handleVoiceLearnUrlPaste(this, event)">
+      </div>
     </div>
     <div class="upload-status" id="voice-learn-status"></div>
     <div id="voice-learn-result"></div>
     <div class="settings-actions">
       <button class="settings-cancel" onclick="closeVoiceLearnModal()">ยกเลิก</button>
-      <button class="settings-save" onclick="runVoiceLearn()">วิเคราะห์</button>
+      <button class="settings-save" id="voice-learn-analyze-btn" onclick="runVoiceLearn()">วิเคราะห์</button>
     </div>
   </div>
 </div>
