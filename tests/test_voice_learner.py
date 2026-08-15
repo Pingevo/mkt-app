@@ -399,6 +399,103 @@ def test_analyze_brand_partial_failure():
     assert "audience" in result
 
 
+# ---------------------------------------------------------------------------
+# analyze_video_style — วิเคราะห์สไตล์วิดีโอจากไฟล์/YouTube URL
+# ---------------------------------------------------------------------------
+
+def test_analyze_video_style_from_youtube_url():
+    """ส่ง YouTube URL → LLM คืน video style profile (pacing, transitions, color, etc)."""
+    from src.voice_learner import analyze_video_style
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = (
+        '{"pacing": "fast", "transitions": ["jump cut", "zoom"], '
+        '"color_grading": "warm tones", "sound_design": "upbeat music", '
+        '"shot_duration": "2-3 sec", "visual_rhythm": "energetic", '
+        '"style_summary": "Fast-paced TikTok style with warm tones"}'
+    )
+
+    result = analyze_video_style(
+        video_url="https://www.youtube.com/watch?v=abc123",
+        llm=mock_llm,
+    )
+
+    assert isinstance(result, dict)
+    assert "pacing" in result
+    assert "transitions" in result
+    assert "color_grading" in result
+    assert "style_summary" in result
+    # ตรวจว่าส่ง video_url content type ให้ LLM
+    call_args = mock_llm.chat.call_args
+    messages = call_args[0][0]
+    user_msg = [m for m in messages if m["role"] == "user"][0]
+    # content ต้องเป็น list (multimodal) มี video_url part
+    assert isinstance(user_msg["content"], list)
+    video_parts = [p for p in user_msg["content"] if p.get("type") == "video_url"]
+    assert len(video_parts) == 1
+    assert "youtube.com" in video_parts[0]["video_url"]["url"]
+
+
+def test_analyze_video_style_from_file():
+    """ส่งไฟล์วิดีโอ → แปลงเป็น base64 data URL → ส่งให้ LLM."""
+    from src.voice_learner import analyze_video_style
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = (
+        '{"pacing": "medium", "transitions": [], "color_grading": "neutral", '
+        '"sound_design": "voiceover", "shot_duration": "3-5 sec", '
+        '"visual_rhythm": "calm", "style_summary": "Calm documentary style"}'
+    )
+
+    # สร้างไฟล์วิดีโอจำลอง
+    import tempfile, base64
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tmp.write(b"fake video content")
+    tmp.close()
+
+    try:
+        result = analyze_video_style(video_path=tmp.name, llm=mock_llm)
+
+        assert isinstance(result, dict)
+        assert "style_summary" in result
+        # ตรวจว่าส่งเป็น base64 data URL
+        call_args = mock_llm.chat.call_args
+        messages = call_args[0][0]
+        user_msg = [m for m in messages if m["role"] == "user"][0]
+        video_parts = [p for p in user_msg["content"] if p.get("type") == "video_url"]
+        assert len(video_parts) == 1
+        assert video_parts[0]["video_url"]["url"].startswith("data:video/mp4;base64,")
+    finally:
+        import os
+        os.unlink(tmp.name)
+
+
+def test_analyze_video_style_no_input():
+    """ไม่ส่งอะไรเลย → คืน {} ไม่เรียก LLM."""
+    from src.voice_learner import analyze_video_style
+
+    mock_llm = MagicMock()
+    result = analyze_video_style(llm=mock_llm)
+
+    assert result == {}
+    mock_llm.chat.assert_not_called()
+
+
+def test_analyze_video_style_invalid_json():
+    """LLM คืน JSON ไม่ valid → คืน {} ไม่ crash."""
+    from src.voice_learner import analyze_video_style
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = 'broken json {{{'
+
+    result = analyze_video_style(
+        video_url="https://www.youtube.com/watch?v=abc",
+        llm=mock_llm,
+    )
+
+    assert result == {}
+
+
 if __name__ == "__main__":
     tests = [
         test_analyze_voice_returns_profile,
@@ -424,6 +521,10 @@ if __name__ == "__main__":
         test_analyze_brand_returns_three_sections,
         test_analyze_brand_empty_examples,
         test_analyze_brand_partial_failure,
+        test_analyze_video_style_from_youtube_url,
+        test_analyze_video_style_from_file,
+        test_analyze_video_style_no_input,
+        test_analyze_video_style_invalid_json,
     ]
     passed = 0
     failed = 0

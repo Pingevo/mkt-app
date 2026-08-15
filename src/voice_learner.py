@@ -15,6 +15,7 @@ Voice profile ที่ได้จะบันทึกลง brand/voice.json 
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 from pathlib import Path
@@ -264,6 +265,125 @@ def analyze_brand(examples: list[str], llm: Any) -> dict[str, dict[str, Any]]:
         "terms": analyze_terms(examples, llm),
         "audience": analyze_audience(examples, llm),
     }
+
+
+# ---------------------------------------------------------------------------
+# Video Style Analysis — วิเคราะห์สไตล์วิดีโอจากไฟล์/YouTube URL
+# (Style Reverse-Engineering จาก Notion "GOODBYE CAPCUT" prompt #2)
+# ---------------------------------------------------------------------------
+
+_VIDEO_STYLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pacing": {"type": "string"},
+        "transitions": {"type": "array", "items": {"type": "string"}},
+        "color_grading": {"type": "string"},
+        "sound_design": {"type": "string"},
+        "shot_duration": {"type": "string"},
+        "visual_rhythm": {"type": "string"},
+        "style_summary": {"type": "string"},
+    },
+    "required": ["pacing", "transitions", "color_grading",
+                 "sound_design", "shot_duration", "visual_rhythm", "style_summary"],
+    "additionalProperties": False,
+}
+
+
+def _video_file_to_data_url(filepath: str) -> str:
+    """อ่านไฟล์วิดีโอ → แปลงเป็น base64 data URL.
+
+    รองรับ: mp4, mpeg, mov, webm
+    """
+    path = Path(filepath)
+    ext = path.suffix.lower().lstrip(".")
+    # map ext → mime type
+    mime_map = {"mp4": "video/mp4", "mpeg": "video/mpeg",
+                "mov": "video/mov", "webm": "video/webm"}
+    mime = mime_map.get(ext, "video/mp4")
+    data = path.read_bytes()
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def analyze_video_style(
+    llm: Any,
+    *,
+    video_url: str | None = None,
+    video_path: str | None = None,
+) -> dict[str, Any]:
+    """วิเคราะห์สไตล์วิดีโอ → คืน video style profile dict.
+
+    รับ input 2 แบบ:
+      - video_url: YouTube URL หรือ URL วิดีโอโดยตรง (Gemini รองรับ YouTube)
+      - video_path: path ของไฟล์วิดีโอ local (แปลงเป็น base64 data URL)
+
+    คืน: {pacing, transitions, color_grading, sound_design,
+           shot_duration, visual_rhythm, style_summary}
+    ถ้าไม่ส่งทั้งสองอย่าง → คืน {} (ไม่เรียก LLM)
+    ถ้า LLM คืน JSON ไม่ valid → คืน {} (ไม่ crash)
+    """
+    # หา url ที่จะส่งให้ LLM
+    url_to_send: str | None = None
+    if video_url:
+        url_to_send = video_url
+    elif video_path:
+        url_to_send = _video_file_to_data_url(video_path)
+
+    if not url_to_send:
+        return {}
+
+    system_prompt = (
+        "คุณเป็นนักตัดต่อวิดีโอและนักวิเคราะห์สไตล์ภาพ (Master Video Editor & Visual Style Analyst)\n"
+        "หน้าที่: วิเคราะห์วิดีโอที่ให้มา แล้วสรุปสไตล์การตัดต่อ\n\n"
+        "วิเคราะห์:\n"
+        "1. pacing — จังหวะการตัดต่อ (เช่น 'เร็ว', 'ช้า', 'ปานกลาง')\n"
+        "2. transitions — เทคนิค transition ที่ใช้ (เช่น ['jump cut', 'zoom', 'fade'])\n"
+        "3. color_grading — โทนสี (เช่น 'warm tones', 'cool, high contrast')\n"
+        "4. sound_design — ดีไซน์เสียง (เช่น 'upbeat music', 'voiceover only', 'SFX heavy')\n"
+        "5. shot_duration — ระยะเวลาเฉลี่ยต่อ shot (เช่น '2-3 sec', '5-8 sec')\n"
+        "6. visual_rhythm — จังหวะภาพรวม (เช่น 'energetic', 'calm', 'dramatic')\n"
+        "7. style_summary — สรุปสไตล์ทั้งหมดใน 1 ประโยค\n\n"
+        "คืนเป็น JSON เท่านั้น ตามรูปแบบนี้:\n"
+        '{"pacing": "...", "transitions": ["..."], "color_grading": "...", '
+        '"sound_design": "...", "shot_duration": "...", "visual_rhythm": "...", '
+        '"style_summary": "..."}'
+    )
+
+    # multimodal message: text + video_url content part
+    user_content = [
+        {"type": "text", "text": "วิเคราะห์สไตล์การตัดต่อของวิดีโอนี้"},
+        {"type": "video_url", "video_url": {"url": url_to_send}},
+    ]
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "video_style_profile",
+            "strict": True,
+            "schema": _VIDEO_STYLE_SCHEMA,
+        },
+    }
+
+    try:
+        raw = llm.chat(
+            messages,
+            temperature=0.3,
+            max_tokens=2048,
+            stream=False,
+            response_format=response_format,
+            source="voice_learner.analyze_video_style",
+        )
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = re.sub(r"^```(?:json)?\s*", "", clean)
+            clean = re.sub(r"\s*```$", "", clean)
+        return json.loads(clean)
+    except (json.JSONDecodeError, TypeError, Exception):
+        return {}
 
 
 def fetch_url_content(url: str) -> str:

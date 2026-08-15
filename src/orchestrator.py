@@ -330,6 +330,24 @@ class Orchestrator:
                     if keywords:
                         visual_parts.append("คำสำคัญ: " + ", ".join(keywords))
                     visual_style = "\n".join(visual_parts)
+                # Video style profile (จาก analyze_video_style — Style Reverse-Engineering)
+                video_style = self.brand_visual.get("video_style", {})
+                if video_style:
+                    vs_parts = []
+                    summary = video_style.get("style_summary", "")
+                    if summary:
+                        vs_parts.append(f"สไตล์วิดีโอ: {summary}")
+                    pacing = video_style.get("pacing", "")
+                    if pacing:
+                        vs_parts.append(f"จังหวะ: {pacing}")
+                    transitions = video_style.get("transitions", [])
+                    if transitions:
+                        vs_parts.append("transitions: " + ", ".join(transitions))
+                    color = video_style.get("color_grading", "")
+                    if color:
+                        vs_parts.append(f"โทนสี: {color}")
+                    if vs_parts:
+                        visual_style = (visual_style + "\n" if visual_style else "") + "\n".join(vs_parts)
 
             prompt = agent.build_prompt(
                 product_data, competitor_analysis, campaign_strategy,
@@ -794,6 +812,178 @@ class Orchestrator:
                         f"⚠ ยังซ้ำหลังลอง {max_dedup_retries} ครั้ง — ใช้ผลงานล่าสุด (similarity {dup_result.get('similarity', 0):.2f})"
                     )
 
+            # --- Phase 3: Script Review — self-review อัตโนมัติ ---
+            # อิงจากตลาด (Opus Clip / PrePublish / Retensis):
+            #   - ให้คะแนน 0-100 + คะแนนย่อย 4 มิติ
+            #   - ถ้า score < threshold → ใช้ revised_script แล้วตรวจใหม่ (1 ครั้ง)
+            #   - max 2 รอบ (review + 1 re-check) — ไม่วนไม่รู้จบ
+            #   - ถ้า re-check ต่ำกว่า original → revert ใช้ของเดิม (กัน oscillate)
+            #   - ไม่ต้อง approve จาก user — ระบบทำเอง อัปเดต script + video_prompts เอง
+            script_review_result: dict[str, Any] = {}
+            try:
+                parsed_content = _json.loads(content)
+                posts = parsed_content.get("posts", [])
+                # หา post ที่มี script
+                script_post_idx = -1
+                original_script = ""
+                for i, p in enumerate(posts):
+                    if p.get("script", "").strip():
+                        script_post_idx = i
+                        original_script = p["script"]
+                        break
+
+                if script_post_idx >= 0 and original_script:
+                    from .script_reviewer import review_script
+                    from datetime import datetime as _dt
+                    threshold = int(ch_cfg.get("script_review_threshold", 70))
+                    # max 2 รอบ: review original → ถ้าต่ำ → review revised → จบ
+                    max_iter = min(int(ch_cfg.get("script_review_max_iterations", 2)), 2)
+                    iterations_done = 0
+
+                    # รอบ 1: ตรวจ script เดิม
+                    if status_callback:
+                        status_callback(f"กำลังตรวจ script (รอบที่ 1/{max_iter})...")
+                    script_review_result = review_script(
+                        original_script,
+                        platform_used or "TikTok",
+                        llm,
+                    )
+                    iterations_done = 1
+
+                    first_score = script_review_result.get("score", 0) if script_review_result else 0
+                    if status_callback and script_review_result:
+                        status_callback(
+                            f"Script review รอบที่ 1: score {first_score}/100, "
+                            f"{len(script_review_result.get('issues', []))} จุดน่าเบื่อ"
+                        )
+
+                    # ถ้ารอบ 1 ผ่าน → ใช้ script เดิม จบ
+                    if first_score >= threshold or not script_review_result:
+                        final_script = original_script
+                        final_score = first_score
+                    else:
+                        # รอบ 2: ใช้ revised_script แล้วตรวจใหม่
+                        revised = script_review_result.get("revised_script", "")
+                        if not revised.strip():
+                            final_script = original_script
+                            final_score = first_score
+                        else:
+                            if status_callback:
+                                status_callback(f"กำลังตรวจ script ที่แก้ (รอบที่ 2/{max_iter})...")
+                            re_review = review_script(
+                                revised,
+                                platform_used or "TikTok",
+                                llm,
+                            )
+                            iterations_done = 2
+                            re_score = re_review.get("score", 0) if re_review else 0
+
+                            if status_callback:
+                                status_callback(
+                                    f"Script review รอบที่ 2: score {re_score}/100"
+                                )
+
+                            # Loop safety: ถ้า re-check ต่ำกว่า original → revert
+                            if re_score < first_score:
+                                if status_callback:
+                                    status_callback(
+                                        f"⚠ Script ที่แก้ ({re_score}/100) แย่กว่าต้นฉบับ "
+                                        f"({first_score}/100) — ใช้ต้นฉบับ"
+                                    )
+                                final_script = original_script
+                                final_score = first_score
+                                # เก็บ re_review ไว้ใน result ด้วย (เพื่อความโปร่งใส)
+                                script_review_result["re_review"] = re_review
+                            else:
+                                # re-check ดีขึ้นหรือเท่าเดิม → ใช้ revised
+                                final_script = revised
+                                final_score = re_score
+                                script_review_result = re_review
+                                script_review_result["original_score"] = first_score
+
+                    # --- Apply: อัปเดต script ใน content JSON เอง ---
+                    script_changed = final_script.strip() != original_script.strip()
+
+                    if script_changed and final_script.strip():
+                        posts[script_post_idx]["script"] = final_script
+                        # สร้าง video_prompts ใหม่จาก script สุดท้าย
+                        if status_callback:
+                            status_callback("กำลังสร้าง video_prompts ใหม่จาก script ที่แก้...")
+                        try:
+                            from .config_loader import get_agent_config
+                            cc_cfg = get_agent_config(self.config, "content_creator")
+                            vp_system = cc_cfg.get("system_prompt", "")
+                            vp_user = (
+                                f"เขียน video_prompts ใหม่จาก script นี้ (platform: {platform_used or 'TikTok'}):\n\n"
+                                f"{final_script}\n\n"
+                                f"คืน JSON ตาม schema ใน system prompt"
+                            )
+                            from .content_schema import CONTENT_SCHEMA
+                            vp_response = llm.chat(
+                                [{"role": "system", "content": vp_system},
+                                 {"role": "user", "content": vp_user}],
+                                temperature=cc_cfg.get("temperature", 0.9),
+                                max_tokens=cc_cfg.get("max_tokens", 4096),
+                                stream=False,
+                                response_format={
+                                    "type": "json_schema",
+                                    "json_schema": {
+                                        "name": "content_output",
+                                        "strict": True,
+                                        "schema": CONTENT_SCHEMA,
+                                    },
+                                },
+                                source="script_review.regenerate_prompts",
+                            )
+                            import re as _re2
+                            vp_clean = vp_response.strip()
+                            if vp_clean.startswith("```"):
+                                vp_clean = _re2.sub(r"^```(?:json)?\s*", "", vp_clean)
+                                vp_clean = _re2.sub(r"\s*```$", "", vp_clean)
+                            vp_data = _json.loads(vp_clean)
+                            vp_posts = vp_data.get("posts", [])
+                            if vp_posts and vp_posts[0].get("video_prompts"):
+                                posts[script_post_idx]["video_prompts"] = vp_posts[0]["video_prompts"]
+                        except Exception:
+                            pass  # สร้าง video_prompts ไม่ได้ → ใช้ของเดิม
+
+                    # บันทึก review state ลงใน post
+                    posts[script_post_idx]["script_review"] = {
+                        "status": "reviewed",
+                        "reviewed_at": _dt.now().isoformat(),
+                        "score": final_score,
+                        "iterations": iterations_done,
+                        "threshold": threshold,
+                        "script_changed": script_changed,
+                        "issues_count": len(script_review_result.get("issues", [])),
+                        "hooks_count": len(script_review_result.get("suggested_hooks", [])),
+                        "review": script_review_result,
+                    }
+
+                    # อัปเดต content JSON + self.results
+                    parsed_content["posts"] = posts
+                    content = _json.dumps(parsed_content, ensure_ascii=False, indent=2)
+                    self.results["content_creator"] = content
+                    try:
+                        from .content_schema import render_posts_to_markdown
+                        self.results["content_creator_markdown"] = render_posts_to_markdown(parsed_content)
+                    except Exception:
+                        self.results["content_creator_markdown"] = content
+
+                    if status_callback:
+                        if final_score >= threshold:
+                            status_callback(
+                                f"✓ Script review ผ่าน: {final_score}/100 "
+                                f"({iterations_done} รอบ, {'แก้แล้ว' if script_changed else 'ไม่ต้องแก้'})"
+                            )
+                        else:
+                            status_callback(
+                                f"⚠ Script score {final_score}/100 ยังต่ำกว่า {threshold} "
+                                f"หลัง {iterations_done} รอบ — ใช้ script ล่าสุด"
+                            )
+            except Exception:
+                pass  # review พังไม่ต้อง crash pipeline
+
             # บันทึก history (1 entry ต่อการสร้าง — เก็บ product_ids ทั้งหมด + pillar)
             content_history.record_entry(
                 project_root,
@@ -818,6 +1008,7 @@ class Orchestrator:
                 "is_duplicate": dup_result.get("is_duplicate", False),
                 "similarity": dup_result.get("similarity", 0.0),
                 "dedup_retries": retry_count,
+                "script_review": script_review_result,
             }
         finally:
             if own:

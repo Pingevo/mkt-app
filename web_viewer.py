@@ -1201,8 +1201,64 @@ async def api_voice_learn_upload(request: Request) -> JSONResponse:
 
 
 # ============================================================
-# Content Pillars — จัดการเสาหลักคอนเทนต์
+# Video Style Analysis — วิเคราะห์วิดีโอคู่แข่ง → style profile
+# (Style Reverse-Engineering จาก Notion "GOODBYE CAPCUT" prompt #2)
 # ============================================================
+
+@app.post("/api/video_style_analyze")
+async def api_video_style_analyze(request: Request) -> JSONResponse:
+    """รับ YouTube URL หรือไฟล์วิดีโอ → LLM วิเคราะห์สไตล์ → คืน video style profile.
+
+    Body: {video_url: str} หรือ {video_path: str}
+    คืน: {ok: true, video_style: {...}} หรือ {ok: false, error}
+    """
+    from src.voice_learner import analyze_video_style
+    body = await request.json()
+    video_url = body.get("video_url")
+    video_path = body.get("video_path")
+
+    if not video_url and not video_path:
+        return JSONResponse({"ok": False, "error": "ต้องส่ง video_url หรือ video_path"}, status_code=400)
+
+    try:
+        orch = Orchestrator(brand_dir="brand")
+        llm = orch._make_client()
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"สร้าง LLM client ไม่ได้: {e}"}, status_code=500)
+
+    try:
+        style = analyze_video_style(llm, video_url=video_url, video_path=video_path)
+        if not style:
+            return JSONResponse({"ok": False, "error": "LLM วิเคราะห์ไม่สำเร็จ — ตรวจสอบ URL/ไฟล์ แล้วลองใหม่"}, status_code=500)
+        return JSONResponse({"ok": True, "video_style": style})
+    finally:
+        try:
+            llm.close()
+        except Exception:
+            pass
+
+
+@app.post("/api/video_style_upload")
+async def api_video_style_upload(request: Request) -> JSONResponse:
+    """รับไฟล์วิดีโอ upload (multipart) → เซฟ temp → คืน path."""
+    form = await request.form()
+    files = form.getlist("files")
+    if not files:
+        return JSONResponse({"ok": False, "error": "ไม่มีไฟล์"}, status_code=400)
+
+    import tempfile
+    saved: list[str] = []
+    tmp_dir = Path(tempfile.mkdtemp(prefix="video_style_"))
+    for f in files:
+        if hasattr(f, "filename") and f.filename:
+            dest = tmp_dir / f.filename
+            content = await f.read()
+            dest.write_bytes(content)
+            saved.append(str(dest))
+
+    return JSONResponse({"ok": True, "paths": saved})
+
+
 
 @app.get("/api/pillars")
 def api_pillars_get() -> JSONResponse:
@@ -2821,6 +2877,8 @@ let _currentMediaSession = '';
 let _currentMediaFile = '';
 let _currentMediaContent = '';
 let _currentMediaPost = null;
+let _resultNavFiles = [];   // รายการไฟล์ทั้งหมดในการสร้างครั้งนั้น (สำหรับ navigation)
+let _resultNavIdx = 0;      // index ของไฟล์ที่กำลังดูอยู่
 let multiSelectMode = false;
 const AUTO_ITEM = '__auto__';  // special "product" ที่แทน Auto mode
 let readyProductCount = 0;  // จำนวนสินค้า ready — สำหรับ max ใน Auto count input
@@ -3589,6 +3647,31 @@ function _visualForm(d) {
   h += _textarea('Product shot', 'bf-style-product', s.product_shot, 'สะอาด พื้นขาว');
   h += _listField('Keywords สำหรับ AI Image Prompt', 'bf-keywords', d.keywords);
   h += _listField('หลีกเลี่ยง (Avoid)', 'bf-avoid', d.avoid);
+  // Video style section (Style Reverse-Engineering) — รองรับหลายวิดีโอคู่แข่ง
+  const vsList = d.video_styles || [];
+  const vsActive = d.video_style || {};
+  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">สไตล์วิดีโอ (จากการวิเคราะห์คู่แข่ง)</div>';
+  h += '<button onclick="analyzeVideoStyle()" style="background:#7c8aff;border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:8px">🎬 วิเคราะห์วิดีโอคู่แข่ง</button>';
+  h += '<div id="video-style-result" style="display:none;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:12px;margin-bottom:8px;font-size:12px;color:#e0e0e0"></div>';
+  // แสดงรายการวิดีโอที่วิเคราะห์แล้ว
+  if (vsList.length > 0) {
+    h += '<div id="video-style-list" style="margin-bottom:12px">';
+    vsList.forEach((vs, i) => {
+      h += '<div style="background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center">';
+      h += '<span style="font-size:11px;color:#888">คู่แข่ง ' + (i+1) + ': ' + escapeHtml(vs.style_summary || vs.pacing || '') + '</span>';
+      h += '<span><button onclick="useVideoStyle(' + i + ')" style="background:none;border:1px solid #4caf50;color:#4caf50;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px;margin-right:4px">ใช้</button>';
+      h += '<button onclick="removeVideoStyle(' + i + ')" style="background:none;border:1px solid #f44336;color:#f44336;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px">×</button></span>';
+      h += '</div>';
+    });
+    h += '</div>';
+  }
+  h += _field('สรุปสไตล์ (ที่ใช้)', 'bf-vs-summary', vsActive.style_summary, 'เช่น Fast-paced TikTok style with warm tones');
+  h += _field('จังหวะ (Pacing)', 'bf-vs-pacing', vsActive.pacing, 'เช่น เร็ว, ปานกลาง, ช้า');
+  h += _listField('Transitions', 'bf-vs-transitions', vsActive.transitions);
+  h += _field('โทนสี (Color Grading)', 'bf-vs-color', vsActive.color_grading, 'เช่น warm tones, high contrast');
+  h += _field('ดีไซน์เสียง (Sound Design)', 'bf-vs-sound', vsActive.sound_design, 'เช่น upbeat music, voiceover');
+  h += _field('ระยะเวลาต่อ Shot', 'bf-vs-shot', vsActive.shot_duration, 'เช่น 2-3 sec');
+  h += _field('จังหวะภาพ (Visual Rhythm)', 'bf-vs-rhythm', vsActive.visual_rhythm, 'เช่น energetic, calm');
   return h;
 }
 
@@ -3621,6 +3704,16 @@ function _collectBrandForm(section) {
       image_style: { tone: val('bf-style-tone'), product_shot: val('bf-style-product') },
       keywords: list('bf-keywords'),
       avoid: list('bf-avoid'),
+      video_styles: window._videoStyles || [],
+      video_style: {
+        style_summary: val('bf-vs-summary'),
+        pacing: val('bf-vs-pacing'),
+        transitions: list('bf-vs-transitions'),
+        color_grading: val('bf-vs-color'),
+        sound_design: val('bf-vs-sound'),
+        shot_duration: val('bf-vs-shot'),
+        visual_rhythm: val('bf-vs-rhythm'),
+      },
     };
   }
   return null;
@@ -3653,6 +3746,225 @@ function saveBrandFileModal() {
       status.textContent = data.error || 'เกิดข้อผิดพลาด';
     }
   });
+}
+
+// ============================================================
+// Video Style Analysis — วิเคราะห์วิดีโอคู่แข่ง → style profile
+// ============================================================
+
+function analyzeVideoStyle() {
+  // init list จากข้อมูลเดิม
+  if (!window._videoStyles) {
+    const existing = (_brandData.visual && _brandData.visual.video_styles) || [];
+    window._videoStyles = [...existing];
+  }
+  const url = prompt('ใส่ YouTube URL ของวิดีโอคู่แข่ง หรือเว้นว่างเพื่อ upload ไฟล์:');
+  if (url === null) return;
+  if (url.trim()) {
+    _doAnalyzeVideoStyle({video_url: url.trim()});
+  } else {
+    // upload file
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'video/mp4,video/mpeg,video/mov,video/webm';
+    input.onchange = async () => {
+      if (!input.files.length) return;
+      const fd = new FormData();
+      fd.append('files', input.files[0]);
+      const result = document.getElementById('video-style-result');
+      result.style.display = 'block';
+      result.textContent = 'กำลังอัปโหลดวิดีโอ...';
+      try {
+        const up = await fetch('/api/video_style_upload', {method: 'POST', body: fd}).then(r => r.json());
+        if (!up.ok) { result.textContent = 'อัปโหลดไม่สำเร็จ: ' + (up.error || ''); return; }
+        result.textContent = 'กำลังวิเคราะห์สไตล์วิดีโอ...';
+        _doAnalyzeVideoStyle({video_path: up.paths[0]});
+      } catch(e) { result.textContent = 'เกิดข้อผิดพลาด: ' + e; }
+    };
+    input.click();
+  }
+}
+
+function _doAnalyzeVideoStyle(body) {
+  const result = document.getElementById('video-style-result');
+  result.style.display = 'block';
+  result.textContent = 'กำลังวิเคราะห์สไตล์วิดีโอ... (อาจใช้เวลา 10-30 วินาที)';
+  fetch('/api/video_style_analyze', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      const vs = data.video_style;
+      // เก็บเข้า list
+      window._videoStyles = window._videoStyles || [];
+      window._videoStyles.push(vs);
+      _renderVideoStyleList();
+      // แสดงผล + ปุ่มใช้
+      let html = '<div style="color:#7c8aff;font-weight:600;margin-bottom:6px">ผลการวิเคราะห์ (คู่แข่ง ' + window._videoStyles.length + '):</div>';
+      html += '<div style="margin-bottom:4px">สรุป: ' + escapeHtml(vs.style_summary || '') + '</div>';
+      html += '<div style="margin-bottom:4px">จังหวะ: ' + escapeHtml(vs.pacing || '') + '</div>';
+      html += '<div style="margin-bottom:4px">Transitions: ' + escapeHtml((vs.transitions || []).join(', ')) + '</div>';
+      html += '<div style="margin-bottom:4px">โทนสี: ' + escapeHtml(vs.color_grading || '') + '</div>';
+      html += '<div style="margin-bottom:4px">เสียง: ' + escapeHtml(vs.sound_design || '') + '</div>';
+      html += '<div style="margin-bottom:4px">Shot: ' + escapeHtml(vs.shot_duration || '') + '</div>';
+      html += '<div style="margin-bottom:8px">จังหวะภาพ: ' + escapeHtml(vs.visual_rhythm || '') + '</div>';
+      html += '<button onclick="applyVideoStyle()" style="background:#4caf50;border:none;color:#fff;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:11px">ใช้ค่านี้</button>';
+      html += ' <button onclick="document.getElementById(\'video-style-result\').style.display=\'none\'" style="background:none;border:1px solid #555;color:#888;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:11px">ปิด</button>';
+      html += ' <span style="color:#555;font-size:11px;margin-left:8px">วิเคราะห์เพิ่มได้อีก</span>';
+      result.innerHTML = html;
+      window._pendingVideoStyle = vs;
+    } else {
+      result.textContent = 'วิเคราะห์ไม่สำเร็จ: ' + (data.error || '');
+    }
+  }).catch(e => { result.textContent = 'เกิดข้อผิดพลาด: ' + e; });
+}
+
+function _renderVideoStyleList() {
+  const listEl = document.getElementById('video-style-list');
+  if (!listEl) return;
+  const styles = window._videoStyles || [];
+  let html = '';
+  styles.forEach((vs, i) => {
+    html += '<div style="background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center">';
+    html += '<span style="font-size:11px;color:#888">คู่แข่ง ' + (i+1) + ': ' + escapeHtml(vs.style_summary || vs.pacing || '') + '</span>';
+    html += '<span><button onclick="useVideoStyle(' + i + ')" style="background:none;border:1px solid #4caf50;color:#4caf50;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px;margin-right:4px">ใช้</button>';
+    html += '<button onclick="removeVideoStyle(' + i + ')" style="background:none;border:1px solid #f44336;color:#f44336;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px">×</button></span>';
+    html += '</div>';
+  });
+  listEl.innerHTML = html;
+}
+
+function useVideoStyle(idx) {
+  const vs = (window._videoStyles || [])[idx];
+  if (!vs) return;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+  set('bf-vs-summary', vs.style_summary);
+  set('bf-vs-pacing', vs.pacing);
+  set('bf-vs-transitions', (vs.transitions || []).join(', '));
+  set('bf-vs-color', vs.color_grading);
+  set('bf-vs-sound', vs.sound_design);
+  set('bf-vs-shot', vs.shot_duration);
+  set('bf-vs-rhythm', vs.visual_rhythm);
+}
+
+function removeVideoStyle(idx) {
+  if (!window._videoStyles) return;
+  window._videoStyles.splice(idx, 1);
+  _renderVideoStyleList();
+}
+
+function applyVideoStyle() {
+  const vs = window._pendingVideoStyle;
+  if (!vs) return;
+  useVideoStyle(window._videoStyles.length - 1);
+  document.getElementById('video-style-result').style.display = 'none';
+}
+
+// ============================================================
+// Script Review — ตรวจ script หาจุดน่าเบื่อ + เสนอ hook ใหม่
+// ============================================================
+
+function showSavedReview() {
+  // แสดงผล review ที่เก็บไว้ใน JSON (read-only — ระบบตรวจอัตโนมัติแล้ว)
+  const overlay = document.createElement('div');
+  overlay.className = 'settings-modal-overlay visible';
+  overlay.id = 'script-review-overlay';
+  overlay.style.zIndex = '10001';
+  overlay.innerHTML = `
+    <div class="settings-modal" style="max-width:700px;max-height:85vh;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="color:#e0e0e0;font-size:16px;margin:0">🎬 Script Review (ระบบตรวจอัตโนมัติ)</h3>
+        <button onclick="document.getElementById('script-review-overlay').remove()" style="background:none;border:none;color:#888;font-size:20px;cursor:pointer">×</button>
+      </div>
+      <div id="script-review-body" style="color:#e0e0e0;font-size:13px">กำลังโหลด...</div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // ดึง review จาก _currentMediaPost (มีอยู่แล้วใน context)
+  const sr = _currentMediaPost && _currentMediaPost.scriptReview;
+  if (!sr || !sr.review) {
+    document.getElementById('script-review-body').innerHTML = '<div style="color:#888">ไม่พบผล review</div>';
+    return;
+  }
+  // alwaysApplied = true → ซ่อนปุ่ม apply (read-only)
+  _renderReviewResult({ok: true, review: sr.review}, (_currentMediaPost && _currentMediaPost.platform) || 'TikTok', true);
+}
+
+function _renderReviewResult(data, platform, alreadyApplied) {
+  const body = document.getElementById('script-review-body');
+  if (!data.ok) { body.innerHTML = '<div style="color:#f44336">ตรวจไม่สำเร็จ: ' + escapeHtml(data.error || '') + '</div>'; return; }
+  const rv = data.review;
+  let html = '';
+  // Score — แสดงคะแนนรวม + คะแนนย่อย (เหมือน Opus Clip Viral Score)
+  if (rv.score !== undefined) {
+    const score = rv.score;
+    const threshold = 70;  // ตรงกับ config
+    let scoreColor, scoreLabel, scoreBg;
+    if (score >= threshold) { scoreColor = '#4caf50'; scoreLabel = 'พอใช้แล้ว'; scoreBg = '#1b3a2a'; }
+    else if (score >= 50) { scoreColor = '#ff9800'; scoreLabel = 'ยังไม่ดีพอ — แก้แล้วตรวจใหม่'; scoreBg = '#3a2a1b'; }
+    else { scoreColor = '#f44336'; scoreLabel = 'แย่ — ต้องแก้'; scoreBg = '#3a1b1b'; }
+    html += '<div style="background:' + scoreBg + ';border:1px solid ' + scoreColor + ';border-radius:8px;padding:12px;margin-bottom:12px;text-align:center">';
+    html += '<div style="font-size:32px;font-weight:bold;color:' + scoreColor + '">' + score + '<span style="font-size:14px;color:#555">/100</span></div>';
+    html += '<div style="color:' + scoreColor + ';font-size:12px;margin-top:4px">' + scoreLabel + '</div>';
+    html += '</div>';
+    // Component scores
+    const cs = rv.component_scores || {};
+    const components = [
+      {key: 'hook', label: 'Hook', max: 25},
+      {key: 'pacing', label: 'จังหวะ', max: 25},
+      {key: 'clarity', label: 'ความชัดเจน', max: 25},
+      {key: 'engagement', label: 'การดูจนจบ', max: 25},
+    ];
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px">';
+    components.forEach(c => {
+      const v = cs[c.key] || 0;
+      const pct = (v / c.max) * 100;
+      const col = v >= c.max * 0.7 ? '#4caf50' : v >= c.max * 0.5 ? '#ff9800' : '#f44336';
+      html += '<div style="background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:6px">';
+      html += '<div style="font-size:10px;color:#888">' + c.label + '</div>';
+      html += '<div style="display:flex;align-items:center;gap:4px;margin-top:2px">';
+      html += '<div style="flex:1;height:4px;background:#2a2d3a;border-radius:2px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:' + col + '"></div></div>';
+      html += '<span style="font-size:11px;color:' + col + '">' + v + '/' + c.max + '</span>';
+      html += '</div></div>';
+    });
+    html += '</div>';
+  }
+  // Issues
+  if (rv.issues && rv.issues.length) {
+    html += '<div style="color:#ff9800;font-weight:600;margin-bottom:8px">⚠ จุดที่น่าเบื่อ (' + rv.issues.length + '):</div>';
+    rv.issues.forEach((iss, i) => {
+      html += '<div style="background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;margin-bottom:6px">';
+      html += '<div style="color:#7c8aff;font-size:11px">' + escapeHtml(iss.timestamp || '') + '</div>';
+      html += '<div style="margin:4px 0">ปัญหา: ' + escapeHtml(iss.problem || '') + '</div>';
+      html += '<div style="color:#4caf50">แก้: ' + escapeHtml(iss.fix || '') + '</div>';
+      html += '</div>';
+    });
+  } else {
+    html += '<div style="color:#4caf50;margin-bottom:8px">✓ ไม่พบจุดน่าเบื่อ</div>';
+  }
+  // Suggested hooks
+  if (rv.suggested_hooks && rv.suggested_hooks.length) {
+    html += '<div style="color:#7c8aff;font-weight:600;margin:12px 0 8px 0">🎯 Hook ใหม่ ' + rv.suggested_hooks.length + ' แบบ:</div>';
+    rv.suggested_hooks.forEach((hook, i) => {
+      html += '<div style="background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;margin-bottom:6px;cursor:pointer" onclick="navigator.clipboard.writeText(this.innerText.substring(' + ((i+1).toString().length + 3) + '));alert(\'คัดลอกแล้ว\')">';
+      html += '<span style="color:#555;font-size:11px">' + (i+1) + '.</span> ' + escapeHtml(hook);
+      html += '</div>';
+    });
+  }
+  // Revised script (read-only — ระบบ apply เองแล้ว)
+  if (rv.revised_script) {
+    html += '<div style="color:#7c8aff;font-weight:600;margin:12px 0 8px 0">📝 Script ที่แก้แล้ว:</div>';
+    html += '<textarea id="revised-script" readonly style="width:100%;min-height:150px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:12px;font-family:SF Mono,Consolas,monospace;resize:vertical">' + escapeHtml(rv.revised_script) + '</textarea>';
+    html += '<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">';
+    html += '<button onclick="navigator.clipboard.writeText(document.getElementById(\'revised-script\').value);alert(\'คัดลอกแล้ว\')" style="background:#7c8aff;border:none;color:#fff;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:11px">📋 คัดลอก</button>';
+    if (alreadyApplied) {
+      html += '<span style="color:#4caf50;font-size:11px;padding:6px 12px">✓ ระบบใช้ script นี้แล้ว</span>';
+    }
+    html += '</div>';
+  }
+  body.innerHTML = html;
 }
 
 // ============================================================
@@ -4457,6 +4769,7 @@ function clearAgent(agentKey) {
   output.textContent = '';
   fileLink.className = 'agent-file-link';
   fileLink.textContent = '';
+  fileLink._resultFiles = null;  // reset multi-set file list
 }
 
 function clearAll() {
@@ -4820,34 +5133,27 @@ function handleAutoSSE(data) {
     const totalSets = data.total_sets || 1;
     const setNum = data.set_num;
     const isLastSet = !setNum || setNum >= totalSets;
+    // เพิ่ม file link ของชุดนี้เสมอ (📄1, 📄2, ...)
+    if (data.file) {
+      const link = document.createElement('span');
+      link.className = 'flow-step-link';
+      link.textContent = ' 📄' + (setNum || 1);
+      link.style.cursor = 'pointer';
+      link.style.color = '#7c8aff';
+      link.style.marginLeft = '4px';
+      // เก็บรายการไฟล์ทั้งหมดของ flow step นี้
+      if (!stepEl._resultFiles) stepEl._resultFiles = [];
+      stepEl._resultFiles.push(data.file);
+      const fileIdx = stepEl._resultFiles.length - 1;
+      link.onclick = () => viewResult(data.file, stepEl._resultFiles, fileIdx);
+      stepEl.appendChild(link);
+    }
     if (totalSets > 1 && setNum && !isLastSet) {
       stepEl.className = 'flow-step running auto';
       if (statusEl) statusEl.textContent = setNum + '/' + totalSets;
-      if (data.file) {
-        const link = document.createElement('span');
-        link.className = 'flow-step-link';
-        link.textContent = ' 📄' + setNum;
-        link.style.cursor = 'pointer';
-        link.style.color = '#7c8aff';
-        link.style.marginLeft = '4px';
-        link.onclick = () => viewResult(data.file);
-        stepEl.appendChild(link);
-      }
     } else {
       stepEl.className = 'flow-step done auto';
       if (statusEl) statusEl.textContent = totalSets > 1 ? '✓ ' + totalSets + ' โพสต์' : '✓';
-      if (data.file) {
-        const titleEl = stepEl.querySelector('.flow-step-name');
-        if (titleEl && !stepEl.querySelector('.flow-step-link')) {
-          const link = document.createElement('span');
-          link.className = 'flow-step-link';
-          link.textContent = ' 📄';
-          link.style.cursor = 'pointer';
-          link.style.color = '#7c8aff';
-          link.onclick = () => viewResult(data.file);
-          stepEl.appendChild(link);
-        }
-      }
       // โหลด session ใหม่
       loadSessions();
     }
@@ -4968,44 +5274,39 @@ function handleFlowSSE(data, agentKey, planIdx, plan) {
     const totalSets = data.total_sets || 1;
     const setNum = data.set_num;
     const isLastSet = !setNum || setNum >= totalSets;
+    // เพิ่ม file link ของชุดนี้เสมอ (📄1, 📄2, ...)
+    if (data.file) {
+      const link = document.createElement('span');
+      link.className = 'flow-step-link';
+      link.textContent = ' 📄' + (setNum || 1);
+      link.style.cursor = 'pointer';
+      link.style.color = '#7c8aff';
+      link.style.marginLeft = '4px';
+      // เก็บรายการไฟล์ทั้งหมดของ flow step นี้
+      if (!stepEl._resultFiles) stepEl._resultFiles = [];
+      stepEl._resultFiles.push(data.file);
+      const fileIdx = stepEl._resultFiles.length - 1;
+      link.onclick = () => viewResult(data.file, stepEl._resultFiles, fileIdx);
+      stepEl.appendChild(link);
+    }
     if (totalSets > 1 && setNum && !isLastSet) {
       // ยังมีชุดถัดไป — โชว์ progress
       stepEl.className = 'flow-step running' + (plan.steps[stepIdx].isAuto ? ' auto' : '');
       if (statusEl) statusEl.textContent = setNum + '/' + totalSets;
-      // เพิ่ม file link ของชุดนี้
-      if (data.file) {
-        const link = document.createElement('span');
-        link.className = 'flow-step-link';
-        link.textContent = ' 📄' + setNum;
-        link.style.cursor = 'pointer';
-        link.style.color = '#7c8aff';
-        link.style.marginLeft = '4px';
-        link.onclick = () => viewResult(data.file);
-        stepEl.appendChild(link);
-      }
     } else {
       // ชุดสุดท้าย หรือ ชุดเดียว → mark done
       stepEl.className = 'flow-step done' + (plan.steps[stepIdx].isAuto ? ' auto' : '');
       if (statusEl) statusEl.textContent = totalSets > 1 ? '✓ ' + totalSets + ' โพสต์' : '✓';
-      // Add file link if available
-      if (data.file) {
-        const titleEl = stepEl.querySelector('.flow-step-name');
-        if (titleEl && !stepEl.querySelector('.flow-step-link')) {
-          const link = document.createElement('span');
-          link.className = 'flow-step-link';
-          link.textContent = ' 📄';
-          link.style.cursor = 'pointer';
-          link.style.color = '#7c8aff';
-          link.onclick = () => viewResult(data.file);
-          stepEl.appendChild(link);
-        }
-      }
-      // โชว์ media action box สำหรับ content_creator
+      // โชว์ media action box สำหรับ content_creator — เก็บไฟล์ทั้งหมด
       if (agentKey === 'content_creator') {
         const mediaAction = document.getElementById('flow-' + planIdx + '-' + stepIdx + '-media-action');
         if (mediaAction) {
           mediaAction.classList.add('visible');
           mediaAction.dataset.file = data.file || '';
+          // เก็บรายการไฟล์ทั้งหมดสำหรับ media gen
+          if (stepEl._resultFiles && stepEl._resultFiles.length > 1) {
+            mediaAction.dataset.allFiles = JSON.stringify(stepEl._resultFiles);
+          }
         }
       }
     }
@@ -5050,13 +5351,19 @@ function handleAgentSSE(data, agentKey) {
     output.textContent = data.text;
   } else if (data.type === 'agent_done') {
     status.className = 'agent-status done';
-    status.textContent = 'เสร็จเรียบร้อย ✓';
+    const totalSets = data.total_sets || 1;
+    status.textContent = totalSets > 1 ? 'เสร็จเรียบร้อย ✓ (' + totalSets + ' โพสต์)' : 'เสร็จเรียบร้อย ✓';
     box.className = 'agent-box done';
     output.textContent = data.text + '\n\n... (ดูผลลัพธ์เต็มที่แท็บผลลัพธ์)';
     if (data.file) {
+      // เก็บรายการไฟล์ทั้งหมด (multi-set)
+      if (!fileLink._resultFiles) fileLink._resultFiles = [];
+      fileLink._resultFiles.push(data.file);
+      const fileIdx = fileLink._resultFiles.length - 1;
       fileLink.className = 'agent-file-link visible';
-      fileLink.textContent = '📄 ' + data.file.split('/').pop();
-      fileLink.onclick = () => viewResult(data.file);
+      const label = totalSets > 1 ? '📄 โพสต์ ' + (data.set_num || fileIdx + 1) : '📄 ' + data.file.split('/').pop();
+      fileLink.textContent = label;
+      fileLink.onclick = () => viewResult(data.file, fileLink._resultFiles, fileIdx);
     }
   } else if (data.type === 'error') {
     status.className = 'agent-status error';
@@ -5088,7 +5395,20 @@ function stopAgent(agentKey) {
   if (stopBtn) stopBtn.style.display = 'none';
 }
 
-function viewResult(filepath) {
+function viewResult(filepath, navFiles, navIdx) {
+  // navFiles: รายการไฟล์ทั้งหมดในการสร้างครั้งนั้น (optional)
+  // navIdx: index ปัจจุบัน (optional)
+  if (navFiles && navFiles.length) {
+    _resultNavFiles = navFiles;
+    _resultNavIdx = navIdx || 0;
+  } else {
+    _resultNavFiles = [filepath];
+    _resultNavIdx = 0;
+  }
+  _viewResultInternal(filepath);
+}
+
+function _viewResultInternal(filepath) {
   const parts = filepath.split('/');
   const session = parts[parts.length - 2] || parts[0];
   const filename = parts[parts.length - 1];
@@ -5099,6 +5419,21 @@ function viewResult(filepath) {
   const titleEl = document.getElementById('result-modal-title');
   const bodyEl = document.getElementById('result-modal-body');
   titleEl.textContent = filename;
+  // แสดง/ซ่อน navigation bar
+  const navBar = document.getElementById('result-nav-bar');
+  const navInfo = document.getElementById('result-nav-info');
+  const navPrev = document.getElementById('result-nav-prev');
+  const navNext = document.getElementById('result-nav-next');
+  if (_resultNavFiles.length > 1) {
+    navBar.style.display = 'flex';
+    navInfo.textContent = 'โพสต์ ' + (_resultNavIdx + 1) + '/' + _resultNavFiles.length;
+    navPrev.disabled = _resultNavIdx === 0;
+    navPrev.style.opacity = _resultNavIdx === 0 ? '0.4' : '1';
+    navNext.disabled = _resultNavIdx === _resultNavFiles.length - 1;
+    navNext.style.opacity = _resultNavIdx === _resultNavFiles.length - 1 ? '0.4' : '1';
+  } else {
+    navBar.style.display = 'none';
+  }
   if (isImage || isVideo) {
     let html = '<div class="file-info-display" style="margin-bottom:12px">Session: ' + escapeHtml(session) + '</div>';
     html += '<div style="text-align:center">';
@@ -5145,6 +5480,13 @@ function viewResult(filepath) {
   });
 }
 
+function navResult(delta) {
+  const newIdx = _resultNavIdx + delta;
+  if (newIdx < 0 || newIdx >= _resultNavFiles.length) return;
+  _resultNavIdx = newIdx;
+  _viewResultInternal(_resultNavFiles[_resultNavIdx]);
+}
+
 function closeResultOverlay(event) {
   if (event && event.target && !event.target.classList.contains('result-overlay') && event.type === 'click') return;
   document.getElementById('result-overlay').classList.remove('visible');
@@ -5188,8 +5530,21 @@ function expandSession(name, el) {
 function loadSessionFile(session, filename, el) {
   document.querySelectorAll('.sub-file-item').forEach(e => e.classList.remove('active'));
   el.classList.add('active');
-  // ใช้ overlay เหมือน viewResult — ไม่ทำลาย main-area
-  viewResult(session + '/' + filename);
+  // รวมรายการไฟล์ทั้งหมดใน session นี้ (เฉพาะ content_creator .md) สำหรับ navigation
+  const filesEl = document.getElementById('files-' + session);
+  const allFiles = [];
+  if (filesEl) {
+    filesEl.querySelectorAll('.sub-file-item').forEach(item => {
+      const onclickAttr = item.getAttribute('onclick') || '';
+      const m = onclickAttr.match(/loadSessionFile\('([^']+)','([^']+)'/);
+      if (m && m[2].endsWith('.md')) {
+        allFiles.push(m[1] + '/' + m[2]);
+      }
+    });
+  }
+  const filepath = session + '/' + filename;
+  const navIdx = allFiles.indexOf(filepath);
+  viewResult(filepath, allFiles.length > 1 ? allFiles : null, navIdx >= 0 ? navIdx : 0);
 }
 
 function renderMarkdown(text) {
@@ -5338,6 +5693,8 @@ function parseContentPost(text) {
         hashtags: p.hashtags || '',
         imagePrompt: (p.image_prompts && p.image_prompts.length > 0) ? p.image_prompts[0].prompt : '',
         videoPrompt: (p.video_prompts && p.video_prompts.length > 0) ? p.video_prompts[0].prompt : '',
+        // script review state (ถ้าเคยตรวจแล้ว)
+        scriptReview: p.script_review || null,
         // ถ้ามี markdown field (JSON เก่า) → ใช้ของเดิม, ถ้าไม่มี → generate จาก posts
         raw: parsed.markdown || renderPostsToMarkdownJS(parsed),
       };
@@ -5696,7 +6053,35 @@ function renderMediaActionBar(session, filename, post, media, mediaStatus) {
   if (!hasVideos && hasVideoPrompt) {
     html += '<button class="media-gen-btn" onclick="generateMediaFromOutput(\'video\')">🎬 สร้างวิดีโอ</button>';
   }
-  if (!hasImagePrompt && !hasVideoPrompt) {
+  // Script review — ระบบตรวจอัตโนมัติ แสดงแค่สถานะ (read-only)
+  if (post.script && post.script.trim()) {
+    window._currentReviewScript = post.script;
+    window._currentReviewPlatform = post.platform || 'TikTok';
+    const sr = post.scriptReview;
+    if (sr) {
+      const score = sr.score || 0;
+      const threshold = sr.threshold || 70;
+      const col = score >= threshold ? '#4caf50' : score >= 50 ? '#ff9800' : '#f44336';
+      const changed = sr.script_changed;
+      const iter = sr.iterations || 1;
+      let label;
+      if (score >= threshold && changed) {
+        label = '✓ ตรวจ script: ' + score + '/100 (แก้ ' + iter + ' รอบ)';
+      } else if (score >= threshold) {
+        label = '✓ ตรวจ script: ' + score + '/100';
+      } else {
+        label = '⚠ ตรวจ script: ' + score + '/100 (ยังต่ำ ใช้ script ล่าสุด)';
+      }
+      html += '<span class="media-status" style="background:#2a2d3a;color:' + col + ';padding:6px 12px;border-radius:6px;font-size:12px">' + label + ' — <a onclick="showSavedReview()" style="color:' + col + ';cursor:pointer;text-decoration:underline">ดูผล</a></span>';
+    } else {
+      // มี script แต่ยังไม่ได้ตรวจ (pipeline ยังไม่ผ่าน review)
+      html += '<span class="media-status" style="background:#2a2d3a;color:#888;padding:6px 12px;border-radius:6px;font-size:12px">⏳ ยังไม่ได้ตรวจ script</span>';
+    }
+  } else {
+    // ไม่มี script (Facebook post ไม่มี video script) — แสดงสถานะ
+    html += '<span class="media-status" style="background:#2a2d3a;color:#666;padding:6px 12px;border-radius:6px;font-size:12px">— ไม่มี video script (ไม่ต้องตรวจ)</span>';
+  }
+  if (!hasImagePrompt && !hasVideoPrompt && !(post.script && post.script.trim())) {
     html = '<span class="media-status none">โพสต์นี้ไม่มี prompt รูป/วิดีโอ</span>';
   }
   bar.innerHTML = html;
@@ -6131,6 +6516,11 @@ function loadCredits() {
     <div class="result-modal-header">
       <span class="result-modal-title" id="result-modal-title">ผลลัพธ์</span>
       <button class="result-modal-close" onclick="closeResultOverlay()">✕ ปิด</button>
+    </div>
+    <div id="result-nav-bar" style="display:none;align-items:center;justify-content:space-between;padding:8px 0 12px 0;border-bottom:1px solid #2a2d3a;margin-bottom:12px">
+      <button id="result-nav-prev" onclick="navResult(-1)" style="background:none;border:1px solid #2a2d3a;color:#e0e0e0;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:13px">‹ ก่อนหน้า</button>
+      <span id="result-nav-info" style="color:#888;font-size:12px"></span>
+      <button id="result-nav-next" onclick="navResult(1)" style="background:none;border:1px solid #2a2d3a;color:#e0e0e0;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:13px">ถัดไป ›</button>
     </div>
     <div class="result-modal-body" id="result-modal-body"></div>
   </div>

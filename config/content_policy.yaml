@@ -8,6 +8,9 @@ content_history:
   dedup_similarity_threshold: 0.85
   dedup_window_days: 30
   dedup_max_retries: 3
+  script_review_enabled: true         # self-review อัตโนมัติ (ไม่ต้อง approve user)
+  script_review_threshold: 70         # score ≥ 70 = พอใช้, ต่ำกว่า = แก้แล้วตรวจใหม่
+  script_review_max_iterations: 2     # max 2 รอบ (review + 1 re-check) — กัน loop ไม่รู้จบ
 pillars:
 - รีวิวสินค้า
 - เปรียบเทียบ
