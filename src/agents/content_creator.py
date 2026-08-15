@@ -16,6 +16,7 @@ class ContentCreatorAgent(BaseAgent):
         campaign_strategy: str,
         media_capabilities: str = "",
         media_type: str = "",
+        visual_style: str = "",
     ) -> str:
         parts = ["กรุณาสร้าง **1 โพสต์** สำหรับโปรโมทสินค้า ตามรูปแบบใน system prompt"]
 
@@ -26,6 +27,14 @@ class ContentCreatorAgent(BaseAgent):
             parts.append("สำคัญ: สร้าง **Prompt สำหรับ Gen Video เท่านั้น** — ห้ามสร้าง Gen Image prompt")
         elif media_type == "both":
             parts.append("สำคัญ: ต้องสร้างทั้ง **Prompt สำหรับ Gen Image** และ **Prompt สำหรับ Gen Video**")
+
+        # Visual style hint — high-level style จาก visual.json (keywords เฉพาะแป๊ะที่ media_gen)
+        if visual_style:
+            parts.append(
+                f"--- แนวทางภาพของแบรนด์ (ใช้เป็นแนวทางตอนเขียน image/video prompts) ---\n"
+                f"{visual_style}\n"
+                f"--- สิ้นสุดแนวทางภาพ ---"
+            )
         # ตรวจว่าเป็นโหมดรวมหลายสินค้าไหม
         is_multi = "=== สินค้า:" in product_spec and product_spec.count("=== สินค้า:") > 1
         if is_multi:

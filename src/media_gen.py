@@ -297,6 +297,50 @@ def clamp_to_capabilities(
 
 
 # ---------------------------------------------------------------------------
+# Visual brand injection — แป๊ะ visual keywords ต่อท้าย prompt
+# ---------------------------------------------------------------------------
+
+def build_visual_suffix(visual: dict[str, Any]) -> str:
+    """สร้าง suffix string จาก visual.json dict แป๊ะต่อท้าย image/video prompt.
+
+    รวม: keywords (ใช้), avoid (หลีกเลี่ยง), colors (hex), image_style.tone
+    ถ้า visual ว่าง → คืน string ว่าง (ไม่แป๊ะอะไร)
+    """
+    if not visual:
+        return ""
+
+    parts: list[str] = []
+
+    # Keywords — คำที่ควรใช้ใน prompt
+    keywords = visual.get("keywords", [])
+    if keywords:
+        parts.append("Style keywords: " + ", ".join(keywords))
+
+    # Colors — hex color hints
+    colors = visual.get("colors", {})
+    if colors:
+        color_hints = [f"{k} {v}" for k, v in colors.items() if v]
+        if color_hints:
+            parts.append("Brand colors: " + ", ".join(color_hints))
+
+    # Image style tone
+    image_style = visual.get("image_style", {})
+    tone = image_style.get("tone", "")
+    if tone:
+        parts.append(f"Overall tone: {tone}")
+
+    # Avoid — คำที่หลีกเลี่ยง
+    avoid = visual.get("avoid", [])
+    if avoid:
+        parts.append("Avoid: " + ", ".join(avoid))
+
+    if not parts:
+        return ""
+
+    return " | " + " | ".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Image generation
 # ---------------------------------------------------------------------------
 
@@ -308,6 +352,7 @@ def generate_image(
     aspect_ratio: str | None = None,
     timeout: float | None = None,
     input_references: list[dict] | list[str] | None = None,
+    visual: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """สร้างรูปจาก prompt — เซฟลง output_path แล้วคืน metadata.
 
@@ -315,6 +360,7 @@ def generate_image(
     input_references: list ของ dict (API format) หรือ list ของ path รูปจริง
         - ถ้าเป็น path (str) → แปลงเป็น base64 data URL อัตโนมัติ
         - ใช้เป็น reference image สำหรับ image-to-image generation
+    visual: dict จาก brand/visual.json — แป๊ะ keywords/colors/tone ต่อท้าย prompt
     คืน: {ok, path, model, prompt, error?, warnings?}
     """
     cfg = _load_media_config()
@@ -327,6 +373,10 @@ def generate_image(
     api_key = _get_api_key()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Visual brand injection — แป๊ะ keywords/colors/tone ต่อท้าย prompt
+    if visual:
+        prompt = prompt + build_visual_suffix(visual)
 
     # Clamp aspect_ratio กับ model capabilities
     warnings: list[str] = []
@@ -434,6 +484,7 @@ def generate_video(
     on_status=None,
     input_references: list[dict] | list[str] | None = None,
     frame_images: list[dict] | list[str] | None = None,
+    visual: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """สร้างวิดีโอจาก prompt — async รอจนเสร็จ — เซฟลง output_path.
 
@@ -444,6 +495,7 @@ def generate_video(
     frame_images: list ของ path รูปจริง (str) หรือ dict (API format)
         - ใช้เป็น first_frame / last_frame สำหรับ image-to-video
         - ถ้าเป็น str → ใช้เป็น first_frame อัตโนมัติ
+    visual: dict จาก brand/visual.json — แป๊ะ keywords/colors/tone ต่อท้าย prompt
     คืน: {ok, path, model, prompt, error?, warnings?}
     """
     cfg = _load_media_config()
@@ -462,6 +514,10 @@ def generate_video(
     api_key = _get_api_key()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Visual brand injection — แป๊ะ keywords/colors/tone ต่อท้าย prompt
+    if visual:
+        prompt = prompt + build_visual_suffix(visual)
 
     # Clamp กับ model capabilities
     warnings: list[str] = []
@@ -713,12 +769,14 @@ def generate_image_with_retry(
     timeout: float | None = None,
     on_retry=None,
     input_references: list[dict] | list[str] | None = None,
+    visual: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """สร้างรูป — ถ้าถูก reject ให้ LLM แก้ prompt แล้วลองใหม่ ไม่จำกัดจำนวนครั้ง.
 
     หยุดเฉพาะเมื่อ: สำเร็จ / ไม่ใช่ reject error / LLM แก้ prompt ไม่ได้
     on_retry: callback(old_prompt, new_prompt, error) สำหรับโชว์สถานะ
     input_references: รูปสินค้าจริงสำหรับ image-to-image (path หรือ dict)
+    visual: dict จาก brand/visual.json — แป๊ะ keywords/colors/tone ต่อท้าย prompt
     คืน: เหมือน generate_image + เพิ่ม retry_count, original_prompt, retry_history
     """
     cfg = _load_media_config()
@@ -733,7 +791,7 @@ def generate_image_with_retry(
         result = generate_image(
             current_prompt, output_path,
             model=model, aspect_ratio=aspect_ratio, timeout=timeout,
-            input_references=input_references,
+            input_references=input_references, visual=visual,
         )
         if result.get("ok"):
             if attempt > 0:
@@ -787,6 +845,7 @@ def generate_video_with_retry(
     on_retry=None,
     input_references: list[dict] | list[str] | None = None,
     frame_images: list[dict] | list[str] | None = None,
+    visual: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """สร้างวิดีโอ — ถ้าถูก reject ให้ LLM แก้ prompt แล้วลองใหม่ ไม่จำกัดจำนวนครั้ง.
 
@@ -794,6 +853,7 @@ def generate_video_with_retry(
     on_retry: callback(old_prompt, new_prompt, error) สำหรับโชว์สถานะ
     input_references: รูปสินค้าจริงสำหรับ reference-to-video
     frame_images: รูปสินค้าจริงสำหรับ image-to-video (first/last frame)
+    visual: dict จาก brand/visual.json — แป๊ะ keywords/colors/tone ต่อท้าย prompt
     คืน: เหมือน generate_video + เพิ่ม retry_count, original_prompt, retry_history
     """
     cfg = _load_media_config()
@@ -811,6 +871,7 @@ def generate_video_with_retry(
             resolution=resolution, poll_interval=poll_interval,
             max_wait=max_wait, on_status=on_status,
             input_references=input_references, frame_images=frame_images,
+            visual=visual,
         )
         if result.get("ok"):
             if attempt > 0:

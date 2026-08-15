@@ -26,7 +26,7 @@ from .agents import (
     ManagerAgent,
     ProductSpecAgent,
 )
-from .brand_loader import load_brand_context
+from .brand_loader import load_brand_rules, load_brand_reference, load_brand_visual
 from .config_loader import get_agent_config, load_config
 from .data_loader import detect_data_files, get_agent_data
 from .llm_client import LLMClient
@@ -56,7 +56,9 @@ class Orchestrator:
         product_id: str | None = None,
     ) -> None:
         self.config = load_config(config_path)
-        self.brand_context = load_brand_context(brand_dir)
+        self.brand_context = load_brand_rules(brand_dir)
+        self.brand_reference = load_brand_reference(brand_dir)
+        self.brand_visual = load_brand_visual(brand_dir)
         self.product_images = product_images or []
         self.product_id = product_id
         self.results: dict[str, str] = {}
@@ -81,7 +83,8 @@ class Orchestrator:
     def _make_agent(self, agent_name: str, agent_cls: type, llm: LLMClient):
         cfg = get_agent_config(self.config, agent_name)
         instructions = self._load_agent_instructions(agent_name)
-        return agent_cls(cfg, llm, brand_context=self.brand_context, instructions=instructions)
+        return agent_cls(cfg, llm, brand_context=self.brand_context,
+                         brand_reference=self.brand_reference, instructions=instructions)
 
     def _load_agent_instructions(self, agent_name: str) -> dict:
         """Load user-set instructions for an agent from config/agent_instructions.json."""
@@ -314,10 +317,25 @@ class Orchestrator:
             except Exception:
                 pass  # ดึงไม่ได้ → ไม่บังคับ ใช้ default
 
+            # Visual style hint — high-level style จาก visual.json (ส่งให้ LLM)
+            visual_style = ""
+            if self.brand_visual:
+                style = self.brand_visual.get("image_style", {})
+                tone = style.get("tone", "")
+                keywords = self.brand_visual.get("keywords", [])
+                if tone or keywords:
+                    visual_parts = []
+                    if tone:
+                        visual_parts.append(f"โทนภาพ: {tone}")
+                    if keywords:
+                        visual_parts.append("คำสำคัญ: " + ", ".join(keywords))
+                    visual_style = "\n".join(visual_parts)
+
             prompt = agent.build_prompt(
                 product_data, competitor_analysis, campaign_strategy,
                 media_capabilities=media_caps_text,
                 media_type=media_type,
+                visual_style=visual_style,
             )
             image_paths = self._get_product_image_paths()
             # ใช้ Structured Outputs — LLM คืน JSON ที่ตรง schema

@@ -1,0 +1,14 @@
+{
+  "colors": {
+    "primary": "#1a73e8",
+    "secondary": "#34a853",
+    "accent": "#fbbc04",
+    "background": "#ffffff"
+  },
+  "image_style": {
+    "tone": "อบอุ่น สดใส",
+    "product_shot": "สะอาด พื้นขาว โฟกัสที่ตัวสินค้า"
+  },
+  "keywords": ["soft light", "warm tone", "family", "natural", "bright"],
+  "avoid": ["dark", "gloomy", "aggressive"]
+}

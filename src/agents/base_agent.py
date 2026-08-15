@@ -43,11 +43,15 @@ class BaseAgent:
         agent_config: dict[str, Any],
         llm_client: LLMClient,
         brand_context: str = "",
+        brand_reference: str = "",
         instructions: dict[str, Any] | None = None,
     ) -> None:
         self.config = agent_config
         self.llm = llm_client
+        # brand_context = rules (voice + terms) → ใส่ใน system prompt ทุก agent
+        # brand_reference = profile + audience → ใส่เฉพาะ agent ที่ต้องการบริบทเพิ่ม
         self.brand_context = brand_context
+        self.brand_reference = brand_reference
         self.instructions = instructions or {}
 
     def _format_instructions(self) -> str:
@@ -188,20 +192,29 @@ class BaseAgent:
         return "--- คำแนะนำการทำงานจากผู้ใช้ ---\n" + "\n".join(parts) + "\n--- สิ้นสุดคำแนะนำการทำงาน ---"
 
     def _build_system_prompt(self) -> str:
-        """Combine the agent's system prompt with brand context and user instructions."""
+        """Combine the agent's system prompt with brand rules, reference, and user instructions."""
         system_prompt = self.config.get("system_prompt", "")
         sections = [system_prompt]
 
         use_brand = self.config.get("use_brand_context", True)
         if self.brand_context and use_brand:
             sections.append(
-                f"--- ข้อมูลแบรนด์ (บริบทอ้างอิงเท่านั้น) ---\n"
+                f"--- กฎของแบรนด์ (Voice + Terms — ต้องเป็นไปตามนี้) ---\n"
                 f"{self.brand_context}\n"
-                f"--- สิ้นสุดข้อมูลแบรนด์ ---\n\n"
-                f"ข้อมูลแบรนด์เป็นเพียงบริบทอ้างอิง เพื่อให้เข้าใจ positioning และค่านิยมของแบรนด์\n"
+                f"--- สิ้นสุดกฎของแบรนด์ ---\n\n"
+                f"กฎของแบรนด์เป็นกฎบังคับ — โทนเสียง คำที่ใช้ คำต้องห้าม ต้องเป็นไปตามนี้\n"
                 f"ห้ามนำรายการสินค้าในข้อมูลแบรนด์มาใช้เป็นสินค้าที่จะทำงานด้วย\n"
                 f"สินค้าที่จะทำงานด้วยคือสินค้าที่ส่งมาใน user prompt เท่านั้น\n"
                 f"ถ้าข้อมูลสินค้าใน user prompt ขัดแย้งกับข้อมูลแบรนด์ ให้เชื่อข้อมูลสินค้าใน user prompt"
+            )
+
+        # brand_reference (profile + audience) — ใส่เฉพาะ agent ที่เปิด use_brand_reference
+        use_ref = self.config.get("use_brand_reference", False)
+        if self.brand_reference and use_ref:
+            sections.append(
+                f"--- ข้อมูลแบรนด์อ้างอิง (บริบทเพิ่ม — ประวัติ + กลุ่มเป้าหมาย) ---\n"
+                f"{self.brand_reference}\n"
+                f"--- สิ้นสุดข้อมูลแบรนด์อ้างอิง ---"
             )
 
         instruction_block = self._format_instructions()

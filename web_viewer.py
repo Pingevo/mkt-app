@@ -25,6 +25,7 @@ from src.orchestrator import Orchestrator
 from src.data_loader import detect_data_files
 from src.file_loader import load_file
 from src.config_loader import get_env
+from src.brand_loader import load_brand_visual
 from src import media_gen
 from src import product_db
 from src import content_history
@@ -52,6 +53,20 @@ BRAND_DIR = PROJECT_ROOT / "brand"
 CACHE_DIR = PROJECT_ROOT / "cache"
 
 app = FastAPI(title="MKTApp Viewer")
+
+
+def _get_brand_visual() -> dict:
+    """โหลด brand/visual.json — cached ที่ module level เพื่อไม่อ่านซ้ำทุก request."""
+    global _BRAND_VISUAL_CACHE
+    if _BRAND_VISUAL_CACHE is None:
+        try:
+            _BRAND_VISUAL_CACHE = load_brand_visual(BRAND_DIR)
+        except Exception:
+            _BRAND_VISUAL_CACHE = {}
+    return _BRAND_VISUAL_CACHE
+
+
+_BRAND_VISUAL_CACHE: dict | None = None
 
 _orch: Orchestrator | None = None  # only used by single-agent endpoint
 _cancel_requested: bool = False
@@ -363,6 +378,10 @@ async def api_generate_media(request: Request) -> StreamingResponse:
                 # ส่งรูปสินค้าจริงเป็น reference — image-to-image
                 if product_image_paths:
                     img_kwargs["input_references"] = product_image_paths
+                # Visual brand injection — แป๊ะ keywords/colors/tone ต่อท้าย prompt
+                visual = _get_brand_visual()
+                if visual:
+                    img_kwargs["visual"] = visual
                 result = media_gen.generate_image(prompt, output_path, **img_kwargs)
             else:
                 def on_status(s):
@@ -377,6 +396,10 @@ async def api_generate_media(request: Request) -> StreamingResponse:
                 # ส่งรูปสินค้าจริงเป็น reference — reference-to-video
                 if product_image_paths:
                     vid_kwargs["input_references"] = product_image_paths
+                # Visual brand injection
+                visual = _get_brand_visual()
+                if visual:
+                    vid_kwargs["visual"] = visual
                 result = media_gen.generate_video(prompt, output_path, **vid_kwargs)
 
             # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
@@ -521,6 +544,10 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                     # ส่งรูปสินค้าจริงเป็น reference — image-to-image
                     if product_image_paths:
                         img_kwargs["input_references"] = product_image_paths
+                    # Visual brand injection
+                    visual = _get_brand_visual()
+                    if visual:
+                        img_kwargs["visual"] = visual
                     result = media_gen.generate_image(img["prompt"], out_path, **img_kwargs)
                     done += 1
                     # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
@@ -554,6 +581,10 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                     # ส่งรูปสินค้าจริงเป็น reference — reference-to-video
                     if product_image_paths:
                         vid_kwargs["input_references"] = product_image_paths
+                    # Visual brand injection
+                    visual = _get_brand_visual()
+                    if visual:
+                        vid_kwargs["visual"] = visual
                     result = media_gen.generate_video(vid["prompt"], out_path, **vid_kwargs)
                     done += 1
                     # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
@@ -1022,6 +1053,70 @@ async def api_brand_save(request: Request) -> JSONResponse:
     BRAND_DIR.mkdir(parents=True, exist_ok=True)
     filepath.write_text(content, encoding="utf-8")
     return JSONResponse({"ok": True})
+
+
+# ============================================================
+# Brand JSON — อ่าน/เขียน brand/*.json (structured form-based UI)
+# ============================================================
+
+@app.get("/api/brand_json")
+def api_brand_json_get() -> JSONResponse:
+    """อ่าน brand config ทั้งหมด — voice.json, terms.json, visual.json, audience.json + brand_profile.md."""
+    import json as _json
+    result: dict = {}
+    # JSON files
+    for name in ("voice.json", "terms.json", "visual.json", "audience.json"):
+        path = BRAND_DIR / name
+        if path.exists():
+            try:
+                result[name.removesuffix(".json")] = _json.loads(path.read_text(encoding="utf-8"))
+            except (_json.JSONDecodeError, OSError):
+                result[name.removesuffix(".json")] = {}
+        else:
+            result[name.removesuffix(".json")] = {}
+    # profile.md (text)
+    profile_path = BRAND_DIR / "brand_profile.md"
+    result["profile"] = profile_path.read_text(encoding="utf-8") if profile_path.exists() else ""
+    return JSONResponse(result)
+
+
+@app.post("/api/brand_json_save")
+async def api_brand_json_save(request: Request) -> JSONResponse:
+    """บันทึก brand config — รับ dict {voice, terms, visual, audience, profile}."""
+    import json as _json
+    body = await request.json()
+    BRAND_DIR.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    # JSON files
+    for key, fname in [("voice", "voice.json"), ("terms", "terms.json"),
+                       ("visual", "visual.json"), ("audience", "audience.json")]:
+        data = body.get(key)
+        if data is not None:
+            path = BRAND_DIR / fname
+            path.write_text(_json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            saved.append(fname)
+    # profile.md (text)
+    profile = body.get("profile")
+    if profile is not None:
+        (BRAND_DIR / "brand_profile.md").write_text(profile, encoding="utf-8")
+        saved.append("brand_profile.md")
+    # Clear visual cache เพื่อโหลดใหม่ในครั้งต่อไป
+    global _BRAND_VISUAL_CACHE
+    _BRAND_VISUAL_CACHE = None
+    return JSONResponse({"ok": True, "saved": saved})
+
+
+@app.post("/api/brand_migrate")
+async def api_brand_migrate(request: Request) -> JSONResponse:
+    """Migrate brand .md → .json (one-time conversion)."""
+    from src.brand_migrate import migrate_brand
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    force = bool(body.get("force", False)) if body else False
+    status = migrate_brand(BRAND_DIR, force=force)
+    # Clear visual cache
+    global _BRAND_VISUAL_CACHE
+    _BRAND_VISUAL_CACHE = None
+    return JSONResponse({"ok": True, **status})
 
 
 # ============================================================
@@ -1604,6 +1699,10 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                             # ส่งรูปสินค้าจริงเป็น reference — image-to-image
                             if image_paths:
                                 img_kwargs["input_references"] = image_paths
+                            # Visual brand injection
+                            visual = _get_brand_visual()
+                            if visual:
+                                img_kwargs["visual"] = visual
                             def _img_retry(old_p, new_p, err, idx=j):
                                 if status_callback:
                                     status_callback(f"รูปที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
@@ -1640,6 +1739,10 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                             # ส่งรูปสินค้าจริงเป็น reference — reference-to-video
                             if image_paths:
                                 vid_kwargs["input_references"] = image_paths
+                            # Visual brand injection
+                            visual = _get_brand_visual()
+                            if visual:
+                                vid_kwargs["visual"] = visual
                             def _vid_retry(old_p, new_p, err, idx=j):
                                 if status_callback:
                                     status_callback(f"วิดีโอที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
@@ -2025,6 +2128,10 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                     img_kwargs: dict = {}
                                     if img.get("aspect_ratio"):
                                         img_kwargs["aspect_ratio"] = img["aspect_ratio"]
+                                    # Visual brand injection
+                                    visual = _get_brand_visual()
+                                    if visual:
+                                        img_kwargs["visual"] = visual
                                     r = media_gen.generate_image_with_retry(
                                         img["prompt"], img_path, llm=llm, **img_kwargs,
                                     )
@@ -2043,6 +2150,10 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                         vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
                                     if vid.get("resolution"):
                                         vid_kwargs["resolution"] = vid["resolution"]
+                                    # Visual brand injection
+                                    visual = _get_brand_visual()
+                                    if visual:
+                                        vid_kwargs["visual"] = visual
                                     r = media_gen.generate_video_with_retry(
                                         vid["prompt"], vid_path, llm=llm, **vid_kwargs,
                                     )
@@ -3289,31 +3400,147 @@ function uploadFiles() {
 }
 
 function loadBrandFiles() {
-  fetch('/api/brand_files').then(r => r.json()).then(files => {
+  fetch('/api/brand_json').then(r => r.json()).then(data => {
     const el = document.getElementById('sidebar-content');
-    if (!files.length) {
-      el.innerHTML = '<div style="color:#555;font-size:12px;padding:12px">ยังไม่มีไฟล์แบรนด์</div>';
-      return;
-    }
+    if (!data) { el.innerHTML = '<div style="color:#555;font-size:12px;padding:12px">ยังไม่มีข้อมูลแบรนด์</div>'; return; }
+    _brandData = data;
     let html = '';
-    for (const f of files) {
-      html += '<div class="brand-file-item" onclick="editBrandFile(\'' + f.name + '\')">' + escapeHtml(f.title) + '</div>';
-    }
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'voice\')">🎤 โทนเสียง (Voice)</div>';
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'terms\')">📝 คำที่ใช้/ห้ามใช้ (Terms)</div>';
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'profile\')">📋 ประวัติแบรนด์ (Profile)</div>';
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'audience\')">👥 กลุ่มเป้าหมาย (Audience)</div>';
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'visual\')">🎨 แนวทางภาพ (Visual)</div>';
     el.innerHTML = html;
   });
 }
 
-function editBrandFile(filename) {
-  fetch('/api/brand_file/' + encodeURIComponent(filename)).then(r => r.json()).then(data => {
-    const overlay = document.getElementById('brand-overlay');
-    const title = document.getElementById('brand-modal-title');
-    title.textContent = '✎ แก้ไข ' + filename;
-    document.getElementById('brand-textarea-modal').value = data.content;
-    document.getElementById('brand-save-status-modal').textContent = '';
-    document.getElementById('brand-save-status-modal').className = 'upload-status';
-    overlay.className = 'settings-modal-overlay visible';
-    overlay.dataset.filename = filename;
-  });
+let _brandData = {};
+let _brandSection = '';
+
+function editBrandSection(section) {
+  _brandSection = section;
+  const overlay = document.getElementById('brand-overlay');
+  const title = document.getElementById('brand-modal-title');
+  const body = document.getElementById('brand-modal-body');
+  const labels = { voice: '🎤 โทนเสียง (Voice)', terms: '📝 คำที่ใช้/ห้ามใช้ (Terms)', profile: '📋 ประวัติแบรนด์ (Profile)', audience: '👥 กลุ่มเป้าหมาย (Audience)', visual: '🎨 แนวทางภาพ (Visual)' };
+  title.textContent = labels[section] || section;
+  body.innerHTML = _renderBrandForm(section, _brandData[section] || {});
+  document.getElementById('brand-save-status-modal').textContent = '';
+  document.getElementById('brand-save-status-modal').className = 'upload-status';
+  overlay.className = 'settings-modal-overlay visible';
+}
+
+function _renderBrandForm(section, data) {
+  if (section === 'voice') {
+    return _voiceForm(data);
+  } else if (section === 'terms') {
+    return _termsForm(data);
+  } else if (section === 'profile') {
+    return '<textarea id="brand-profile-textarea" style="width:100%;min-height:400px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:12px;color:#e0e0e0;font-size:13px;font-family:SF Mono,Consolas,monospace;line-height:1.6;resize:vertical">' + escapeHtml(data || '') + '</textarea>';
+  } else if (section === 'audience') {
+    return _audienceForm(data);
+  } else if (section === 'visual') {
+    return _visualForm(data);
+  }
+  return '';
+}
+
+function _field(label, id, value, placeholder) {
+  return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + '</label>' +
+    '<input id="' + id + '" value="' + escapeHtml(String(value || '')) + '" placeholder="' + (placeholder || '') + '" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px"></div>';
+}
+
+function _textarea(label, id, value, placeholder) {
+  return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + '</label>' +
+    '<textarea id="' + id + '" placeholder="' + (placeholder || '') + '" style="width:100%;min-height:80px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(String(value || '')) + '</textarea></div>';
+}
+
+function _listField(label, id, items) {
+  const text = (items || []).join(', ');
+  return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + ' <span style="color:#555">(คั่นด้วยจุลภาค)</span></label>' +
+    '<textarea id="' + id + '" style="width:100%;min-height:60px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(text) + '</textarea></div>';
+}
+
+function _voiceForm(d) {
+  let h = '';
+  h += _textarea('บุคลิกของแบรนด์', 'bf-personality', d.personality, 'เช่น "เหมือนพ่อแม่ที่เข้าใจเทคโนโลยี"');
+  h += _field('ภาษาที่ใช้', 'bf-language', d.language, 'เช่น ไทยเป็นหลัก สำหรับตลาดไทย');
+  h += _field('ระดับความเป็นทางการ (1-5)', 'bf-formality', d.formality_level, '3');
+  h += _textarea('คำอธิบายโทนเสียง', 'bf-tone', d.tone_description, 'เช่น กลาง-เป็นทางการเล็กน้อย เป็นมิตร อบอุ่น');
+  h += _listField('คำ/วลีที่ห้ามใช้', 'bf-banned', d.banned_phrases);
+  h += _listField('ตัวอย่างโพสต์ที่ใช่', 'bf-examples', d.examples);
+  return h;
+}
+
+function _termsForm(d) {
+  let h = '';
+  h += _listField('คำที่อนุมัติ (Do Say)', 'bf-approved', d.approved);
+  h += _listField('คำต้องห้าม (Don\'t Say)', 'bf-restricted', d.restricted);
+  return h;
+}
+
+function _audienceForm(d) {
+  let h = '';
+  const p = d.primary || {};
+  h += '<div style="font-size:13px;color:#7c8aff;margin-bottom:8px">กลุ่มเป้าหมายหลัก</div>';
+  h += _field('ช่วงอายุ', 'bf-age', p.age, '30-45 ปี');
+  h += _field('บทบาท', 'bf-role', p.role, 'ผู้ปกครอง');
+  h += _field('อาชีพ', 'bf-occupation', p.อาชีพ || p.occupation, '');
+  h += _field('รายได้', 'bf-income', p.รายได้ || p.income, '');
+  h += _listField('ปัญหา/ความต้องการ (Pain Points)', 'bf-pain', d.pain_points);
+  h += _listField('ช่องทางที่ใช้บ่อย', 'bf-channels', d.channels);
+  return h;
+}
+
+function _visualForm(d) {
+  let h = '';
+  const c = d.colors || {};
+  h += '<div style="font-size:13px;color:#7c8aff;margin-bottom:8px">สีของแบรนด์</div>';
+  h += _field('Primary', 'bf-color-primary', c.primary, '#1a73e8');
+  h += _field('Secondary', 'bf-color-secondary', c.secondary, '#34a853');
+  h += _field('Accent', 'bf-color-accent', c.accent, '#fbbc04');
+  h += _field('พื้นหลัง', 'bf-color-bg', c.background, '#ffffff');
+  const s = d.image_style || {};
+  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">สไตล์ภาพ</div>';
+  h += _textarea('โทนภาพ', 'bf-style-tone', s.tone, 'อบอุ่น สดใส');
+  h += _textarea('Product shot', 'bf-style-product', s.product_shot, 'สะอาด พื้นขาว');
+  h += _listField('Keywords สำหรับ AI Image Prompt', 'bf-keywords', d.keywords);
+  h += _listField('หลีกเลี่ยง (Avoid)', 'bf-avoid', d.avoid);
+  return h;
+}
+
+function _collectBrandForm(section) {
+  const val = (id) => (document.getElementById(id) || {}).value || '';
+  const list = (id) => { const v = val(id); return v ? v.split(',').map(x => x.trim()).filter(x => x) : []; };
+  if (section === 'voice') {
+    const f = val('bf-formality');
+    return {
+      personality: val('bf-personality'),
+      language: val('bf-language'),
+      formality_level: f ? parseInt(f) : null,
+      tone_description: val('bf-tone'),
+      banned_phrases: list('bf-banned'),
+      examples: list('bf-examples'),
+    };
+  } else if (section === 'terms') {
+    return { approved: list('bf-approved'), restricted: list('bf-restricted') };
+  } else if (section === 'profile') {
+    return val('brand-profile-textarea');
+  } else if (section === 'audience') {
+    return {
+      primary: { age: val('bf-age'), role: val('bf-role'), อาชีพ: val('bf-occupation'), รายได้: val('bf-income') },
+      pain_points: list('bf-pain'),
+      channels: list('bf-channels'),
+    };
+  } else if (section === 'visual') {
+    return {
+      colors: { primary: val('bf-color-primary'), secondary: val('bf-color-secondary'), accent: val('bf-color-accent'), background: val('bf-color-bg') },
+      image_style: { tone: val('bf-style-tone'), product_shot: val('bf-style-product') },
+      keywords: list('bf-keywords'),
+      avoid: list('bf-avoid'),
+    };
+  }
+  return null;
 }
 
 function closeBrandModal() {
@@ -3321,16 +3548,20 @@ function closeBrandModal() {
 }
 
 function saveBrandFileModal() {
-  const overlay = document.getElementById('brand-overlay');
-  const filename = overlay.dataset.filename;
-  const content = document.getElementById('brand-textarea-modal').value;
   const status = document.getElementById('brand-save-status-modal');
-  fetch('/api/brand_save', {
+  const collected = _collectBrandForm(_brandSection);
+  if (collected === null) { status.className = 'upload-status err'; status.textContent = 'เกิดข้อผิดพลาด'; return; }
+  // สร้าง payload ทั้งหมด แต่ส่งเฉพาะ section ที่แก้
+  const payload = {};
+  payload[_brandSection] = collected;
+  fetch('/api/brand_json_save', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ filename: filename, content: content }),
+    body: JSON.stringify(payload),
   }).then(r => r.json()).then(data => {
     if (data.ok) {
+      // update cache
+      _brandData[_brandSection] = collected;
       status.className = 'upload-status ok';
       status.textContent = 'บันทึกแล้ว ✓';
       setTimeout(closeBrandModal, 800);
@@ -5415,9 +5646,9 @@ function loadCredits() {
   </div>
 </div>
 <div class="settings-modal-overlay" id="brand-overlay">
-  <div class="settings-modal" style="width:600px">
+  <div class="settings-modal" style="width:600px;max-height:85vh;overflow-y:auto">
     <h3 id="brand-modal-title">✎ แก้ไข</h3>
-    <textarea id="brand-textarea-modal" style="width:100%;min-height:400px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:12px;color:#e0e0e0;font-size:13px;font-family:'SF Mono','Consolas',monospace;line-height:1.6;resize:vertical"></textarea>
+    <div id="brand-modal-body"></div>
     <div class="upload-status" id="brand-save-status-modal"></div>
     <div class="settings-actions">
       <button class="settings-cancel" onclick="closeBrandModal()">ยกเลิก</button>

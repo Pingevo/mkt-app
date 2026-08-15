@@ -37,11 +37,16 @@ data/ZMI*/
 cache/ZMI*/
 mockup_data/
 
-# Brand profiles (real customer data — keep .example.md only)
+# Brand profiles (real customer data — keep .example.md + .example.json only)
 brand/brand_profile.md
 brand/tone_of_voice.md
 brand/target_audience.md
 brand/visual_guidelines.md
+brand/*.md.bak
+brand/voice.json
+brand/terms.json
+brand/visual.json
+brand/audience.json
 
 # IDE / editor
 .idea/
