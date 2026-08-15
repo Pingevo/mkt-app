@@ -35,6 +35,20 @@ from .llm_client import LLMClient
 _PLATFORM_NAMES = {"facebook": "Facebook", "tiktok": "TikTok"}
 from . import product_db
 
+
+def _strip_code_fence(text: str) -> str:
+    """Strip markdown code fences (```json ... ```) จาก LLM response.
+
+    ใช้ร่วมกันทุกที่ที่ parse JSON จาก LLM — กัน duplicated code.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    return text
+
 console = Console()
 
 PIPELINE_STEPS = [
@@ -289,6 +303,7 @@ class Orchestrator:
         llm: LLMClient | None = None,
         quick_brief: str = "",
         media_type: str = "",
+        asset_summary: str = "",
     ) -> str:
         own = llm is None
         if own:
@@ -354,6 +369,7 @@ class Orchestrator:
                 media_capabilities=media_caps_text,
                 media_type=media_type,
                 visual_style=visual_style,
+                asset_summary=asset_summary,
             )
             image_paths = self._get_product_image_paths()
             # ใช้ Structured Outputs — LLM คืน JSON ที่ตรง schema
@@ -381,6 +397,105 @@ class Orchestrator:
             if own:
                 llm.close()
 
+    def _select_assets_for_content(
+        self,
+        llm: LLMClient,
+        quick_brief: str = "",
+        concept: str = "",
+        product_ids: list[str] | None = None,
+        preselected_asset_ids: list[str] | None = None,
+    ) -> str:
+        """Asset selection phase — เลือกวัตถุดิบแบรนด์ที่เหมาะกับแคมเปญ.
+
+        เรียก LLM 1 รอบ ให้เลือก asset จาก library ผ่าน tool calling
+        รับ concept + product_ids จาก select_product_auto เพื่อเลือก asset ที่เหมาะกับแนวคิด.
+
+        ถ้า preselected_asset_ids มีค่าแล้ว (เลือกจาก select_product_auto) → ใช้เลย ไม่เรียก LLM.
+        ถ้า asset library ว่าง → คืน "" (ข้ามทั้ง phase ไม่เสีย LLM call).
+        คืน: string สรุป asset ที่เลือก (id + description + วิธีใช้) สำหรับแปะเข้า prompt.
+        """
+        from . import asset_library
+        all_assets = asset_library.list_all()
+        if not all_assets:
+            return ""
+
+        import json as _json
+        from .config_loader import get_section, get_agent_config
+
+        auto_cfg = get_section(self.config, "auto_mode")
+        manager_cfg = get_agent_config(self.config, "manager")
+
+        # ถ้า select_product_auto เลือก asset มาแล้ว → ใช้เลย ไม่เรียก LLM ซ้ำ
+        if preselected_asset_ids:
+            selected_ids = preselected_asset_ids
+            reason = "เลือกจากจังหวะเลือกสินค้า"
+            usage_hints = {}
+        else:
+            tools = asset_library.tool_definitions()
+            tool_handlers = asset_library.tool_handlers()
+
+            # สร้างบริบท — concept + product + quick_brief
+            context_parts = []
+            if concept:
+                context_parts.append(f"แนวคิดที่เลือก: {concept}")
+            if product_ids:
+                context_parts.append(f"สินค้า: {', '.join(product_ids)}")
+            if quick_brief:
+                context_parts.append(f"คำขอเพิ่มเติมจาก user: {quick_brief}")
+            context = "\n".join(context_parts) if context_parts else "ไม่มีบริบทเพิ่มเติม"
+
+            messages = [
+                {"role": "system", "content": (
+                    "คุณเป็น assistant เลือกวัตถุดิบแบรนด์ (asset) ที่เหมาะสมกับคอนเทนต์ที่จะสร้าง "
+                    "เรียก list_assets() เพื่อดูว่ามี asset อะไรบ้าง "
+                    "แล้วเลือก asset ที่เกี่ยวข้องกับแนวคิดและสินค้า "
+                    "ตอบเป็น JSON: {\"selected_asset_ids\": [\"a_0001\", ...], \"reason\": \"เหตุผล\", \"usage_hints\": {\"a_0001\": \"วิธีใช้ asset นี้\"}} "
+                    "ถ้าไม่มี asset ที่เหมาะ ตอบ {\"selected_asset_ids\": [], \"reason\": \"...\", \"usage_hints\": {}}"
+                )},
+                {"role": "user", "content": f"เลือกวัตถุดิบแบรนด์ที่จะใช้ประกอบคอนเทนต์\n{context}"},
+            ]
+
+            try:
+                response = llm.chat_with_tools(
+                    messages,
+                    tools=tools,
+                    tool_handlers=tool_handlers,
+                    model=manager_cfg.get("model"),
+                    temperature=manager_cfg.get("temperature", 0.7),
+                    max_tokens=auto_cfg.get("max_tokens", 4096),
+                    max_retry_limit=manager_cfg.get("max_retry_limit", 3),
+                    max_iterations=auto_cfg.get("max_iterations", 10),
+                    source="orchestrator.select_assets",
+                )
+                text = _strip_code_fence(response)
+                parsed = _json.loads(text)
+                selected_ids = parsed.get("selected_asset_ids", [])
+                reason = parsed.get("reason", "")
+                usage_hints = parsed.get("usage_hints", {})
+            except Exception as e:
+                print(f"[Orchestrator] asset selection failed: {e}", flush=True)
+                return ""
+
+        if not selected_ids:
+            return ""
+
+        # สร้างสรุป asset ที่เลือก (id + description + วิธีใช้)
+        summaries = []
+        for aid in selected_ids:
+            rec = asset_library.get_asset(aid)
+            if rec:
+                tags_str = ", ".join(rec.get("tags", [])) if rec.get("tags") else "-"
+                hint = usage_hints.get(aid, "")
+                hint_section = f" | วิธีใช้: {hint}" if hint else ""
+                summaries.append(
+                    f"- ID: {rec['id']} | {rec.get('file', '')} | "
+                    f"type: {rec.get('type', '')} | subject: {rec.get('subject', '')} | "
+                    f"tags: {tags_str} | คำบรรยาย: {rec.get('description', '')}{hint_section}"
+                )
+        if not summaries:
+            return ""
+        return f"เหตุผลที่เลือก: {reason}\n" + "\n".join(summaries)
+
     # ------------------------------------------------------------------
     #  Auto mode — agent เลือกสินค้าเอง + คอนเทนต์ไม่ซ้ำ
     # ------------------------------------------------------------------
@@ -405,6 +520,7 @@ class Orchestrator:
         คืน JSON: {product_ids: [...], concept, reason}
         """
         import json as _json
+        from . import asset_library
         from . import content_history
         from . import pillar_manager
         from .config_loader import get_section
@@ -489,7 +605,7 @@ class Orchestrator:
                         },
                     },
                 },
-            ]
+            ] + asset_library.tool_definitions()
 
             # --- tool handlers (function จริง) ---
             def _list_products(category: str = "") -> list[dict]:
@@ -545,10 +661,14 @@ class Orchestrator:
                     for e in entries
                 ]
 
+            # asset tools — ใช้ shared helpers จาก asset_library (กัน duplicated code)
+            asset_handlers = asset_library.tool_handlers()
             tool_handlers = {
                 "list_products": _list_products,
                 "get_product_detail": _get_product_detail,
                 "get_content_history": _get_content_history,
+                "list_assets": asset_handlers["list_assets"],
+                "get_asset_detail": asset_handlers["get_asset_detail"],
             }
 
             # --- prompt สำหรับ LLM (อ่านจาก config) ---
@@ -568,7 +688,7 @@ class Orchestrator:
                 count_hint = f"\n\nUser ต้องการให้เลือก {product_count} สินค้ามาทำคอนเทนต์รวมกันใน 1 โพสต์"
             else:
                 count_hint = "\n\nUser เลือกโหมดแยก — เลือกสินค้า 1 ชิ้นเท่านั้น"
-            output_schema = '{"product_ids": ["สินค้า1", ...], "pillar": "หมวดคอนเทนต์", "concept": "แนวคิด", "reason": "เหตุผล"}'
+            output_schema = '{"product_ids": ["สินค้า1", ...], "pillar": "หมวดคอนเทนต์", "concept": "แนวคิด", "reason": "เหตุผล", "asset_ids": ["a_0001", ...]}'
 
             # ใช้ prompt จาก config (open-ended) + pillar context
             base_prompt = auto_cfg.get("selection_prompt", "")
@@ -591,7 +711,9 @@ class Orchestrator:
             user_prompt = (
                 f"เลือกสินค้าและแนวคิดเพื่อสร้างคอนเทนต์{platform_str}{brief_section}\n\n"
                 f"ขั้นตอน: เรียก list_products() → เรียก get_content_history() → "
-                f"เรียก get_product_detail() สำหรับสินค้าที่สนใจ → ตอบ JSON\n\n"
+                f"เรียก get_product_detail() สำหรับสินค้าที่สนใจ → ตอบ JSON\n"
+                f"ถ้ามีวัตถุดิบแบรนด์ (โลโก้ พรีเซนเตอร์ เพลง) ให้เรียก list_assets() "
+                f"เพื่อดูว่ามีอะไรใช้ประกอบคอนเทนต์ได้\n\n"
                 f"สำคัญ: ต้องเลือก Content Pillar จาก list ใน system prompt "
                 f"และส่ง field \"pillar\" ใน JSON ด้วย\n"
                 f"สำคัญ: เลือก pillar ที่เหมาะสมกับจำนวนสินค้าที่เลือก "
@@ -618,13 +740,7 @@ class Orchestrator:
             )
 
             # parse JSON จากคำตอบสุดท้าย
-            text = response.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                text = "\n".join(lines)
+            text = _strip_code_fence(response)
             try:
                 result = _json.loads(text)
             except _json.JSONDecodeError:
@@ -658,6 +774,17 @@ class Orchestrator:
                         return {"error": f"LLM เลือกสินค้าที่ไม่มีในระบบ: {pid}"}
             result["product_ids"] = validated
             result["product_id"] = validated[0]
+
+            # validate asset_ids ถ้า LLM เลือกมาแล้ว (เก็บจากจังหวะนี้ ส่งต่อไป content_creator)
+            selected_assets = result.get("asset_ids", [])
+            if selected_assets:
+                valid_assets = []
+                all_assets = asset_library.list_all()
+                valid_ids = {a.get("id") for a in all_assets}
+                for aid in selected_assets:
+                    if isinstance(aid, str) and aid in valid_ids:
+                        valid_assets.append(aid)
+                result["asset_ids"] = valid_assets
 
             # ถ้า LLM ไม่ส่ง pillar กลับมา → infer จาก concept
             if not result.get("pillar") and pillars:
@@ -724,10 +851,20 @@ class Orchestrator:
             chosen_pids = selection.get("product_ids", [])
             chosen_concept = selection.get("concept") or selection.get("angle", "")
             chosen_pillar = selection.get("pillar", "")
+            chosen_asset_ids = selection.get("asset_ids", [])
             reason = selection.get("reason", "")
 
             if status_callback:
                 status_callback(f"เลือก: {', '.join(chosen_pids)} — {chosen_concept}")
+
+            # --- Phase 1.5: เลือก asset (ครั้งเดียว ก่อน retry loop) ---
+            # ถ้า select_product_auto เลือก asset มาแล้ว → ใช้เลย ไม่เรียก LLM ซ้ำ
+            # ถ้ายัง → เรียก LLM 1 รอบ (มี concept + product_ids ส่งต่อ)
+            asset_summary = self._select_assets_for_content(
+                llm, quick_brief,
+                concept=chosen_concept, product_ids=chosen_pids,
+                preselected_asset_ids=chosen_asset_ids or None,
+            )
 
             # --- Phase 2: สร้างคอนเทนต์ ---
             multi_text_len = auto_cfg.get("multi_product_text_length", 2000)
@@ -787,6 +924,7 @@ class Orchestrator:
                     "", "", "",
                     llm=llm, quick_brief=attempt_brief,
                     media_type=media_type,
+                    asset_summary=asset_summary,
                 )
 
                 # ดึง caption เพื่อตรวจซ้ำ
@@ -943,11 +1081,7 @@ class Orchestrator:
                                 },
                                 source="script_review.regenerate_prompts",
                             )
-                            import re as _re2
-                            vp_clean = vp_response.strip()
-                            if vp_clean.startswith("```"):
-                                vp_clean = _re2.sub(r"^```(?:json)?\s*", "", vp_clean)
-                                vp_clean = _re2.sub(r"\s*```$", "", vp_clean)
+                            vp_clean = _strip_code_fence(vp_response)
                             vp_data = _json.loads(vp_clean)
                             vp_posts = vp_data.get("posts", [])
                             if vp_posts and vp_posts[0].get("video_prompts"):

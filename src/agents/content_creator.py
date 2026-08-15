@@ -17,6 +17,7 @@ class ContentCreatorAgent(BaseAgent):
         media_capabilities: str = "",
         media_type: str = "",
         visual_style: str = "",
+        asset_summary: str = "",
     ) -> str:
         parts = ["กรุณาสร้าง **1 โพสต์** สำหรับโปรโมทสินค้า ตามรูปแบบใน system prompt"]
 
@@ -59,6 +60,15 @@ class ContentCreatorAgent(BaseAgent):
                 f"สำคัญ: ตอนเขียน prompt สำหรับ Gen Image หรือ Gen Video "
                 f"ให้ระบุ duration, aspect ratio, resolution เฉพาะค่าที่ model รองรับเท่านั้น "
                 f"ถ้าต้องการค่าที่ model ทำไม่ได้ ให้เลือกค่าใกล้สุดที่ทำได้"
+            )
+
+        # Asset Library — วัตถุดิบแบรนด์ที่ agent เลือกมาใช้ประกอบคอนเทนต์
+        if asset_summary:
+            parts.append(
+                f"--- วัตถุดิบแบรนด์ที่เลือกมา ---\n"
+                f"{asset_summary}\n"
+                f"--- สิ้นสุดวัตถุดิบแบรนด์ ---\n"
+                f"ระบุ asset_ids ที่ใช้ในแต่ละโพสต์"
             )
 
         parts.append("สร้าง 1 โพสต์ตามรูปแบบที่กำหนดใน system prompt")

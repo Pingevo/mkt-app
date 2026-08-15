@@ -101,6 +101,11 @@ CONTENT_SCHEMA: dict = {
                                 "additionalProperties": False,
                             },
                         },
+                        "asset_ids": {
+                            "type": "array",
+                            "description": "ID ของวัตถุดิบแบรนด์ (asset) ที่ใช้ในโพสต์นี้ — เช่น ['a_0001', 'a_0002'] (ถ้าไม่ใช้ → array ว่าง)",
+                            "items": {"type": "string"},
+                        },
                     },
                     "required": [
                         "platform",
@@ -111,6 +116,7 @@ CONTENT_SCHEMA: dict = {
                         "hashtags",
                         "image_prompts",
                         "video_prompts",
+                        "asset_ids",
                     ],
                     "additionalProperties": False,
                 },
@@ -153,6 +159,9 @@ def render_posts_to_markdown(parsed: dict) -> str:
         parts.append(f"- **Caption (พร้อมโพสต์)** — ")
         parts.append(post.get("caption", ""))
         parts.append(f"- **Hashtag** — {post.get('hashtags', '')}")
+        asset_ids = post.get("asset_ids", [])
+        if asset_ids:
+            parts.append(f"- **วัตถุดิบแบรนด์ที่ใช้** — {', '.join(asset_ids)}")
         parts.append("")
 
         # ## 2. Script (ถ้ามี)

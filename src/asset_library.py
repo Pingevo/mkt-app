@@ -77,6 +77,95 @@ def make_llm():
 
 
 # ------------------------------------------------------------------
+#  Tool calling — schemas + handlers สำหรับ LLM tool calling
+#  ใช้ใน orchestrator.select_product_auto + _select_assets_for_content
+# ------------------------------------------------------------------
+
+def tool_definitions() -> list[dict]:
+    """Tool schemas สำหรับ list_assets + get_asset_detail (OpenAI function schema).
+
+    ใช้ร่วมกันทุกที่ที่ให้ LLM เรียกดู asset ผ่าน tool calling.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_assets",
+                "description": "ดูวัตถุดิบแบรนด์ที่มี (โลโก้ รูปพรีเซนเตอร์ เพลง ฯลฯ) — ค้นหาด้วยคำหรือกรองตามประเภท เพื่อเลือกใช้ประกอบคอนเทนต์",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "คำค้น (optional) — เช่น 'โลโก้', 'พรีเซนเตอร์', 'คน'",
+                        },
+                        "type": {
+                            "type": "string",
+                            "description": "กรองประเภท (optional): image, audio, video, text, other",
+                        },
+                        "subject": {
+                            "type": "string",
+                            "description": "กรอง subject (optional): person, product, logo, background, graphic, scene, other",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_asset_detail",
+                "description": "ดูรายละเอียดเต็มของ asset หนึ่ง — เรียกหลังจาก list_assets แล้วเลือก asset ที่อยากดู",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "asset_id": {
+                            "type": "string",
+                            "description": "ID ของ asset (เช่น a_0001) ที่ได้จาก list_assets",
+                        },
+                    },
+                    "required": ["asset_id"],
+                },
+            },
+        },
+    ]
+
+
+def tool_handlers() -> dict:
+    """Tool handlers สำหรับ list_assets + get_asset_detail.
+
+    คืน dict ของ {tool_name: callable} พร้อมใช้ใน chat_with_tools.
+    ไม่ส่ง path/hash ออกไป — LLM ไม่ต้องใช้ค่าเหล่านั้น.
+    """
+    def _list_assets(query: str = "", type: str = "", subject: str = "") -> list[dict]:
+        results = query_assets(query, type=type or None, subject=subject or None)
+        return [
+            {
+                "id": a.get("id"),
+                "file": a.get("file"),
+                "type": a.get("type"),
+                "subject": a.get("subject"),
+                "style": a.get("style"),
+                "tags": a.get("tags", []),
+                "description": a.get("description", ""),
+            }
+            for a in results
+        ]
+
+    def _get_asset_detail(asset_id: str) -> dict:
+        rec = get_asset(asset_id)
+        if not rec:
+            return {"error": f"ไม่พบ asset {asset_id}"}
+        return {k: v for k, v in rec.items() if k not in ("path", "hash")}
+
+    return {
+        "list_assets": _list_assets,
+        "get_asset_detail": _get_asset_detail,
+    }
+
+
+# ------------------------------------------------------------------
 #  File classification & hash
 # ------------------------------------------------------------------
 
