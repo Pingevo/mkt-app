@@ -37,3 +37,8 @@ embedding:
 query:
   default_top_k: 8          # จำนวนผลลัพธ์ default ของ list_assets
   max_top_k: 20
+
+# media_gen wiring — จำกัดจำนวนรูป (สินค้า + asset) ที่ส่งเป็น input_references ต่อโพสต์
+# (provider อาจ limit จำนวน reference images — รูปสินค้ามาก่อน asset เสมอ)
+media:
+  max_refs_per_post: 5

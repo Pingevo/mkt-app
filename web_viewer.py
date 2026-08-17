@@ -485,6 +485,9 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
     images = parsed.get("images", [])
     videos = parsed.get("videos", [])
 
+    # Phase 4: รวมรูปสินค้า + รูป asset เป็น input_references (helper เดียว)
+    from src import asset_library as _al
+
     output_dir = p.parent
     session_rel = str(output_dir.relative_to(OUTPUT_DIR)) if output_dir.is_relative_to(OUTPUT_DIR) else str(output_dir)
 
@@ -541,9 +544,12 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                     img_kwargs: dict = {}
                     if img.get("aspect_ratio"):
                         img_kwargs["aspect_ratio"] = img["aspect_ratio"]
-                    # ส่งรูปสินค้าจริงเป็น reference — image-to-image
-                    if product_image_paths:
-                        img_kwargs["input_references"] = product_image_paths
+                    # ส่งรูปสินค้า + รูป asset เป็น reference — image-to-image
+                    _refs = _al.build_input_references(
+                        product_image_paths, img.get("asset_ids", []),
+                    )
+                    if _refs:
+                        img_kwargs["input_references"] = _refs
                     # Visual brand injection
                     visual = _get_brand_visual()
                     if visual:
@@ -578,9 +584,12 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                         vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
                     if vid.get("resolution"):
                         vid_kwargs["resolution"] = vid["resolution"]
-                    # ส่งรูปสินค้าจริงเป็น reference — reference-to-video
-                    if product_image_paths:
-                        vid_kwargs["input_references"] = product_image_paths
+                    # ส่งรูปสินค้า + รูป asset เป็น reference — reference-to-video
+                    _refs = _al.build_input_references(
+                        product_image_paths, vid.get("asset_ids", []),
+                    )
+                    if _refs:
+                        vid_kwargs["input_references"] = _refs
                     # Visual brand injection
                     visual = _get_brand_visual()
                     if visual:
@@ -1978,6 +1987,8 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
             if save_output and saved_path and (auto_image or auto_video):
                 try:
                     parsed = media_gen.parse_media_prompts(result)
+                    # Phase 4: รวมรูปสินค้า + รูป asset เป็น input_references
+                    from src import asset_library as _al
                     # สร้าง LLM client สำหรับ retry-on-reject
                     # auto mode: วนแก้ prompt จนกว่าจะออก (ไม่มี limit)
                     retry_llm = llm if llm is not None else None
@@ -1994,9 +2005,12 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                             img_kwargs: dict = {}
                             if img.get("aspect_ratio"):
                                 img_kwargs["aspect_ratio"] = img["aspect_ratio"]
-                            # ส่งรูปสินค้าจริงเป็น reference — image-to-image
-                            if image_paths:
-                                img_kwargs["input_references"] = image_paths
+                            # ส่งรูปสินค้า + รูป asset เป็น reference — image-to-image
+                            _refs = _al.build_input_references(
+                                image_paths, img.get("asset_ids", []),
+                            )
+                            if _refs:
+                                img_kwargs["input_references"] = _refs
                             # Visual brand injection
                             visual = _get_brand_visual()
                             if visual:
@@ -2034,9 +2048,12 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                                 vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
                             if vid.get("resolution"):
                                 vid_kwargs["resolution"] = vid["resolution"]
-                            # ส่งรูปสินค้าจริงเป็น reference — reference-to-video
-                            if image_paths:
-                                vid_kwargs["input_references"] = image_paths
+                            # ส่งรูปสินค้า + รูป asset เป็น reference — reference-to-video
+                            _refs = _al.build_input_references(
+                                image_paths, vid.get("asset_ids", []),
+                            )
+                            if _refs:
+                                vid_kwargs["input_references"] = _refs
                             # Visual brand injection
                             visual = _get_brand_visual()
                             if visual:
@@ -2416,6 +2433,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                             parsed_media = media_gen.parse_media_prompts(content)
                             # ดึง image_paths ของสินค้าที่เลือก
                             from src import product_db as _pdb
+                            from src import asset_library as _al
                             orch.product_id = chosen_pid
                             product_img_paths = _pdb.get_product_image_paths(chosen_pid) if _pdb.is_ready(chosen_pid) else []
                             if auto_image:
@@ -2426,9 +2444,12 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                     img_kwargs: dict = {}
                                     if img.get("aspect_ratio"):
                                         img_kwargs["aspect_ratio"] = img["aspect_ratio"]
-                                    # ส่งรูปสินค้าจริงเป็น reference — image-to-image
-                                    if product_img_paths:
-                                        img_kwargs["input_references"] = product_img_paths
+                                    # ส่งรูปสินค้า + รูป asset เป็น reference — image-to-image
+                                    _refs = _al.build_input_references(
+                                        product_img_paths, img.get("asset_ids", []),
+                                    )
+                                    if _refs:
+                                        img_kwargs["input_references"] = _refs
                                     # Visual brand injection
                                     visual = _get_brand_visual()
                                     if visual:
@@ -2451,9 +2472,12 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                         vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
                                     if vid.get("resolution"):
                                         vid_kwargs["resolution"] = vid["resolution"]
-                                    # ส่งรูปสินค้าจริงเป็น reference — reference-to-video
-                                    if product_img_paths:
-                                        vid_kwargs["input_references"] = product_img_paths
+                                    # ส่งรูปสินค้า + รูป asset เป็น reference — reference-to-video
+                                    _refs = _al.build_input_references(
+                                        product_img_paths, vid.get("asset_ids", []),
+                                    )
+                                    if _refs:
+                                        vid_kwargs["input_references"] = _refs
                                     # Visual brand injection
                                     visual = _get_brand_visual()
                                     if visual:

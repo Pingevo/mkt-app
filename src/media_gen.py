@@ -1000,6 +1000,9 @@ def parse_media_prompts(content: str) -> dict[str, list[dict[str, str]]]:
             images: list[dict[str, str]] = []
             videos: list[dict[str, str]] = []
             for post in parsed.get("posts", []):
+                # asset_ids ของโพสต์ — ติดไปกับทุก image/video item
+                # (media_gen ใช้ดึงรูป asset เป็น input_references)
+                post_asset_ids = post.get("asset_ids", [])
                 for ip in post.get("image_prompts", []):
                     p = ip.get("prompt", "").strip()
                     if p:
@@ -1008,6 +1011,8 @@ def parse_media_prompts(content: str) -> dict[str, list[dict[str, str]]]:
                             img_item["aspect_ratio"] = ip["aspect_ratio"]
                         if ip.get("resolution"):
                             img_item["resolution"] = ip["resolution"]
+                        if post_asset_ids:
+                            img_item["asset_ids"] = post_asset_ids
                         images.append(img_item)
                 for vp in post.get("video_prompts", []):
                     p = vp.get("prompt", "").strip()
@@ -1019,6 +1024,8 @@ def parse_media_prompts(content: str) -> dict[str, list[dict[str, str]]]:
                             vid_item["aspect_ratio"] = vp["aspect_ratio"]
                         if vp.get("resolution"):
                             vid_item["resolution"] = vp["resolution"]
+                        if post_asset_ids:
+                            vid_item["asset_ids"] = post_asset_ids
                         videos.append(vid_item)
             return {"images": images, "videos": videos}
     except (_json.JSONDecodeError, TypeError, ValueError):

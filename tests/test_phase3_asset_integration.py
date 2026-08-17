@@ -177,3 +177,94 @@ def test_build_prompt_without_asset_summary():
         asset_summary="",
     )
     assert "วัตถุดิบแบรนด์" not in prompt
+
+
+def test_parse_media_prompts_carries_asset_ids():
+    """parse_media_prompts ส่ง asset_ids ของโพสต์ติดไปกับแต่ละ image/video item.
+
+    Phase 4: media_gen ใช้ asset_ids ดึงรูป asset เป็น input_references.
+    """
+    from src.media_gen import parse_media_prompts
+    content = json.dumps({
+        "posts": [
+            {
+                "platform": "TikTok", "concept": "c", "title": "t",
+                "caption": "cap", "script": "", "hashtags": "#t",
+                "image_prompts": [{"prompt": "a product photo", "aspect_ratio": "9:16"}],
+                "video_prompts": [{"prompt": "a product video", "duration": 8}],
+                "asset_ids": ["a_0001", "a_0004"],
+            }
+        ]
+    })
+    parsed = parse_media_prompts(content)
+    assert parsed["images"][0]["asset_ids"] == ["a_0001", "a_0004"]
+    assert parsed["videos"][0]["asset_ids"] == ["a_0001", "a_0004"]
+
+
+def test_parse_media_prompts_no_asset_ids():
+    """โพสต์ไม่มี asset_ids → item ไม่มี key asset_ids (backward compat)."""
+    from src.media_gen import parse_media_prompts
+    content = json.dumps({
+        "posts": [
+            {
+                "platform": "TikTok", "concept": "c", "title": "t",
+                "caption": "cap", "script": "", "hashtags": "#t",
+                "image_prompts": [{"prompt": "a product photo"}],
+                "video_prompts": [],
+                "asset_ids": [],
+            }
+        ]
+    })
+    parsed = parse_media_prompts(content)
+    assert "asset_ids" not in parsed["images"][0]
+
+
+def test_build_input_references_merges_and_caps(tmp_path, monkeypatch):
+    """build_input_references รวมรูปสินค้า + รูป asset และจำกัดจำนวนตาม config.
+
+    Phase 4: ทุก call site ใช้ helper นี้ตัวเดียว — ไม่ต่อ list เอง.
+    """
+    from src import asset_library
+
+    db_path = tmp_path / "db.json"
+    monkeypatch.setattr(asset_library, "_db_path", lambda: db_path)
+    monkeypatch.setattr(asset_library, "_load_config", lambda: {
+        "media": {"max_refs_per_post": 3},
+    })
+
+    # สร้างรูป asset จริง 2 ไฟล์
+    a1 = tmp_path / "logo.png"
+    a1.write_bytes(b"png")
+    a2 = tmp_path / "person.png"
+    a2.write_bytes(b"png")
+    db_path.write_text(json.dumps({
+        "assets": [
+            {"id": "a_0001", "file": "logo.png", "type": "image", "subject": "logo",
+             "path": str(a1), "hash": "h1", "status": "ready"},
+            {"id": "a_0002", "file": "person.png", "type": "image", "subject": "person",
+             "path": str(a2), "hash": "h2", "status": "ready"},
+        ],
+        "next_id": 3,
+    }))
+
+    # product 2 รูป + asset 2 รูป = 4 → cap ที่ 3 (product มาก่อน)
+    p1 = tmp_path / "prod1.png"
+    p1.write_bytes(b"png")
+    p2 = tmp_path / "prod2.png"
+    p2.write_bytes(b"png")
+    refs = asset_library.build_input_references(
+        [str(p1), str(p2)], ["a_0001", "a_0002"],
+    )
+    assert len(refs) == 3
+    assert refs[0] == str(p1)
+    assert refs[1] == str(p2)
+    assert refs[2] == str(a1)  # asset แรกที่ยังใส่ได้
+
+
+def test_build_input_references_no_assets(tmp_path, monkeypatch):
+    """ไม่มี asset_ids → คืนแค่รูปสินค้า (backward compat)."""
+    from src import asset_library
+    monkeypatch.setattr(asset_library, "_db_path", lambda: tmp_path / "db.json")
+    monkeypatch.setattr(asset_library, "_load_config", lambda: {})
+    refs = asset_library.build_input_references(["/tmp/p1.png"], [])
+    assert refs == ["/tmp/p1.png"]

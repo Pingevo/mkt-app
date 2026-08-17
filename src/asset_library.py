@@ -745,6 +745,20 @@ def get_asset_paths(asset_ids: list[str]) -> list[str]:
     return paths
 
 
+def build_input_references(product_paths: list[str], asset_ids: list[str]) -> list[str]:
+    """รวมรูปสินค้า + รูป asset เป็น input_references เดียว — จำกัดจำนวนตาม config.
+
+    รูปสินค้ามาก่อน (สำคัญกว่า — ต้องตรงรุ่น) แล้วเติม asset จนถึง max_refs_per_post.
+    ใช้ helper นี้ตัวเดียวในทุก call site ของ media_gen — ไม่ต่อ list เอง.
+    """
+    refs = list(product_paths)
+    if asset_ids:
+        refs.extend(get_asset_paths(asset_ids))
+    cfg = _load_config()
+    max_refs = cfg.get("media", {}).get("max_refs_per_post", 5)
+    return refs[:max_refs]
+
+
 # ------------------------------------------------------------------
 #  Public API — HITL side
 # ------------------------------------------------------------------
