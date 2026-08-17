@@ -15,6 +15,7 @@ from typing import Any
 from rich.console import Console
 
 from ..llm_client import LLMClient
+from ..brand_priority import BrandRules
 
 console = Console()
 
@@ -45,13 +46,15 @@ class BaseAgent:
         brand_context: str = "",
         brand_reference: str = "",
         instructions: dict[str, Any] | None = None,
+        brand_rules: BrandRules | None = None,
     ) -> None:
         self.config = agent_config
         self.llm = llm_client
-        # brand_context = rules (voice + terms) → ใส่ใน system prompt ทุก agent
-        # brand_reference = profile + audience → ใส่เฉพาะ agent ที่ต้องการบริบทเพิ่ม
+        # brand_context = rules string (legacy — ใช้ถ้า brand_rules ไม่ได้ส่งมา)
+        # brand_rules = BrandRules object (ใหม่ — hard/soft split, ใช้ build_priority_prompt)
         self.brand_context = brand_context
         self.brand_reference = brand_reference
+        self.brand_rules = brand_rules
         self.instructions = instructions or {}
 
     def _format_instructions(self) -> str:
@@ -182,10 +185,10 @@ class BaseAgent:
         if rules_forbid:
             parts.append("ห้าม:\n" + "\n".join(f"  ✗ {r}" for r in rules_forbid))
 
-        # Custom instruction — user override (takes precedence over defaults)
+        # Custom instruction — user override (soft style เท่านั้น ห้าม override hard rules)
         custom = ins.get("custom", "")
         if custom:
-            parts.append(f"คำสั่งจากผู้ใช้ (ถ้าขัดแย้งกับค่าเริ่มต้น ให้ทำตามคำสั่งนี้แทน):\n{custom}")
+            parts.append(f"คำสั่งจากผู้ใช้ (ห้ามขัดกับกฎบังคับของแบรนด์ — ถ้าขัด ให้ทำตามกฎแบรนด์):\n{custom}")
 
         if not parts:
             return ""
@@ -197,16 +200,29 @@ class BaseAgent:
         sections = [system_prompt]
 
         use_brand = self.config.get("use_brand_context", True)
-        if self.brand_context and use_brand:
-            sections.append(
-                f"--- กฎของแบรนด์ (Voice + Terms — ต้องเป็นไปตามนี้) ---\n"
-                f"{self.brand_context}\n"
-                f"--- สิ้นสุดกฎของแบรนด์ ---\n\n"
-                f"กฎของแบรนด์เป็นกฎบังคับ — โทนเสียง คำที่ใช้ คำต้องห้าม ต้องเป็นไปตามนี้\n"
-                f"ห้ามนำรายการสินค้าในข้อมูลแบรนด์มาใช้เป็นสินค้าที่จะทำงานด้วย\n"
-                f"สินค้าที่จะทำงานด้วยคือสินค้าที่ส่งมาใน user prompt เท่านั้น\n"
-                f"ถ้าข้อมูลสินค้าใน user prompt ขัดแย้งกับข้อมูลแบรนด์ ให้เชื่อข้อมูลสินค้าใน user prompt"
-            )
+        if use_brand:
+            # ใช้ brand_rules (BrandRules object) ถ้ามี — hard/soft split พร้อม priority prompt
+            if self.brand_rules and (self.brand_rules.hard or self.brand_rules.soft):
+                from ..brand_priority import build_priority_prompt
+                priority_text = build_priority_prompt(self.brand_rules, self.instructions)
+                if priority_text:
+                    sections.append(
+                        f"{priority_text}\n\n"
+                        f"ห้ามนำรายการสินค้าในข้อมูลแบรนด์มาใช้เป็นสินค้าที่จะทำงานด้วย\n"
+                        f"สินค้าที่จะทำงานด้วยคือสินค้าที่ส่งมาใน user prompt เท่านั้น\n"
+                        f"ถ้าข้อมูลสินค้าใน user prompt ขัดแย้งกับข้อมูลแบรนด์ ให้เชื่อข้อมูลสินค้าใน user prompt"
+                    )
+            elif self.brand_context:
+                # Legacy fallback — brand_context เป็น string แบบเดิม
+                sections.append(
+                    f"--- กฎของแบรนด์ (Voice + Terms — ต้องเป็นไปตามนี้) ---\n"
+                    f"{self.brand_context}\n"
+                    f"--- สิ้นสุดกฎของแบรนด์ ---\n\n"
+                    f"กฎของแบรนด์เป็นกฎบังคับ — โทนเสียง คำที่ใช้ คำต้องห้าม ต้องเป็นไปตามนี้\n"
+                    f"ห้ามนำรายการสินค้าในข้อมูลแบรนด์มาใช้เป็นสินค้าที่จะทำงานด้วย\n"
+                    f"สินค้าที่จะทำงานด้วยคือสินค้าที่ส่งมาใน user prompt เท่านั้น\n"
+                    f"ถ้าข้อมูลสินค้าใน user prompt ขัดแย้งกับข้อมูลแบรนด์ ให้เชื่อข้อมูลสินค้าใน user prompt"
+                )
 
         # brand_reference (profile + audience) — ใส่เฉพาะ agent ที่เปิด use_brand_reference
         use_ref = self.config.get("use_brand_reference", False)
@@ -253,11 +269,11 @@ class BaseAgent:
         if quick_brief:
             user_prompt = (
                 f"{user_prompt}\n\n"
-                f"--- คำสั่งบังคับจากผู้ใช้สำหรับรอบนี้ (ต้องทำตาม) ---\n"
+                f"--- คำสั่งเพิ่มเติมจากผู้ใช้สำหรับรอบนี้ ---\n"
                 f"{quick_brief}\n"
-                f"--- สิ้นสุดคำสั่งบังคับ ---\n"
-                f"หมายเหตุ: คำสั่งข้างต้นเป็นคำสั่งจากผู้ใช้ที่ต้องทำตาม "
-                f"ถ้าขัดแย้งกับค่าเริ่มต้นใน system prompt ให้ทำตามคำสั่งผู้ใช้ข้างต้น"
+                f"--- สิ้นสุดคำสั่งเพิ่มเติม ---\n"
+                f"หมายเหตุ: คำสั่งข้างต้นเป็นคำขอเพิ่มเติม — สามารถปรับ soft style ได้ "
+                f"แต่ถ้าขัดแย้งกับกฎบังคับของแบรนด์ใน system prompt ให้ทำตามกฎแบรนด์เสมอ"
             )
 
         web_search = self.config.get("web_search")

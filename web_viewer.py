@@ -54,6 +54,36 @@ CACHE_DIR = PROJECT_ROOT / "cache"
 
 app = FastAPI(title="MKTApp Viewer")
 
+# Central conflict cache — ตรวจครั้งเดียวตอน brand/agent settings เปลี่ยน
+# ทุก UI ดึงจาก GET /api/conflicts แทนการตรวจใหม่ทุกครั้ง
+_conflict_cache: dict[str, list] = {}  # { agent_key: [conflict_dict, ...] }
+
+
+def _refresh_conflict_cache() -> None:
+    """ตรวจ conflict ทุก agent → เก็บใน _conflict_cache.
+
+    เรียกหลัง: brand save, agent settings save, server start
+    ไม่ตรวจ Quick Brief (per-run, ไม่ได้ save)
+    """
+    from src.brand_priority import load_brand_priority, detect_conflicts
+    rules = load_brand_priority(BRAND_DIR)
+    data = _load_instructions()
+    cache: dict[str, list] = {}
+    for agent_key in ("product_spec", "competitor_analysis", "campaign_strategy", "content_creator"):
+        settings = data.get(agent_key, {})
+        conflicts = detect_conflicts(rules, settings)
+        cache[agent_key] = [
+            {
+                "field": c.field,
+                "brand_value": c.brand_value,
+                "user_value": c.user_value,
+                "severity": c.severity,
+            }
+            for c in conflicts
+        ]
+    global _conflict_cache
+    _conflict_cache = cache
+
 
 def _get_brand_visual() -> dict:
     """โหลด brand/visual.json — cached ที่ module level เพื่อไม่อ่านซ้ำทุก request."""
@@ -1195,6 +1225,8 @@ async def api_brand_json_save(request: Request) -> JSONResponse:
     # Clear visual cache เพื่อโหลดใหม่ในครั้งต่อไป
     global _BRAND_VISUAL_CACHE
     _BRAND_VISUAL_CACHE = None
+    # Refresh conflict cache — brand rules เปลี่ยน ต้องตรวจ agent ทุกตัวใหม่
+    _refresh_conflict_cache()
     return JSONResponse({"ok": True, "saved": saved})
 
 
@@ -1686,7 +1718,49 @@ async def api_agent_instructions_save(agent_key: str, request: Request) -> JSONR
     data = _load_instructions()
     data[agent_key] = settings
     _save_instructions(data)
+    # Refresh conflict cache — agent settings เปลี่ยน
+    _refresh_conflict_cache()
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/conflicts")
+def api_conflicts_all() -> JSONResponse:
+    """คืน conflict cache ทุก agent — ใช้สำหรับ agent cards, brand page, etc.
+
+    ตรวจครั้งเดียวตอน brand/agent settings เปลี่ยน (ดู _refresh_conflict_cache)
+    ไม่ตรวจใหม่ทุกครั้ง — ลด cost + ทุกหน้าเห็นผลเดียวกัน
+    """
+    return JSONResponse({
+        agent_key: {"conflicts": conflicts, "has_conflict": len(conflicts) > 0}
+        for agent_key, conflicts in _conflict_cache.items()
+    })
+
+
+@app.post("/api/conflicts/check")
+async def api_conflicts_check_live(request: Request) -> JSONResponse:
+    """ตรวจ conflict จาก current (unsaved) settings — live detection.
+
+    ใช้สำหรับ: Quick Brief (per-run), agent settings ก่อน save
+    รับ body: { settings: {...} }
+    คืน { conflicts: [...], has_conflict: bool }
+    """
+    from src.brand_priority import load_brand_priority, detect_conflicts
+    body = await request.json()
+    settings = body.get("settings", body)
+    rules = load_brand_priority(BRAND_DIR)
+    conflicts = detect_conflicts(rules, settings)
+    return JSONResponse({
+        "conflicts": [
+            {
+                "field": c.field,
+                "brand_value": c.brand_value,
+                "user_value": c.user_value,
+                "severity": c.severity,
+            }
+            for c in conflicts
+        ],
+        "has_conflict": len(conflicts) > 0,
+    })
 
 
 
@@ -2236,7 +2310,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
     # platform — จาก dropdown ใน content_creator box (facebook / tiktok)
     platforms = body.get("platforms", ["facebook", "tiktok"])
     # media settings — สร้างอะไร + เมื่อไหร่
-    media_type = body.get("media_type", "prompt")
+    media_type = body.get("media_type", "image")
     media_when = body.get("media_when", "ask")
 
     # Sort agents by order (no auto-add — user เลือกเองว่าจะรันอะไร)
@@ -2930,6 +3004,17 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .preset-card-desc { font-size: 11px; color: #888; }
   .preset-preview { margin-top: 16px; padding: 12px 14px; background: #1e2030; border: 1px solid #2a2d3a; border-radius: 10px; font-size: 12px; color: #aaa; line-height: 1.6; }
   .preset-preview-label { font-size: 11px; color: #7c8aff; margin-bottom: 6px; font-weight: 600; }
+  .brand-conflict-banner { background: #2a2018; border: 1px solid #fbbf24; border-radius: 10px; padding: 12px 14px; }
+  .brand-conflict-title { font-size: 13px; font-weight: 600; color: #fbbf24; margin-bottom: 8px; }
+  .brand-conflict-item { font-size: 12px; color: #e0e0e0; margin: 6px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .brand-conflict-sep { color: #666; font-size: 11px; }
+  .brand-conflict-btn { font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer; border: 1px solid; }
+  .brand-conflict-btn-brand { border-color: #7c8aff; color: #7c8aff; background: transparent; }
+  .brand-conflict-btn-brand:hover { background: rgba(124,138,255,0.1); }
+  .brand-conflict-btn-user { border-color: #4a4d6a; color: #888; background: transparent; cursor: not-allowed; }
+  .brand-conflict-btn-user.enabled { border-color: #fbbf24; color: #fbbf24; cursor: pointer; }
+  .brand-conflict-btn-user.enabled:hover { background: rgba(251,191,36,0.1); }
+  .brand-conflict-hard-note { font-size: 11px; color: #888; font-style: italic; }
   .instr-section { margin-bottom: 16px; }
   .instr-section-label { font-size: 12px; color: #888; margin-bottom: 6px; }
   .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -3141,6 +3226,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <div class="agents-grid" id="agents-grid"></div>
       <label>💬 มีอะไรที่อยากให้ทีมเน้นเป็นพิเศษไหม? (ไม่ใส่ก็ได้)</label>
       <textarea id="quick-brief-input" placeholder="เช่น 'เจาะกลุ่มวัย 25-35 และเน้นขายผ่าน TikTok' — คำสั่งนี้ใช้ครั้งเดียวทิ้ง ไม่เซฟถาวร"></textarea>
+      <div id="quick-brief-conflict-banner" style="display:none;margin-top:8px"></div>
       <div class="brief-actions">
         <button class="global-confirm-btn" id="global-confirm" onclick="onConfirmClick()" disabled>ยืนยัน</button>
         <button class="global-clear-btn" id="global-clear" onclick="clearAll()">ล้าง</button>
@@ -3828,14 +3914,16 @@ function loadBrandFiles() {
     let html = '';
     html += '<div class="brand-file-item" onclick="openVoiceLearnModal()" style="color:#7c8aff;font-weight:600">🎓 ฝึก AI จากตัวอย่าง (Brand Learning)</div>';
     html += '<div style="border-top:1px solid #2a2d3a;margin:8px 0"></div>';
-    html += '<div class="brand-file-item" onclick="editBrandSection(\'voice\')">🎤 โทนเสียง (Voice)</div>';
-    html += '<div class="brand-file-item" onclick="editBrandSection(\'terms\')">📝 คำที่ใช้/ห้ามใช้ (Terms)</div>';
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'voice\')" id="brand-section-voice">🎤 โทนเสียง (Voice)</div>';
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'terms\')" id="brand-section-terms">📝 คำที่ใช้/ห้ามใช้ (Terms)</div>';
     html += '<div class="brand-file-item" onclick="editBrandSection(\'profile\')">📋 ประวัติแบรนด์ (Profile)</div>';
     html += '<div class="brand-file-item" onclick="editBrandSection(\'audience\')">👥 กลุ่มเป้าหมาย (Audience)</div>';
     html += '<div class="brand-file-item" onclick="editBrandSection(\'visual\')">🎨 แนวทางภาพ (Visual)</div>';
     html += '<div style="border-top:1px solid #2a2d3a;margin:8px 0"></div>';
     html += '<div class="brand-file-item" onclick="openAssetLibraryModal()">🗂 Asset Library (วัตถุดิบแบรนด์)</div>';
     el.innerHTML = html;
+    // โหลด conflict icons สำหรับแต่ละ section ใน sidebar
+    loadConflictIcons();
   });
 }
 
@@ -3853,6 +3941,51 @@ function editBrandSection(section) {
   document.getElementById('brand-save-status-modal').textContent = '';
   document.getElementById('brand-save-status-modal').className = 'upload-status';
   overlay.className = 'settings-modal-overlay visible';
+  // โหลด conflict info สำหรับ section นี้
+  _renderBrandSectionConflicts(section);
+}
+
+// Map section → conflict fields ที่เกี่ยวข้อง
+_BRAND_SECTION_CONFLICT_FIELDS = {
+  voice: ['tone', 'language', 'sell_style', 'hook_style'],
+  terms: ['custom_banned_phrase', 'custom_restricted_term'],
+};
+
+function _renderBrandSectionConflicts(section) {
+  const relevantFields = _BRAND_SECTION_CONFLICT_FIELDS[section];
+  if (!relevantFields) return;  // profile, audience, visual ไม่มี conflict
+  fetch('/api/conflicts').then(r => r.json()).then(data => {
+    // หา div ที่จะใส่ conflict info — สร้างถ้ายังไม่มี
+    const body = document.getElementById('brand-modal-body');
+    let conflictDiv = document.getElementById('brand-section-conflicts');
+    if (!conflictDiv) {
+      conflictDiv = document.createElement('div');
+      conflictDiv.id = 'brand-section-conflicts';
+      conflictDiv.style.marginTop = '16px';
+      body.appendChild(conflictDiv);
+    }
+    // รวม conflict ที่เกี่ยวกับ section นี้จากทุก agent
+    let html = '';
+    for (const [agentKey, agentData] of Object.entries(data)) {
+      if (!agentData.has_conflict) continue;
+      const info = AGENT_INFO[agentKey] || { name: agentKey };
+      for (const c of agentData.conflicts) {
+        if (!relevantFields.includes(c.field)) continue;
+        const brandVal = escapeHtml(String(c.brand_value || ''));
+        const userVal = escapeHtml(Array.isArray(c.user_value) ? c.user_value.join(', ') : String(c.user_value || ''));
+        const fieldLabel = { tone: 'Tone', language: 'ภาษา', sell_style: 'การขาย', hook_style: 'Hook', custom_banned_phrase: 'คำต้องห้ามใน Instructions', custom_restricted_term: 'คำจำกัดใน Instructions' }[c.field] || c.field;
+        html += '<div style="font-size:12px;color:#fbbf24;margin:6px 0;padding:8px;background:#2a2018;border:1px solid #fbbf24;border-radius:6px">';
+        html += '⚠ <strong>' + escapeHtml(info.name) + '</strong>: ' + fieldLabel + ' — brand "' + brandVal + '" vs agent "' + userVal + '"';
+        html += ' <button class="brand-conflict-btn brand-conflict-btn-brand" onclick="openAgentSettings(\'' + agentKey + '\')" style="font-size:11px;padding:2px 8px;border-radius:4px;cursor:pointer;border:1px solid #fbbf24;color:#fbbf24;background:transparent">ไปแก้ที่ agent</button>';
+        html += '</div>';
+      }
+    }
+    if (html) {
+      conflictDiv.innerHTML = '<div style="font-size:12px;color:#fbbf24;font-weight:600;margin-bottom:8px">⚠ Agent ที่ขัดกับส่วนนี้ของแบรนด์:</div>' + html;
+    } else {
+      conflictDiv.innerHTML = '';
+    }
+  }).catch(() => {});
 }
 
 function _renderBrandForm(section, data) {
@@ -4025,6 +4158,8 @@ function saveBrandFileModal() {
       status.className = 'upload-status ok';
       status.textContent = 'บันทึกแล้ว ✓';
       setTimeout(closeBrandModal, 800);
+      // Refresh conflict icons — brand rules changed, agents may now conflict
+      loadConflictIcons();
     } else {
       status.className = 'upload-status err';
       status.textContent = data.error || 'เกิดข้อผิดพลาด';
@@ -4971,19 +5106,19 @@ function renderAgentBoxes() {
       html += '<input type="number" class="opt-count-input" id="opt-count" value="1" min="1" max="20" onchange="updateCountChip()">';
       html += '<span class="opt-label">โพสต์</span>';
       html += '</div>';
-      // แถว 2: context (คู่แข่ง + กลยุทธ์)
-      html += '<div class="opt-row">';
-      html += '<span class="opt-row-label">ข้อมูล</span>';
-      html += '<span class="opt-chip active green" id="opt-competitor" onclick="toggleOptChip(this)">📊 คู่แข่ง</span>';
-      html += '<span class="opt-chip active green" id="opt-campaign" onclick="toggleOptChip(this)">📋 กลยุทธ์</span>';
-      html += '</div>';
+      // แถว 2: context (คู่แข่ง + กลยุทธ์) — ซ่อนชั่วคราว ยังใช้งานไม่ได้จริง
+      // (chips แค่อ่าน cache แต่ไม่ trigger upstream agent + campaign_strategy ไม่เขียน cache)
+      // html += '<div class="opt-row">';
+      // html += '<span class="opt-row-label">ข้อมูล</span>';
+      // html += '<span class="opt-chip active green" id="opt-competitor" onclick="toggleOptChip(this)">📊 คู่แข่ง</span>';
+      // html += '<span class="opt-chip active green" id="opt-campaign" onclick="toggleOptChip(this)">📋 กลยุทธ์</span>';
+      // html += '</div>';
       // แถว 3: สื่อ — เลือกว่าสร้างอะไร + เมื่อไหร่
       html += '<div class="opt-row">';
       html += '<span class="opt-row-label">สื่อ</span>';
       html += '<span class="opt-label">สร้าง:</span>';
       html += '<select id="opt-media-type" onchange="onMediaSettingsChange()">';
-      html += '<option value="prompt" selected>เฉพาะ prompt (ไม่สร้างไฟล์)</option>';
-      html += '<option value="image">🎨 รูป</option>';
+      html += '<option value="image" selected>🎨 รูป</option>';
       html += '<option value="video">🎬 วิดีโอ</option>';
       html += '<option value="both">🎨 รูป + 🎬 วิดีโอ</option>';
       html += '</select>';
@@ -5001,6 +5136,7 @@ function renderAgentBoxes() {
     html += '<div class="agent-actions">';
     html += '<button class="clear-btn" onclick="clearAgent(\'' + key + '\')">ล้าง</button>';
     html += '<button class="agent-settings-btn" onclick="openAgentSettings(\'' + key + '\')">⚙ ตั้งค่า</button>';
+    html += '<span id="conflict-icon-' + key + '" style="display:none;color:#fbbf24;font-size:14px;cursor:pointer" onclick="openAgentSettings(\'' + key + '\')" title="การตั้งค่านี้ขัดกับกฎแบรนด์">⚠</span>';
     html += '</div>';
     html += '</div>';
   }
@@ -5011,6 +5147,59 @@ function renderAgentBoxes() {
   }
   // โหลด auto media config มาอัปเดต chips
   loadMediaConfigToChips();
+  // โหลด conflict icons สำหรับทุก agent
+  loadConflictIcons();
+}
+
+function loadConflictIcons() {
+  // ดึงจาก central cache — ตรวจครั้งเดียวตอน save, ไม่ตรวจใหม่ทุกครั้ง
+  fetch('/api/conflicts').then(r => r.json()).then(data => {
+    // 1. Agent cards — ⚠ icon ข้างปุ่มตั้งค่า
+    for (const key of AGENT_ORDER) {
+      const icon = document.getElementById('conflict-icon-' + key);
+      if (!icon) continue;
+      const agentData = data[key];
+      if (agentData && agentData.has_conflict) {
+        icon.style.display = 'inline';
+        const count = agentData.conflicts.length;
+        icon.title = 'การตั้งค่านี้ขัดกับกฎแบรนด์ (' + count + ' จุด) — คลิกเพื่อดู';
+      } else {
+        icon.style.display = 'none';
+      }
+    }
+    // 2. Brand sidebar — ⚠ icon ข้างชื่อ section ที่มี conflict
+    _updateBrandSidebarConflicts(data);
+  }).catch(() => {});
+}
+
+function _updateBrandSidebarConflicts(conflictsData) {
+  // ตรวจว่า section ไหนมี conflict → ใส่ ⚠ icon ข้างชื่อใน sidebar
+  const sectionFields = {
+    voice: ['tone', 'language', 'sell_style', 'hook_style'],
+    terms: ['custom_banned_phrase', 'custom_restricted_term'],
+  };
+  for (const [section, fields] of Object.entries(sectionFields)) {
+    const el = document.getElementById('brand-section-' + section);
+    if (!el) continue;
+    let count = 0;
+    for (const agentData of Object.values(conflictsData)) {
+      if (!agentData.has_conflict) continue;
+      for (const c of agentData.conflicts) {
+        if (fields.includes(c.field)) count++;
+      }
+    }
+    // เก็บ label เดิม (ไม่มี ⚠) ไว้ — ใช้ data attribute
+    if (!el.dataset.label) el.dataset.label = el.textContent.replace(/^⚠\s*/, '');
+    if (count > 0) {
+      el.textContent = '⚠ ' + el.dataset.label;
+      el.style.color = '#fbbf24';
+      el.title = count + ' จุดขัดแย้งกับ agent — คลิกเพื่อดูรายละเอียด';
+    } else {
+      el.textContent = el.dataset.label;
+      el.style.color = '';
+      el.title = '';
+    }
+  }
 }
 
 function toggleOptChip(el) {
@@ -5045,7 +5234,7 @@ function getContentCreatorOptions() {
   } else {
     platforms = [platformVal];
   }
-  const mediaType = document.getElementById('opt-media-type')?.value || 'prompt';
+  const mediaType = document.getElementById('opt-media-type')?.value || 'image';
   const mediaWhen = document.getElementById('opt-media-when')?.value || 'ask';
   return {
     platforms: platforms,
@@ -5667,7 +5856,7 @@ async function runPlan(plan, planIdx, signal) {
     const quickBrief = document.getElementById('quick-brief-input').value.trim();
     // chips ของ content_creator มีผลเฉพาะ plan ที่มี content_creator
     const hasContentCreator = agentKeys.includes('content_creator');
-    const opts = hasContentCreator ? getContentCreatorOptions() : { platforms: ['facebook','tiktok'], use_competitor: true, use_campaign: true, content_count: 1, media_type: 'prompt', media_when: 'ask', auto_image: false, auto_video: false };
+    const opts = hasContentCreator ? getContentCreatorOptions() : { platforms: ['facebook','tiktok'], use_competitor: true, use_campaign: true, content_count: 1, media_type: 'image', media_when: 'ask', auto_image: false, auto_video: false };
     const res = await fetch('/api/run_agents', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -6784,8 +6973,111 @@ function openAgentSettings(agentKey) {
     _instrSettings = data.settings || {};
     renderPresets();
     document.getElementById('instr-custom').value = _instrSettings.custom || '';
+    // Live conflict check on open (from saved settings)
+    checkConflictsLive();
+    // Attach live listeners — ตรวจทุกครั้งที่ user พิมพ์/เปลี่ยน
+    const ta = document.getElementById('instr-custom');
+    if (ta && !ta._conflictListener) {
+      ta._conflictListener = true;
+      ta.addEventListener('input', debounceConflicts);
+    }
   });
   overlay.className = 'settings-modal-overlay visible';
+}
+
+let _conflictTimer = null;
+function debounceConflicts() {
+  // Debounce — รอ 300ms หลัง user หยุดพิมพ์ แล้วค่อยตรวจ
+  clearTimeout(_conflictTimer);
+  _conflictTimer = setTimeout(checkConflictsLive, 300);
+}
+
+function checkConflictsLive() {
+  // รวม current form state + _instrSettings แล้วส่งไปตรวจ
+  const current = Object.assign({}, _instrSettings);
+  const ta = document.getElementById('instr-custom');
+  if (ta) current.custom = ta.value;
+  fetch('/api/conflicts/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: current }),
+  }).then(r => r.json()).then(renderConflictBanner).catch(() => {
+    const b = document.getElementById('brand-conflict-banner');
+    if (b) b.style.display = 'none';
+  });
+}
+
+function renderConflictBanner(data) {
+  const banner = document.getElementById('brand-conflict-banner');
+  if (!banner) return;
+  if (!data || !data.has_conflict) { banner.style.display = 'none'; return; }
+  const conflicts = data.conflicts || [];
+  let html = '<div class="brand-conflict-banner">';
+  html += '<div class="brand-conflict-title">⚠️ การตั้งค่าของคุณขัดกับกฎแบรนด์</div>';
+  for (const c of conflicts) {
+    const isHard = c.severity === 'hard';
+    html += '<div class="brand-conflict-item">';
+    const brandVal = escapeHtml(String(c.brand_value || ''));
+    const userVal = escapeHtml(Array.isArray(c.user_value) ? c.user_value.join(', ') : String(c.user_value || ''));
+    if (c.field === 'tone') {
+      html += '<span>Tone: brand "' + brandVal + '" vs คุณ "' + userVal + '"</span>';
+      html += '<button class="brand-conflict-btn brand-conflict-btn-brand" onclick="resolveConflictUseBrand(\'tone\')">ใช้ brand</button>';
+      html += '<button class="brand-conflict-btn brand-conflict-btn-user enabled" onclick="resolveConflictKeepUser()">ใช้ของฉัน</button>';
+    } else if (c.field === 'language') {
+      html += '<span>ภาษา: brand "' + brandVal + '" vs คุณ "' + userVal + '"</span>';
+      html += '<button class="brand-conflict-btn brand-conflict-btn-brand" onclick="resolveConflictUseBrand(\'language\')">ใช้ brand</button>';
+      html += '<button class="brand-conflict-btn brand-conflict-btn-user enabled" onclick="resolveConflictKeepUser()">ใช้ของฉัน</button>';
+    } else if (c.field === 'sell_style') {
+      html += '<span>การขาย: brand "' + brandVal + '" vs คุณ "' + userVal + '"</span>';
+      html += '<button class="brand-conflict-btn brand-conflict-btn-brand" onclick="resolveConflictUseBrand(\'sell_style\')">ใช้ brand</button>';
+      html += '<button class="brand-conflict-btn brand-conflict-btn-user enabled" onclick="resolveConflictKeepUser()">ใช้ของฉัน</button>';
+    } else if (c.field === 'hook_style') {
+      html += '<span>Hook: brand "' + brandVal + '" vs คุณ "' + userVal + '"</span>';
+      html += '<button class="brand-conflict-btn brand-conflict-btn-brand" onclick="resolveConflictUseBrand(\'hook_style\')">ใช้ brand</button>';
+      html += '<button class="brand-conflict-btn brand-conflict-btn-user enabled" onclick="resolveConflictKeepUser()">ใช้ของฉัน</button>';
+    } else if (c.field === 'custom_banned_phrase' || c.field === 'custom_restricted_term') {
+      html += '<span>คำต้องห้าม "' + brandVal + '" อยู่ใน Instructions ของคุณ</span>';
+      html += '<span class="brand-conflict-hard-note">(brand ชนะ — ไม่สามารถ override)</span>';
+      html += '<button class="brand-conflict-btn brand-conflict-btn-brand" onclick="resolveConflictRemoveFromCustom(\'' + brandVal.replace(/'/g, "\\'") + '\')">ลบคำออกจาก Instructions</button>';
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  banner.innerHTML = html;
+  banner.style.display = 'block';
+}
+
+function resolveConflictUseBrand(field) {
+  // ลบ field ที่ conflict ออกจาก instructions → ใช้ brand default
+  delete _instrSettings[field];
+  renderPresets();
+  updatePresetPreview();
+  // Persist to backend without closing modal
+  _instrSettings.custom = document.getElementById('instr-custom').value;
+  fetch('/api/agent_instructions/' + _settingsAgentKey, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: _instrSettings }),
+  }).then(r => r.json()).then(data => {
+    if (data.error) { alert(data.error); return; }
+    checkConflictsLive();
+  });
+}
+
+function resolveConflictKeepUser() {
+  // เก็บค่า user ไว้ (soft — อนุญาต) แค่ซ่อน banner
+  document.getElementById('brand-conflict-banner').style.display = 'none';
+}
+
+function resolveConflictRemoveFromCustom(phrase) {
+  // ลบคำต้องห้ามออกจาก custom instruction — live, ไม่ต้อง save ก่อน
+  const ta = document.getElementById('instr-custom');
+  let text = ta.value;
+  text = text.split(phrase).join('');
+  ta.value = text;
+  _instrSettings.custom = text;
+  // Re-check conflicts immediately (live)
+  checkConflictsLive();
 }
 
 function renderPresets() {
@@ -6835,6 +7127,8 @@ function selectPreset(key) {
     }
     renderPresets();
     updatePresetPreview();
+    // Live conflict check after preset change
+    checkConflictsLive();
   });
 }
 
@@ -6897,6 +7191,8 @@ function saveAgentSettings() {
     }
     if (data.ok) {
       closeAgentSettings();
+      // Refresh conflict icons on agent cards
+      loadConflictIcons();
     }
   });
 }
@@ -6904,6 +7200,67 @@ function saveAgentSettings() {
 renderAgentBoxes();
 loadFolderList();
 loadCredits();
+
+// Quick Brief live conflict detection
+(function() {
+  const ta = document.getElementById('quick-brief-input');
+  if (!ta) return;
+  let timer = null;
+  ta.addEventListener('input', function() {
+    clearTimeout(timer);
+    timer = setTimeout(checkQuickBriefConflicts, 300);
+  });
+})();
+
+function checkQuickBriefConflicts() {
+  const ta = document.getElementById('quick-brief-input');
+  if (!ta) return;
+  const text = ta.value.trim();
+  const banner = document.getElementById('quick-brief-conflict-banner');
+  if (!banner) return;
+  if (!text) { banner.style.display = 'none'; return; }
+  // ตรวจเฉพาะ hard rules (banned/restricted ใน text) — Quick Brief เป็น per-run soft override
+  fetch('/api/conflicts/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: { custom: text } }),
+  }).then(r => r.json()).then(data => {
+    if (!data || !data.has_conflict) { banner.style.display = 'none'; return; }
+    let html = '<div class="brand-conflict-banner" style="padding:8px 12px">';
+    html += '<div class="brand-conflict-title" style="font-size:12px">⚠️ Quick Brief มีคำที่ขัดกับกฎแบรนด์</div>';
+    for (const c of data.conflicts) {
+      const phrase = escapeHtml(String(c.brand_value || ''));
+      html += '<div class="brand-conflict-item" style="font-size:11px;flex-direction:column;align-items:flex-start;gap:4px">';
+      html += '<span>คำต้องห้าม "' + phrase + '" — ระบบจะไม่ใช้คำนี้</span>';
+      html += '<span class="brand-conflict-hard-note">ถ้าต้องการใช้จริง ต้องไปลบออกจากการตั้งค่าแบรนด์</span>';
+      html += '<div style="display:flex;gap:6px">';
+      html += '<button class="brand-conflict-btn brand-conflict-btn-brand" onclick="removePhraseFromQuickBrief(\'' + phrase.replace(/'/g, "\\'") + '\')">ลบคำออกจาก Quick Brief</button>';
+      html += '<button class="brand-conflict-btn brand-conflict-btn-brand" onclick="openBrandSettingsFromConflict()">ไปที่ตั้งค่าแบรนด์</button>';
+      html += '</div>';
+      html += '</div>';
+    }
+    html += '</div>';
+    banner.innerHTML = html;
+    banner.style.display = 'block';
+  }).catch(() => { banner.style.display = 'none'; });
+}
+
+function openBrandSettingsFromConflict() {
+  // เปิดหน้าแบรนด์ → ไปที่ section terms (คำต้องห้าม)
+  if (typeof loadBrandFiles === 'function') {
+    loadBrandFiles();
+    // เลือก tab brand ใน sidebar
+    const tabs = document.querySelectorAll('.sidebar-tab');
+    tabs.forEach(t => { if (t.textContent.includes('แบรนด์') || t.dataset.tab === 'brand') t.click(); });
+  }
+}
+
+function removePhraseFromQuickBrief(phrase) {
+  const ta = document.getElementById('quick-brief-input');
+  if (!ta) return;
+  ta.value = ta.value.split(phrase).join('');
+  checkQuickBriefConflicts();
+}
 // รีเฟรชเครดิตทุก 60 วินาที (auto-update โดยไม่ต้องรีเฟรชหน้า)
 setInterval(loadCredits, 60000);
 
@@ -6959,6 +7316,7 @@ function loadCredits() {
       <button class="settings-reset" onclick="resetAgentSettings()" style="flex:none">↺ รีเซ็ต</button>
     </div>
     <div style="margin-top:16px">
+      <div id="brand-conflict-banner" style="display:none;margin-bottom:14px"></div>
       <div class="preset-grid" id="preset-grid"></div>
       <div class="preset-preview" id="preset-preview" style="display:none">
         <div class="preset-preview-label">📋 Agent จะทำงานแบบนี้:</div>
@@ -7083,5 +7441,10 @@ if __name__ == "__main__":
     _cfg = load_config()
     _main_sys_cfg = get_section(_cfg, "system", {"web_port": 8778})
     port = int(os.environ.get("VIEWER_PORT", str(_main_sys_cfg.get("web_port", 8778))))
+    # Initialize conflict cache on startup
+    try:
+        _refresh_conflict_cache()
+    except Exception:
+        pass  # brand files might not exist yet
     print(f"\n  MKTApp Viewer → http://localhost:{port}\n")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")

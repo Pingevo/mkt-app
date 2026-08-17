@@ -27,6 +27,7 @@ from .agents import (
     ProductSpecAgent,
 )
 from .brand_loader import load_brand_rules, load_brand_reference, load_brand_visual
+from .brand_priority import load_brand_priority
 from .config_loader import get_agent_config, load_config
 from .data_loader import detect_data_files, get_agent_data
 from .llm_client import LLMClient
@@ -73,6 +74,7 @@ class Orchestrator:
         self.brand_context = load_brand_rules(brand_dir)
         self.brand_reference = load_brand_reference(brand_dir)
         self.brand_visual = load_brand_visual(brand_dir)
+        self.brand_rules = load_brand_priority(brand_dir)
         self.product_images = product_images or []
         self.product_id = product_id
         self.results: dict[str, str] = {}
@@ -98,7 +100,8 @@ class Orchestrator:
         cfg = get_agent_config(self.config, agent_name)
         instructions = self._load_agent_instructions(agent_name)
         return agent_cls(cfg, llm, brand_context=self.brand_context,
-                         brand_reference=self.brand_reference, instructions=instructions)
+                         brand_reference=self.brand_reference, instructions=instructions,
+                         brand_rules=self.brand_rules)
 
     def _load_agent_instructions(self, agent_name: str) -> dict:
         """Load user-set instructions for an agent from config/agent_instructions.json."""
