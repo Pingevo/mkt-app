@@ -123,6 +123,7 @@ def record_entry(
     config: dict[str, Any] | None = None,
     embedding: list[float] | None = None,
     pillar: str = "",
+    output_file: str = "",
 ) -> None:
     """Record that a content piece was generated.
 
@@ -134,6 +135,7 @@ def record_entry(
         config: content_history config section
         embedding: embedding vector สำหรับ dedup (optional — ถ้าไม่ส่งจะ generate ถ้า dedup_enabled)
         pillar: Content Pillar ที่ใช้ (optional — สำหรับหมุนเวียน)
+        output_file: path ของไฟล์ output ที่สร้าง entry นี้ (optional — สำหรับลบ history ตอนลบ output)
     """
     cfg = config or _DEFAULTS
     if isinstance(product_ids, str):
@@ -156,6 +158,8 @@ def record_entry(
     }
     if pillar:
         entry["pillar"] = pillar
+    if output_file:
+        entry["output_file"] = output_file
     entries.append(entry)
 
     # จำกัดจำนวน entries สูงสุด (ป้องกันไฟล์ใหญ่เกิน)
@@ -164,6 +168,42 @@ def record_entry(
         entries = entries[-max_entries:]
     history["entries"] = entries
     save_history(project_root, history)
+
+
+def delete_entry_by_output_file(project_root: Path, output_file: str) -> int:
+    """ลบ history entries ที่เกี่ยวข้องกับไฟล์ output ที่ระบุ.
+
+    ใช้ตอน user ลบ output — ลบ history ด้วยเพื่อไม่ให้ dedup บล็อก
+    คอนเทนต์ที่ user ไม่ได้ใช้แล้ว
+
+    Returns: จำนวน entries ที่ถูกลบ
+    """
+    history = load_history(project_root)
+    entries = history.get("entries", [])
+    before = len(entries)
+    kept = [e for e in entries if e.get("output_file") != output_file]
+    removed = before - len(kept)
+    if removed > 0:
+        history["entries"] = kept
+        save_history(project_root, history)
+    return removed
+
+
+def update_last_entry_output_file(project_root: Path, output_file: str) -> bool:
+    """อัปเดต output_file ของ entry ล่าสุด.
+
+    ใช้ตอน auto mode — orchestrator บันทึก history ก่อน แล้ว web_viewer เซฟไฟล์ทีหลัง
+    เราอัปเดต entry ล่าสุดให้มี output_file หลังจากเซฟไฟล์แล้ว
+
+    Returns: True ถ้าอัปเดตสำเร็จ
+    """
+    history = load_history(project_root)
+    entries = history.get("entries", [])
+    if not entries:
+        return False
+    entries[-1]["output_file"] = output_file
+    save_history(project_root, history)
+    return True
 
 
 def format_history_for_prompt(

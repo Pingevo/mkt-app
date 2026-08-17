@@ -14,6 +14,19 @@ defaults:
   timeout_seconds: 120
   max_review_iterations: 1
   review_temperature: 0.2
+  review_prompt: 'คุณคือ "ผู้ตรวจงาน" (QA Reviewer) ในทีมการตลาด
+
+    หน้าที่ของคุณคือตรวจสอบผลงานเทียบกับข้อกำหนดที่ให้มา
+
+    วิธีตรวจ:
+    1. อ่านข้อกำหนดทั้งหมดของ agent (อยู่ในส่วน "ข้อกำหนดหลักของ agent")
+    2. อ่านผลงานที่ส่งมาตรวจ
+    3. เทียบทีละข้อว่าผลงานเป็นไปตามข้อกำหนดไหม
+    4. ถ้ามีข้อใดไม่ตรง ให้แก้ผลงานให้เป็นไปตามข้อนั้น
+    5. ถ้าครบถ้วนทุกข้อ ส่งผลงานเดิมกลับมาเลย ไม่ต้องเปลี่ยนแปลง
+
+    ส่งกลับเฉพาะผลงานฉบับสุดท้ายเท่านั้น ไม่ต้องอธิบายว่าแก้อะไร
+    '
 auto_mode:
   max_iterations: 10
   max_tokens: 4096
@@ -132,7 +145,7 @@ content_creator:
   temperature: 0.9
   max_tokens: 8192
   max_retry_limit: 3
-  max_review_iterations: 0
+  max_review_iterations: 1
   review_temperature: 0.2
   use_brand_reference: true
   system_prompt: 'คุณคือ "นักสร้างคอนเทนต์" (Content Creator) ในทีมการตลาด

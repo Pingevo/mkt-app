@@ -997,6 +997,89 @@ async def api_delete_folder(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+_MEDIA_SUFFIXES = ('.png', '.jpg', '.jpeg', '.webp', '.mp4', '.mov', '.webm')
+_SYSTEM_FILES = frozenset({'_session_meta.json', '_media_status.json', '_media_retry_log.json', '.DS_Store'})
+
+
+@app.delete("/api/output_file")
+async def api_delete_output_file(request: Request) -> JSONResponse:
+    """ลบไฟล์ output + history entry ที่เกี่ยวข้อง.
+
+    ลบไฟล์ .md + .json + รูป/วิดีโอที่เกี่ยวข้องในโฟลเดอร์เดียวกัน
+    ลบ history entries ที่มี output_file ตรงกับไฟล์ที่ลบ
+    ถ้าโฟลเดอร์ output ว่างแล้ว → ลบโฟลเดอร์ด้วย
+
+    body: { file: "path/to/04_content_creator_*.md" }
+    """
+    import shutil
+    body = await request.json()
+    filepath = body.get("file", "")
+    if not filepath:
+        return JSONResponse({"error": "missing file"}, status_code=400)
+
+    p = Path(filepath)
+    if not p.exists():
+        # ลอง relative to OUTPUT_DIR
+        p = OUTPUT_DIR / filepath
+    if not p.exists():
+        return JSONResponse({"error": "ไม่พบไฟล์"}, status_code=404)
+
+    # ตรวจว่าอยู่ใน OUTPUT_DIR จริง (security — ห้ามลบนอก output/)
+    try:
+        p.resolve().relative_to(OUTPUT_DIR.resolve())
+    except ValueError:
+        return JSONResponse({"error": "path ไม่ถูกต้อง"}, status_code=400)
+
+    output_dir = p.parent
+    base_name = p.stem  # ไม่มี .md/.json
+
+    # ลบไฟล์หลัก (.md + .json ที่ชื่อเดียวกัน)
+    deleted_files = []
+    for suffix in [".md", ".json"]:
+        f = output_dir / f"{base_name}{suffix}"
+        if f.exists():
+            f.unlink()
+            deleted_files.append(str(f))
+
+    # ลบรูป/วิดีโอที่เกี่ยวข้อง
+    # ถ้าเป็น multi-post (มี "โพสต์ที่X" ในชื่อ) → ลบเฉพาะรูปของโพสต์นั้น
+    # ถ้าเป็น single-post → ลบรูปทั้งหมดในโฟลเดอร์ที่ไม่ได้เกี่ยวกับโพสต์อื่น
+    import re
+    post_match = re.search(r'โพสต์ที่(\d+)', base_name)
+    post_num = post_match.group(1) if post_match else None
+    for f in output_dir.iterdir():
+        if not f.is_file() or f.suffix not in _MEDIA_SUFFIXES:
+            continue
+        if post_num:
+            # multi-post — ลบเฉพาะรูปของโพสต์นี้
+            if f'โพสต์{post_num}' in f.name or f.name in (f'image_{post_num}.png', f'video_{post_num}.mp4'):
+                f.unlink()
+                deleted_files.append(str(f))
+        else:
+            # single-post — ลบรูปที่ไม่มี "โพสต์" ในชื่อ
+            if 'โพสต์' not in f.name:
+                f.unlink()
+                deleted_files.append(str(f))
+
+    # ลบ history entries ที่เกี่ยวข้อง (history เก็บ .md path ซึ่งอยู่ใน deleted_files แล้ว)
+    removed_entries = 0
+    for deleted_path in deleted_files:
+        removed = content_history.delete_entry_by_output_file(PROJECT_ROOT, deleted_path)
+        removed_entries += removed
+
+    # ถ้าโฟลเดอร์ output ว่างแล้ว (เหลือแค่ไฟล์ระบบ) → ลบโฟลเดอร์
+    remaining = [f for f in output_dir.iterdir()
+                 if f.is_file() and not f.name.startswith('.') and f.name not in _SYSTEM_FILES]
+    if not remaining:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+    return JSONResponse({
+        "ok": True,
+        "deleted_files": len(deleted_files),
+        "removed_history_entries": removed_entries,
+    })
+
+
 @app.post("/api/rename_folder")
 async def api_rename_folder(request: Request) -> JSONResponse:
     """Rename a product folder."""
@@ -1943,6 +2026,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
 
             # ดึงมุมมอง + platform + caption จาก structured output (JSON)
             # เก็บไว้บันทึกลง content_history หลังทำเสร็จ
+            _post_start_idx = len(completed_posts)
             try:
                 import json as _json_hist
                 _parsed = _json_hist.loads(result)
@@ -1980,6 +2064,9 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                     saved = orch.save_result("content_creator", str(output_dir))
                     saved_path = str(saved.get("content_creator", ""))
                 results.append((result, saved_path))
+                # เก็บ saved_path ใน completed_posts เพื่อส่งให้ record_entry
+                for _p in completed_posts[_post_start_idx:]:
+                    _p["output_file"] = saved_path or ""
             else:
                 results.append((result, None))
 
@@ -2097,6 +2184,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                     concept=_post.get("concept", ""),
                     platform=_post.get("platform", ""),
                     caption_summary=_post.get("caption", ""),
+                    output_file=_post.get("output_file", ""),
                 )
 
         return results
@@ -2419,6 +2507,9 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     md_filepath = output_dir / f"{fname_base}.md"
                     md_filepath.write_text(markdown, encoding="utf-8")
                     saved_path = str(md_filepath)
+
+                    # อัปเดต history entry ล่าสุดให้มี output_file (orchestrator บันทึกก่อนเซฟไฟล์)
+                    content_history.update_last_entry_output_file(PROJECT_ROOT, saved_path)
 
                     all_results.append((content, saved_path))
                     _ll = int(_sys_cfg().get("display_preview_long", 800))
@@ -5897,6 +5988,42 @@ function closeResultOverlay(event) {
   document.getElementById('result-overlay').classList.remove('visible');
 }
 
+function deleteCurrentResult() {
+  if (_resultNavFiles.length === 0) return;
+  const filepath = _resultNavFiles[_resultNavIdx];
+  if (!filepath) return;
+  if (!confirm('ลบไฟล์นี้และประวัติที่เกี่ยวข้อง?\n' + filepath.split('/').pop())) return;
+  fetch('/api/output_file', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file: filepath }),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      // ลบไฟล์นี้ออกจาก nav list
+      _resultNavFiles.splice(_resultNavIdx, 1);
+      if (_resultNavFiles.length === 0) {
+        closeResultOverlay();
+      } else {
+        if (_resultNavIdx >= _resultNavFiles.length) _resultNavIdx = _resultNavFiles.length - 1;
+        _viewResultInternal(_resultNavFiles[_resultNavIdx]);
+        // อัปเดต nav bar
+        const navBar = document.getElementById('result-nav-bar');
+        const navInfo = document.getElementById('result-nav-info');
+        if (_resultNavFiles.length > 1) {
+          navBar.style.display = 'flex';
+          navInfo.textContent = 'โพสต์ ' + (_resultNavIdx + 1) + '/' + _resultNavFiles.length;
+        } else {
+          navBar.style.display = 'none';
+        }
+      }
+      loadSessions();
+      alert('ลบเรียบร้อย — ไฟล์ ' + (data.deleted_files || 0) + ' ไฟล์, ประวัติ ' + (data.removed_history_entries || 0) + ' entries');
+    } else {
+      alert('เกิดข้อผิดพลาด: ' + (data.error || 'ไม่ทราบ'));
+    }
+  }).catch(e => alert('เกิดข้อผิดพลาด: ' + e));
+}
+
 function backToAgents() {
   closeResultOverlay();
 }
@@ -6934,7 +7061,10 @@ function loadCredits() {
   <div class="result-modal" onclick="event.stopPropagation()">
     <div class="result-modal-header">
       <span class="result-modal-title" id="result-modal-title">ผลลัพธ์</span>
-      <button class="result-modal-close" onclick="closeResultOverlay()">✕ ปิด</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button id="result-delete-btn" onclick="deleteCurrentResult()" style="background:#f44336;color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:600">ลบผลลัพธ์</button>
+        <button class="result-modal-close" onclick="closeResultOverlay()">✕ ปิด</button>
+      </div>
     </div>
     <div id="result-nav-bar" style="display:none;align-items:center;justify-content:space-between;padding:8px 0 12px 0;border-bottom:1px solid #2a2d3a;margin-bottom:12px">
       <button id="result-nav-prev" onclick="navResult(-1)" style="background:none;border:1px solid #2a2d3a;color:#e0e0e0;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:13px">‹ ก่อนหน้า</button>
