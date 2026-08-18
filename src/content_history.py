@@ -28,10 +28,15 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+# Global lock — กัน race condition เมื่อหลาย flow รันพร้อมกัน
+# ทั้ง read (get_recent_entries) และ write (record_entry) ต้องผ่าน lock นี้
+_history_lock = threading.RLock()
 
 try:
     from .ai_usage import log_ai_usage, log_local_usage, make_entry
@@ -58,23 +63,25 @@ def _history_path(project_root: Path) -> Path:
 
 def load_history(project_root: Path) -> dict:
     """Load global content history. Returns {"entries": [...]}."""
-    path = _history_path(project_root)
-    if not path.exists():
-        return {"entries": []}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if "entries" not in data:
-            data = {"entries": []}
-        return data
-    except (json.JSONDecodeError, OSError):
-        return {"entries": []}
+    with _history_lock:
+        path = _history_path(project_root)
+        if not path.exists():
+            return {"entries": []}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if "entries" not in data:
+                data = {"entries": []}
+            return data
+        except (json.JSONDecodeError, OSError):
+            return {"entries": []}
 
 
 def save_history(project_root: Path, history: dict) -> None:
     """Save global content history."""
-    path = _history_path(project_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    with _history_lock:
+        path = _history_path(project_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def get_recent_entries(
@@ -124,7 +131,7 @@ def record_entry(
     embedding: list[float] | None = None,
     pillar: str = "",
     output_file: str = "",
-) -> None:
+) -> bool:
     """Record that a content piece was generated.
 
     Args:
@@ -136,38 +143,69 @@ def record_entry(
         embedding: embedding vector สำหรับ dedup (optional — ถ้าไม่ส่งจะ generate ถ้า dedup_enabled)
         pillar: Content Pillar ที่ใช้ (optional — สำหรับหมุนเวียน)
         output_file: path ของไฟล์ output ที่สร้าง entry นี้ (optional — สำหรับลบ history ตอนลบ output)
+
+    Returns:
+        True ถ้าบันทึกสำเร็จ, False ถ้าเป็นซ้ำ (race condition กับ flow อื่นที่รันพร้อมกัน)
+
+    Thread-safety: ใช้ _history_lock ครอบทั้ง read + check + write
+    เพื่อกัน race condition เมื่อหลาย flow รันพร้อมกัน —
+    flow ที่บันทึกทีหลังจะ re-check ซ้ำกับ entry ที่ flow แรกเพิ่งบันทึก
     """
     cfg = config or _DEFAULTS
     if isinstance(product_ids, str):
         product_ids = [product_ids]
 
-    history = load_history(project_root)
-    entries = history.get("entries", [])
-
     # Generate embedding ถ้า dedup เปิดอยู่และไม่ได้ส่งมา
     if embedding is None and cfg.get("dedup_enabled", True) and caption_summary:
         embedding = _generate_embedding(caption_summary, cfg)
 
-    entry = {
-        "product_ids": product_ids,
-        "concept": concept,
-        "platform": platform,
-        "caption_summary": caption_summary[:cfg.get("caption_summary_length", 500)],
-        "embedding": embedding,
-        "timestamp": datetime.now().isoformat(),
-    }
-    if pillar:
-        entry["pillar"] = pillar
-    if output_file:
-        entry["output_file"] = output_file
-    entries.append(entry)
+    # Atomic check-and-record ภายใต้ lock — กัน race condition ระหว่าง flow ขนาน
+    with _history_lock:
+        history = load_history(project_root)
+        entries = history.get("entries", [])
 
-    # จำกัดจำนวน entries สูงสุด (ป้องกันไฟล์ใหญ่เกิน)
-    max_entries = cfg.get("max_entries", 200)
-    if len(entries) > max_entries:
-        entries = entries[-max_entries:]
-    history["entries"] = entries
-    save_history(project_root, history)
+        # Re-check duplicate ตอนบันทึก — กันกรณี flow อื่นบันทึกก่อนเรา
+        # (ตอนเรา generate อยู่ flow นั้นอาจเพิ่งบันทึก entry ใหม่เข้าไป)
+        if cfg.get("dedup_enabled", True) and embedding and caption_summary:
+            window_days = cfg.get("dedup_window_days", 30)
+            threshold = cfg.get("dedup_similarity_threshold", 0.85)
+            cutoff = datetime.now() - timedelta(days=window_days)
+            for entry in entries:
+                try:
+                    entry_time = datetime.fromisoformat(entry.get("timestamp", ""))
+                    if entry_time < cutoff:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+                entry_embedding = entry.get("embedding")
+                if not entry_embedding:
+                    continue
+                sim = _cosine_similarity(embedding, entry_embedding)
+                if sim >= threshold:
+                    # ซ้ำกับ entry ที่ flow อื่นเพิ่งบันทึก → ไม่บันทึกซ้ำ
+                    return False
+
+        entry = {
+            "product_ids": product_ids,
+            "concept": concept,
+            "platform": platform,
+            "caption_summary": caption_summary[:cfg.get("caption_summary_length", 500)],
+            "embedding": embedding,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if pillar:
+            entry["pillar"] = pillar
+        if output_file:
+            entry["output_file"] = output_file
+        entries.append(entry)
+
+        # จำกัดจำนวน entries สูงสุด (ป้องกันไฟล์ใหญ่เกิน)
+        max_entries = cfg.get("max_entries", 200)
+        if len(entries) > max_entries:
+            entries = entries[-max_entries:]
+        history["entries"] = entries
+        save_history(project_root, history)
+        return True
 
 
 def delete_entry_by_output_file(project_root: Path, output_file: str) -> int:

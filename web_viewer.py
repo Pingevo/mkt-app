@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse, Response
 import uvicorn
 
 from src.orchestrator import Orchestrator
@@ -102,38 +102,46 @@ _orch: Orchestrator | None = None  # only used by single-agent endpoint
 _cancel_requested: bool = False
 _active_llms: list[Any] = []  # track all active LLM clients for cancel
 
+# Lock สำหรับ serialize content_creator เมื่อหลาย flow รันขนานกัน
+# ป้องกันการสร้างคอนเทนต์ซ้ำกัน — flow ที่มาทีหลังจะเห็น history ของ flow ก่อนหน้า
+_content_creator_lock = threading.Lock()
+
 AGENT_INFO = {
     "product_spec": {
         "name": "นักวิเคราะห์สินค้า",
         "desc": "สร้างสเปคสินค้าจากข้อมูลดิบ (txt, pdf, xlsx)",
         "icon": "📋",
         "accept": "raw",
+        "flow_reason": "อ่านข้อมูลดิบแล้วสรุปเป็นสเปคสินค้า ซึ่งเป็นฐานให้ agent อื่นใช้ต่อ",
     },
     "competitor_analysis": {
         "name": "นักวิเคราะห์คู่แข่ง",
         "desc": "วิเคราะห์เปรียบเทียบคู่แข่ง (ค้นหา web เอง)",
         "icon": "🔍",
         "accept": "spec",
+        "flow_reason": "ใช้สเปคสินค้าค้นหาคู่แข่งบนเว็บ แล้วสรุปจุดเด่น/จุดอ่อนเทียบกับเรา",
     },
     "campaign_strategy": {
         "name": "นักวางกลยุทธ์แคมเปญ",
         "desc": "วางกลยุทธ์แคมเปญ + ราคาแนะนำ",
         "icon": "📊",
         "accept": "spec",
+        "flow_reason": "ใช้สเปคสินค้า + ข้อมูลคู่แข่งเพื่อวางกลยุทธ์ขายและกำหนดราคาแนะนำ",
     },
     "content_creator": {
         "name": "นักสร้างคอนเทนต์",
         "desc": "สร้าง content + prompt รูป + hashtag",
         "icon": "✍️",
         "accept": "spec",
+        "flow_reason": "ใช้สเปคสินค้า + กลยุทธ์แคมเปญเขียนคอนเทนต์พร้อม prompt รูปและ hashtag",
     },
 }
 
 AGENT_DEPENDENCIES = {
     "product_spec": [],
     "competitor_analysis": ["product_spec"],
-    "campaign_strategy": ["product_spec"],
-    "content_creator": ["product_spec"],
+    "campaign_strategy": ["product_spec", "competitor_analysis"],
+    "content_creator": ["product_spec", "competitor_analysis", "campaign_strategy"],
 }
 
 AGENT_ORDER = ["product_spec", "competitor_analysis", "campaign_strategy", "content_creator"]
@@ -248,6 +256,15 @@ def _scan_sessions() -> list[dict[str, Any]]:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return HTML_PAGE
+
+
+@app.get("/wizard_ui.js", response_class=Response)
+def wizard_ui_js() -> Response:
+    """Wizard UI JavaScript bundle."""
+    path = Path(__file__).resolve().parent / "src" / "wizard_ui.js"
+    if path.exists():
+        return Response(path.read_text(encoding="utf-8"), media_type="application/javascript")
+    return Response("", media_type="application/javascript")
 
 
 @app.get("/api/credits")
@@ -1685,24 +1702,10 @@ async def api_agent_instructions_save(agent_key: str, request: Request) -> JSONR
     settings = body.get("settings", body)  # backward compat: accept raw settings
 
     # --- Guardrail: validate custom field ---
-    import re as _re
     custom_text = settings.get("custom", "")
-    if custom_text:
-        MAX_CUSTOM_LEN = 2000
-        if len(custom_text) > MAX_CUSTOM_LEN:
-            return JSONResponse({"error": f"Instructions ยาวเกินไป (สูงสุด {MAX_CUSTOM_LEN} ตัวอักษร)"})
-        injection_patterns = [
-            r"ignore\s+(all\s+)?previous\s+instructions?",
-            r"you\s+are\s+now\s+(in\s+)?developer\s+mode",
-            r"system\s+override",
-            r"reveal\s+(your\s+)?(system\s+)?prompt",
-            r"forget\s+(all\s+)?(previous\s+)?(instructions|rules)",
-            r"disregard\s+(all\s+)?(previous\s+)?instructions",
-            r"act\s+as\s+(if\s+)?(you\s+are|a)\s+(jailbreak|unrestricted|dan)",
-        ]
-        for pattern in injection_patterns:
-            if _re.search(pattern, custom_text, _re.IGNORECASE):
-                return JSONResponse({"error": "Instructions มีคำที่ไม่อนุญาต กรุณาเขียนเกี่ยวกับงานเท่านั้น"})
+    guard_err = _validate_custom_instruction(custom_text)
+    if guard_err:
+        return guard_err
         # UI-controlled settings — reject if user tries to set via Instructions
         ui_conflict_patterns = [
             (r"สร้าง\s*\d+\s*โพสต์", "จำนวนโพสต์ตั้งในกล่องเลือกจำนวนด้านล่าง ไม่ใช่ใน Instructions"),
@@ -1981,6 +1984,72 @@ def _read_deliverable(folder: str, name_keyword: str) -> str:
     return ""
 
 
+def _check_injection(text: str) -> str | None:
+    """ตรวจ prompt injection ในข้อความ — คืน error message ถ้าพบ หรือ None ถ้าปลอดภัย."""
+    import re as _re
+    injection_patterns = [
+        r"ignore\s+(all\s+)?previous\s+instructions?",
+        r"you\s+are\s+now\s+(in\s+)?developer\s+mode",
+        r"system\s+override",
+        r"reveal\s+(your\s+)?(system\s+)?prompt",
+        r"forget\s+(all\s+)?(previous\s+)?(instructions|rules)",
+        r"disregard\s+(all\s+)?(previous\s+)?instructions",
+        r"act\s+as\s+(if\s+)?(you\s+are|a)\s+(jailbreak|unrestricted|dan)",
+    ]
+    for pattern in injection_patterns:
+        if _re.search(pattern, text, _re.IGNORECASE):
+            return "มีคำที่ไม่อนุญาต กรุณาเขียนเกี่ยวกับงานเท่านั้น"
+    return None
+
+
+def _validate_quick_brief(quick_brief: str) -> JSONResponse | None:
+    """Validate quick_brief length and injection. คืน JSONResponse error ถ้าผิด หรือ None ถ้าผ่าน."""
+    MAX_BRIEF_LEN = 2000
+    if quick_brief and len(quick_brief) > MAX_BRIEF_LEN:
+        return JSONResponse({"error": f"Quick Brief ยาวเกินไป (สูงสุด {MAX_BRIEF_LEN} ตัวอักษร)"})
+    if quick_brief:
+        err = _check_injection(quick_brief)
+        if err:
+            return JSONResponse({"error": f"Quick Brief {err}"})
+    return None
+
+
+def _validate_custom_instruction(custom_text: str) -> JSONResponse | None:
+    """Validate custom instruction length and injection. คืน JSONResponse error ถ้าผิด หรือ None ถ้าผ่าน."""
+    MAX_CUSTOM_LEN = 2000
+    if custom_text and len(custom_text) > MAX_CUSTOM_LEN:
+        return JSONResponse({"error": f"Instructions ยาวเกินไป (สูงสุด {MAX_CUSTOM_LEN} ตัวอักษร)"})
+    if custom_text:
+        err = _check_injection(custom_text)
+        if err:
+            return JSONResponse({"error": f"Instructions {err}"})
+    return None
+
+
+def _clamp_content_count(n: int) -> int:
+    """จำกัดจำนวน content ระหว่าง 1-20."""
+    return max(1, min(int(n), 20))
+
+
+def _session_ts_label(folders: list[str], now: datetime | None = None) -> str:
+    """สร้างชื่อ session folder จากวันที่ไทย + ชื่อสินค้า."""
+    thai_months = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+                   "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
+    now = now or datetime.now()
+    date_str = f"{now.day}_{thai_months[now.month-1]}_{now.year+543}_{now.strftime('%H.%M')}"
+    safe_folders = [f.replace("/", "-")[:int(_sys_cfg().get("filename_max_length", 30))] for f in folders]
+    return f"{date_str} - {' + '.join(safe_folders)}"
+
+
+def _write_to_cache(folder: str, name: str, content: str) -> Path:
+    """เขียน deliverable ลง cache/{folder}/{name}.md เพื่อ downstream agent อ่านต่อ."""
+    cache_dir = CACHE_DIR / folder
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"{name}.md"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                       image_paths: list[str], ready_contents: dict[str, str],
                       orch: Orchestrator, llm, output_dir: Path,
@@ -2023,231 +2092,249 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
         orch.results["competitor_analysis"] = result
         if save_output:
             saved = orch.save_result("competitor_analysis", str(output_dir))
+            _write_to_cache(folder, "competitor_analysis", result)
             return [(result, str(saved.get("competitor_analysis", "")))]
         return [(result, None)]
 
     elif agent_key == "campaign_strategy":
-        # ใช้ competitor_analysis จาก cache/ ถ้า user เลือก
-        analysis_text = _read_deliverable(folder, "competitor") if context.get("use_competitor") else ""
+        # ใช้ competitor_analysis จากผลลัพธ์ก่อนหน้าใน flow ถ้ามี
+        # fallback: อ่านจาก cache/ (legacy) ถ้าไม่มีใน context แต่ user เลือก use_competitor
+        if "competitor_analysis" in context:
+            analysis_text = context["competitor_analysis"]
+        elif context.get("use_competitor"):
+            analysis_text = _read_deliverable(folder, "competitor")
+        else:
+            analysis_text = ""
         result = orch.run_campaign_strategy("", analysis_text, llm=llm, quick_brief=quick_brief)
         orch.results["campaign_strategy"] = result
         if save_output:
             saved = orch.save_result("campaign_strategy", str(output_dir))
+            _write_to_cache(folder, "campaign_strategy", result)
             return [(result, str(saved.get("campaign_strategy", "")))]
         return [(result, None)]
 
     elif agent_key == "content_creator":
-        # ใช้ context ตามที่ user เลือก
-        analysis_text = _read_deliverable(folder, "competitor") if context.get("use_competitor") else ""
-        campaign_text = _read_deliverable(folder, "campaign") if context.get("use_campaign") else ""
+      with _content_creator_lock:
+        # ใช้ผลลัพธ์ก่อนหน้าใน flow ถ้ามี หรืออ่านจาก cache/ (legacy)
+        if "competitor_analysis" in context:
+            analysis_text = context["competitor_analysis"]
+        elif context.get("use_competitor"):
+            analysis_text = _read_deliverable(folder, "competitor")
+        else:
+            analysis_text = ""
+        if "campaign_strategy" in context:
+            campaign_text = context["campaign_strategy"]
+        elif context.get("use_campaign"):
+            campaign_text = _read_deliverable(folder, "campaign")
+        else:
+            campaign_text = ""
 
-        # auto media — จาก parameter (chips ใน content_creator box) หรือ config default
-        if auto_image is None or auto_video is None:
-            media_cfg = media_gen._load_media_config()
-            if auto_image is None:
-                auto_image = media_cfg.get("auto_generate_image", False)
-            if auto_video is None:
-                auto_video = media_cfg.get("auto_generate_video", False)
+        # auto media — จาก parameter เท่านั้น
+        # None = ไม่ได้ส่งมา = ถือเป็น False (ห้ามอ่าน config เป็น default
+        # เพราะ config อาจเป็น true แล้ว trigger auto-gen โดยไม่ได้ตั้งใจ)
+        if auto_image is None:
+            auto_image = False
+        if auto_video is None:
+            auto_video = False
 
         # --- Content History: บอก AI "ห้ามซ้ำมุมมองเดิม" ---
         # ใช้ content_history รวม (manual + auto) แทน angle_manager แยก
         _product_history_text = content_history.format_product_history_for_prompt(PROJECT_ROOT, folder)
 
         results: list[tuple[str, str | None]] = []
-        previous_summaries: list[str] = []
         # เก็บข้อมูล post ที่ทำเสร็จ เพื่อบันทึกลง history ทีหลัง
         completed_posts: list[dict] = []
 
-        for i in range(content_count):
-            # สร้าง brief พิเศษสำหรับหลายโพสต์ — บอก LLM ว่าโพสต์ที่เท่าไหร่ และโพสต์ก่อนหน้ามีอะไรบ้าง
-            if content_count > 1:
-                multi_brief = f"โพสต์ที่ {i+1} จาก {content_count} โพสต์ — สร้างคอนเทนต์ที่แตกต่างจากโพสต์ก่อนหน้า"
-                if previous_summaries:
-                    multi_brief += "\n\n--- คอนเทนต์ที่สร้างไปแล้ว (ห้ามซ้ำ) ---\n"
-                    _long_len = int(_sys_cfg().get("display_preview_long", 800))
-                    for j, s in enumerate(previous_summaries):
-                        multi_brief += f"\nโพสต์ที่ {j+1}:\n{s[:_long_len]}\n"
-                    multi_brief += "--- สิ้นสุด ---\n"
-                    multi_brief += "สร้างโพสต์ใหม่ที่มีมุมมอง/concept ต่างจากโพสต์ก่อนหน้า"
-                if quick_brief:
-                    multi_brief += f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
-            else:
+        # --- วนลูปตามแพลตฟอร์ม (เหมือน auto mode) ---
+        # content_count = จำนวนโพสต์ต่อแพลตฟอร์ม × จำนวนแพลตฟอร์ม
+        # แต่ละแพลตฟอร์มสร้าง count_per_platform โพสต์ แล้วรวมเป็น 1 ไฟล์
+        platform_names = {"facebook": "Facebook", "tiktok": "TikTok"}
+        target_platforms = platforms if platforms else [""]
+        # ceiling division — ถ้า content_count=3, platforms=2 → 2 โพสต์/แพลตฟอร์ม (รวม 4)
+        # ไม่ใช่ floor (รวม 2) เพราะ user ขอ 3 โพสต์ ต้องไม่หาย
+        _n_plat = max(1, len(target_platforms))
+        count_per_platform = max(1, (content_count + _n_plat - 1) // _n_plat)
+
+        all_posts: list[dict] = []
+
+        for platform in target_platforms:
+            platform_label = platform_names.get(platform, platform) if platform else ""
+            for post_idx in range(count_per_platform):
+                if _cancel_requested:
+                    break
+
+                # สร้าง brief พิเศษสำหรับหลายโพสต์
                 multi_brief = quick_brief
+                if count_per_platform > 1:
+                    multi_brief = f"โพสต์ที่ {post_idx+1} จาก {count_per_platform} โพสต์ — สร้างคอนเทนต์ที่แตกต่างจากโพสต์ก่อนหน้า"
+                    if all_posts:
+                        multi_brief += "\n\n--- คอนเทนต์ที่สร้างไปแล้ว (ห้ามซ้ำ) ---\n"
+                        _long_len = int(_sys_cfg().get("display_preview_long", 800))
+                        for j, p in enumerate(all_posts):
+                            multi_brief += f"\nโพสต์ที่ {j+1}:\n{json.dumps(p, ensure_ascii=False)[:_long_len]}\n"
+                        multi_brief += "--- สิ้นสุด ---\n"
+                        multi_brief += "สร้างโพสต์ใหม่ที่มีมุมมอง/concept ต่างจากโพสต์ก่อนหน้า"
+                    if quick_brief:
+                        multi_brief += f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
 
-            # บอก AI ถึงมุมมองที่เคยใช้แล้ว (ห้ามซ้ำ) + ให้ AI เลือกมุมมองเองจากสเปคสินค้า
-            if _product_history_text:
-                multi_brief = (multi_brief or "") + "\n\n" + _product_history_text + "\n"
-                multi_brief += "วิเคราะห์สินค้านี้แล้วเลือกมุมมองใหม่ที่ต่างจากที่เคยใช้ แล้วสร้างโพสต์จากมุมมองนั้น"
-            else:
-                multi_brief = (multi_brief or "") + "\n\nวิเคราะห์สินค้านี้แล้วเลือกมุมมองที่เหมาะสมที่สุด แล้วสร้างโพสต์จากมุมมองนั้น"
-
-            # inject platform ที่ user เลือกเข้า brief
-            if platforms:
-                platform_names = {"facebook": "Facebook", "tiktok": "TikTok"}
-                selected = [platform_names.get(p, p) for p in platforms]
-                if len(selected) == 1:
-                    platform_instruction = f"\nแพลตฟอร์มที่ต้องสร้าง: {selected[0]} เท่านั้น"
+                # บอก AI ถึงมุมมองที่เคยใช้แล้ว (ห้ามซ้ำ)
+                if _product_history_text:
+                    multi_brief = (multi_brief or "") + "\n\n" + _product_history_text + "\n"
+                    multi_brief += "วิเคราะห์สินค้านี้แล้วเลือกมุมมองใหม่ที่ต่างจากที่เคยใช้ แล้วสร้างโพสต์จากมุมมองนั้น"
                 else:
-                    platform_instruction = f"\nแพลตฟอร์มที่เลือก: {' หรือ '.join(selected)} — เลือกแพลตฟอร์มที่เหมาะสมที่สุดสำหรับโพสต์นี้"
-                multi_brief = (multi_brief or "") + platform_instruction
+                    multi_brief = (multi_brief or "") + "\n\nวิเคราะห์สินค้านี้แล้วเลือกมุมมองที่เหมาะสมที่สุด แล้วสร้างโพสต์จากมุมมองนั้น"
 
-            result = orch.run_content_creator(
-                "", analysis_text, campaign_text,
-                llm=llm, quick_brief=multi_brief,
-                media_type=media_type,
-            )
-            orch.results["content_creator"] = result
+                # inject platform
+                if platform_label:
+                    multi_brief = (multi_brief or "") + f"\nแพลตฟอร์มที่ต้องสร้างสำหรับโพสต์นี้: {platform_label} เท่านั้น"
 
-            # ดึงมุมมอง + platform + caption จาก structured output (JSON)
-            # เก็บไว้บันทึกลง content_history หลังทำเสร็จ
-            _post_start_idx = len(completed_posts)
-            try:
-                import json as _json_hist
-                _parsed = _json_hist.loads(result)
-                for _post in _parsed.get("posts", []):
-                    completed_posts.append({
-                        "concept": _post.get("concept", _post.get("angle", "")),
-                        "platform": _post.get("platform", ""),
-                        "caption": _post.get("caption", "")[:int(_sys_cfg().get("caption_display_length", 500))],
-                    })
-            except (_json_hist.JSONDecodeError, TypeError):
-                # fallback: ถ้า LLM ไม่คืน JSON ให้ข้าม
-                pass
+                result = orch.run_content_creator(
+                    "", analysis_text, campaign_text,
+                    llm=llm, quick_brief=multi_brief,
+                    media_type=media_type,
+                )
 
-            saved_path: str | None = None
-            if save_output:
-                if content_count > 1:
-                    timestamp = datetime.now().strftime("%H%M%S")
-                    fname_base = f"04_content_creator_{folder}_โพสต์ที่{i+1}_{timestamp}"
-                    # content_creator ใช้ Structured Outputs → เซฟ .json + .md
-                    # .md มาจาก render_posts_to_markdown (เรา generate เองจาก posts)
-                    import json as _json_cc
-                    from src.content_schema import render_posts_to_markdown
-                    md_content = result
-                    try:
-                        parsed_cc = _json_cc.loads(result)
-                        md_content = render_posts_to_markdown(parsed_cc)
-                    except (_json_cc.JSONDecodeError, TypeError):
-                        pass
-                    json_path = output_dir / f"{fname_base}.json"
-                    json_path.write_text(result, encoding="utf-8")
-                    md_filepath = output_dir / f"{fname_base}.md"
-                    md_filepath.write_text(md_content, encoding="utf-8")
-                    saved_path = str(md_filepath)
-                else:
-                    saved = orch.save_result("content_creator", str(output_dir))
-                    saved_path = str(saved.get("content_creator", ""))
-                results.append((result, saved_path))
-                # เก็บ saved_path ใน completed_posts เพื่อส่งให้ record_entry
-                for _p in completed_posts[_post_start_idx:]:
-                    _p["output_file"] = saved_path or ""
-            else:
-                results.append((result, None))
-
-            # Auto-generate media ถ้าเปิด auto และมี path บันทึก
-            if save_output and saved_path and (auto_image or auto_video):
+                # parse + script review (เหมือน auto mode)
                 try:
-                    parsed = media_gen.parse_media_prompts(result)
-                    # Phase 4: รวมรูปสินค้า + รูป asset เป็น input_references
-                    from src import asset_library as _al
-                    # สร้าง LLM client สำหรับ retry-on-reject
-                    # auto mode: วนแก้ prompt จนกว่าจะออก (ไม่มี limit)
-                    retry_llm = llm if llm is not None else None
-                    if retry_llm is None:
-                        try:
-                            retry_llm = orch._make_client()
-                        except Exception:
-                            retry_llm = None
-                    if auto_image:
-                        for j, img in enumerate(parsed.get("images", [])):
-                            img_path = output_dir / f"image_โพสต์{i+1}_{j+1}.png"
-                            if status_callback:
-                                status_callback(f"กำลังสร้างรูปที่ {j+1}...")
-                            img_kwargs: dict = {}
-                            if img.get("aspect_ratio"):
-                                img_kwargs["aspect_ratio"] = img["aspect_ratio"]
-                            # ส่งรูปสินค้า + รูป asset เป็น reference — image-to-image
-                            _refs = _al.build_input_references(
-                                image_paths, img.get("asset_ids", []),
-                            )
-                            if _refs:
-                                img_kwargs["input_references"] = _refs
-                            # Visual brand injection
-                            visual = _get_brand_visual()
-                            if visual:
-                                img_kwargs["visual"] = visual
-                            def _img_retry(old_p, new_p, err, idx=j):
-                                if status_callback:
-                                    status_callback(f"รูปที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
-                                print(f"[MediaGen] retry รูป {idx+1}: {err[:int(_sys_cfg().get('error_preview_length', 200))]}", flush=True)
-                            r = media_gen.generate_image_with_retry(
-                                img["prompt"], img_path, llm=retry_llm,
-                                on_retry=_img_retry, **img_kwargs,
-                            )
-                            # เก็บประวัติ retry
-                            media_gen.save_retry_history(
-                                output_dir, "image", img_path.name, r,
-                            )
-                            if not r.get("ok"):
-                                msg = f"รูปที่ {j+1}: {r.get('error', 'unknown')}"
-                                if status_callback:
-                                    status_callback(msg)
-                                print(f"[MediaGen] {msg}", flush=True)
-                            elif r.get("retry_count"):
-                                if status_callback:
-                                    status_callback(f"รูปที่ {j+1}: สร้างสำเร็จหลังแก้ prompt {r['retry_count']} ครั้ง")
-                    if auto_video:
-                        for j, vid in enumerate(parsed.get("videos", [])):
-                            vid_path = output_dir / f"video_โพสต์{i+1}_{j+1}.mp4"
-                            def _vid_status(s, idx=j):
-                                if status_callback:
-                                    status_callback(f"วิดีโอที่ {idx+1}: {s}")
-                            vid_kwargs: dict = {"on_status": _vid_status}
-                            if vid.get("duration"):
-                                vid_kwargs["duration"] = int(vid["duration"])
-                            if vid.get("aspect_ratio"):
-                                vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
-                            if vid.get("resolution"):
-                                vid_kwargs["resolution"] = vid["resolution"]
-                            # ส่งรูปสินค้า + รูป asset เป็น reference — reference-to-video
-                            _refs = _al.build_input_references(
-                                image_paths, vid.get("asset_ids", []),
-                            )
-                            if _refs:
-                                vid_kwargs["input_references"] = _refs
-                            # Visual brand injection
-                            visual = _get_brand_visual()
-                            if visual:
-                                vid_kwargs["visual"] = visual
-                            def _vid_retry(old_p, new_p, err, idx=j):
-                                if status_callback:
-                                    status_callback(f"วิดีโอที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
-                                print(f"[MediaGen] retry วิดีโอ {idx+1}: {err[:int(_sys_cfg().get('error_preview_length', 200))]}", flush=True)
-                            vid_kwargs["on_retry"] = _vid_retry
-                            r = media_gen.generate_video_with_retry(
-                                vid["prompt"], vid_path, llm=retry_llm, **vid_kwargs,
-                            )
-                            # เก็บประวัติ retry
-                            media_gen.save_retry_history(
-                                output_dir, "video", vid_path.name, r,
-                            )
-                            if not r.get("ok"):
-                                msg = f"วิดีโอที่ {j+1}: {r.get('error', 'unknown')}"
-                                if status_callback:
-                                    status_callback(msg)
-                                print(f"[MediaGen] {msg}", flush=True)
-                            elif r.get("retry_count"):
-                                if status_callback:
-                                    status_callback(f"วิดีโอที่ {j+1}: สร้างสำเร็จหลังแก้ prompt {r['retry_count']} ครั้ง")
-                except Exception as e:
-                    # media gen fail ไม่ต้องทำให้ content_creator fail ด้วย — แต่ log จริง
-                    msg = f"media gen error: {e}"
-                    if status_callback:
-                        status_callback(msg)
-                    print(f"[MediaGen] {msg}", flush=True)
+                    parsed_content = json.loads(result)
+                    posts = parsed_content.get("posts", [])
+                    if posts and platform_label:
+                        posts[0]["platform"] = platform_label
 
-            # เก็บ summary ของชุดนี้เพื่อส่งให้รอบต่อไป
-            previous_summaries.append(result[:int(_sys_cfg().get("display_preview_long", 800))])
+                    # script review
+                    ch_cfg = content_history._DEFAULTS if hasattr(content_history, '_DEFAULTS') else {}
+                    orch._review_script_in_posts(
+                        posts, platform_label, llm, status_callback, ch_cfg,
+                    )
+
+                    if posts:
+                        all_posts.append(posts[0])
+                        completed_posts.append({
+                            "concept": posts[0].get("concept", posts[0].get("angle", "")),
+                            "platform": posts[0].get("platform", ""),
+                            "caption": posts[0].get("caption", "")[:int(_sys_cfg().get("caption_display_length", 500))],
+                        })
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        # รวมผลลัพธ์ทุกแพลตฟอร์มเป็น 1 ไฟล์ (เหมือน auto mode)
+        combined = {"posts": all_posts}
+        combined_json = json.dumps(combined, ensure_ascii=False, indent=2)
+        try:
+            from src.content_schema import render_posts_to_markdown
+            combined_md = render_posts_to_markdown(combined)
+        except Exception:
+            combined_md = combined_json
+
+        orch.results["content_creator"] = combined_json
+        orch.results["content_creator_markdown"] = combined_md
+
+        saved_path: str | None = None
+        if save_output:
+            timestamp = datetime.now().strftime("%H%M%S")
+            fname_base = f"04_content_creator_{folder}_{timestamp}"
+            json_path = output_dir / f"{fname_base}.json"
+            json_path.write_text(combined_json, encoding="utf-8")
+            md_filepath = output_dir / f"{fname_base}.md"
+            md_filepath.write_text(combined_md, encoding="utf-8")
+            saved_path = str(md_filepath)
+            results.append((combined_json, saved_path))
+            for _p in completed_posts:
+                _p["output_file"] = saved_path or ""
+        else:
+            results.append((combined_json, None))
+
+        # Auto-generate media ถ้าเปิด auto
+        if save_output and saved_path and (auto_image or auto_video):
+            try:
+                parsed = media_gen.parse_media_prompts(combined_json)
+                from src import asset_library as _al
+                retry_llm = llm if llm is not None else None
+                if retry_llm is None:
+                    try:
+                        retry_llm = orch._make_client()
+                    except Exception:
+                        retry_llm = None
+                if auto_image:
+                    for j, img in enumerate(parsed.get("images", [])):
+                        img_path = output_dir / f"image_{j+1}.png"
+                        if status_callback:
+                            status_callback(f"กำลังสร้างรูปที่ {j+1}...")
+                        img_kwargs: dict = {}
+                        if img.get("aspect_ratio"):
+                            img_kwargs["aspect_ratio"] = img["aspect_ratio"]
+                        _refs = _al.build_input_references(
+                            image_paths, img.get("asset_ids", []),
+                        )
+                        if _refs:
+                            img_kwargs["input_references"] = _refs
+                        visual = _get_brand_visual()
+                        if visual:
+                            img_kwargs["visual"] = visual
+                        def _img_retry(old_p, new_p, err, idx=j):
+                            if status_callback:
+                                status_callback(f"รูปที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
+                            print(f"[MediaGen] retry รูป {idx+1}: {err[:int(_sys_cfg().get('error_preview_length', 200))]}", flush=True)
+                        r = media_gen.generate_image_with_retry(
+                            img["prompt"], img_path, llm=retry_llm,
+                            on_retry=_img_retry, **img_kwargs,
+                        )
+                        media_gen.save_retry_history(
+                            output_dir, "image", img_path.name, r,
+                        )
+                        if not r.get("ok"):
+                            msg = f"รูปที่ {j+1}: {r.get('error', 'unknown')}"
+                            if status_callback:
+                                status_callback(msg)
+                            print(f"[MediaGen] {msg}", flush=True)
+                        elif r.get("retry_count"):
+                            if status_callback:
+                                status_callback(f"รูปที่ {j+1}: สร้างสำเร็จหลังแก้ prompt {r['retry_count']} ครั้ง")
+                if auto_video:
+                    for j, vid in enumerate(parsed.get("videos", [])):
+                        vid_path = output_dir / f"video_{j+1}.mp4"
+                        def _vid_status(s, idx=j):
+                            if status_callback:
+                                status_callback(f"วิดีโอที่ {idx+1}: {s}")
+                        vid_kwargs: dict = {"on_status": _vid_status}
+                        if vid.get("duration"):
+                            vid_kwargs["duration"] = int(vid["duration"])
+                        if vid.get("aspect_ratio"):
+                            vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
+                        if vid.get("resolution"):
+                            vid_kwargs["resolution"] = vid["resolution"]
+                        _refs = _al.build_input_references(
+                            image_paths, vid.get("asset_ids", []),
+                        )
+                        if _refs:
+                            vid_kwargs["input_references"] = _refs
+                        visual = _get_brand_visual()
+                        if visual:
+                            vid_kwargs["visual"] = visual
+                        def _vid_retry(old_p, new_p, err, idx=j):
+                            if status_callback:
+                                status_callback(f"วิดีโอที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
+                            print(f"[MediaGen] retry วิดีโอ {idx+1}: {err[:int(_sys_cfg().get('error_preview_length', 200))]}", flush=True)
+                        vid_kwargs["on_retry"] = _vid_retry
+                        r = media_gen.generate_video_with_retry(
+                            vid["prompt"], vid_path, llm=retry_llm, **vid_kwargs,
+                        )
+                        media_gen.save_retry_history(
+                            output_dir, "video", vid_path.name, r,
+                        )
+                        if not r.get("ok"):
+                            msg = f"วิดีโอที่ {j+1}: {r.get('error', 'unknown')}"
+                            if status_callback:
+                                status_callback(msg)
+                            print(f"[MediaGen] {msg}", flush=True)
+                        elif r.get("retry_count"):
+                            if status_callback:
+                                status_callback(f"วิดีโอที่ {j+1}: สร้างสำเร็จหลังแก้ prompt {r['retry_count']} ครั้ง")
+            except Exception as e:
+                msg = f"media gen error: {e}"
+                if status_callback:
+                    status_callback(msg)
+                print(f"[MediaGen] {msg}", flush=True)
 
         # บันทึกประวัติคอนเทนต์ที่ทำเสร็จ ลง content_history (รวม manual + auto)
         for _post in completed_posts:
@@ -2263,6 +2350,8 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
 
         return results
 
+      # end of _content_creator_lock context
+
     raise ValueError(f"ไม่รู้จัก agent: {agent_key}")
 
 
@@ -2276,23 +2365,9 @@ async def api_run_agents(request: Request) -> StreamingResponse:
     quick_brief = body.get("quick_brief", "")
 
     # --- Quick Brief input validation (guardrail) ---
-    if quick_brief:
-        MAX_BRIEF_LEN = 2000
-        if len(quick_brief) > MAX_BRIEF_LEN:
-            return JSONResponse({"error": f"Quick Brief ยาวเกินไป (สูงสุด {MAX_BRIEF_LEN} ตัวอักษร)"})
-        import re as _re
-        injection_patterns = [
-            r"ignore\s+(all\s+)?previous\s+instructions?",
-            r"you\s+are\s+now\s+(in\s+)?developer\s+mode",
-            r"system\s+override",
-            r"reveal\s+(your\s+)?(system\s+)?prompt",
-            r"forget\s+(all\s+)?(previous\s+)?(instructions|rules)",
-            r"disregard\s+(all\s+)?(previous\s+)?instructions",
-            r"act\s+as\s+(if\s+)?(you\s+are|a)\s+(jailbreak|unrestricted|dan)",
-        ]
-        for pattern in injection_patterns:
-            if _re.search(pattern, quick_brief, _re.IGNORECASE):
-                return JSONResponse({"error": "Quick Brief มีคำที่ไม่อนุญาต กรุณาเขียนเกี่ยวกับงานเท่านั้น"})
+    guard_err = _validate_quick_brief(quick_brief)
+    if guard_err:
+        return guard_err
 
     # Backward compat: single folder string
     if not folders and body.get("folder"):
@@ -2303,7 +2378,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
 
     # User เลือก context เอง — ไม่บังคับ dependency อีกต่อไป
     context = body.get("context", {"use_competitor": True, "use_campaign": True})
-    content_count = max(1, min(int(body.get("content_count", 1)), 20))  # จำกัด 1-20 โพสต์
+    content_count = _clamp_content_count(body.get("content_count", 1))  # จำกัด 1-20 โพสต์
     # auto media — จาก dropdown ใน content_creator box
     auto_image = body.get("auto_image", None)
     auto_video = body.get("auto_video", None)
@@ -2319,12 +2394,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
     global _cancel_requested
     _cancel_requested = False
     # Use readable folder name: Thai date + product names (local, not global — parallel-safe)
-    thai_months = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
-                   "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
-    now = datetime.now()
-    date_str = f"{now.day}_{thai_months[now.month-1]}_{now.year+543}_{now.strftime('%H.%M')}"
-    safe_folders = [f.replace("/", "-")[:int(_sys_cfg().get("filename_max_length", 30))] for f in folders]
-    session_ts = f"{date_str} - {' + '.join(safe_folders)}"
+    session_ts = _session_ts_label(folders)
 
     async def event_stream():
         # Fresh orchestrator per call — do NOT share across parallel runs
@@ -2470,6 +2540,187 @@ async def api_run_agents(request: Request) -> StreamingResponse:
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+@app.post("/api/run_flows")
+async def api_run_flows(request: Request) -> StreamingResponse:
+    """Run flows in parallel. Within each flow agents run sequentially and pass context forward.
+
+    Body:
+    {
+        "flows": [
+            {
+                "folders": ["Product A", "Product B"],
+                "agents": ["product_spec", "competitor_analysis", "content_creator"],
+                "content_count": 1,
+                "platforms": ["facebook", "tiktok"],
+                "media_type": "image",
+                "media_when": "ask",
+                "auto_image": false,
+                "auto_video": false
+            }
+        ],
+        "quick_brief": ""
+    }
+    """
+    body = await request.json()
+    flows = body.get("flows", [])
+    quick_brief = body.get("quick_brief", "")
+
+    guard_err = _validate_quick_brief(quick_brief)
+    if guard_err:
+        return guard_err
+
+    if not flows:
+        return JSONResponse({"error": "missing flows"})
+
+    # Validate flows
+    for flow in flows:
+        if not flow.get("folders") or not flow.get("agents"):
+            return JSONResponse({"error": "แต่ละ flow ต้องมีสินค้าและ agent"})
+
+    global _cancel_requested
+    _cancel_requested = False
+
+    # Session folder (shared across all flows, like run_agents)
+    session_ts = _session_ts_label([])
+
+    async def event_stream():
+        q: _queue.Queue[str | None] = _queue.Queue()
+
+        def _flow_worker(flow_idx: int, flow: dict, output_dir: Path):
+            from src.flow_runner import run_flow_steps, build_context_for_agent
+            plan_idx = flow.get("index", flow_idx)
+
+            llm = None
+            try:
+                orch = Orchestrator(brand_dir="brand")
+                llm = orch._make_client()
+                try:
+                    _active_llms.append(llm)
+                except NameError:
+                    pass
+
+                folders = flow.get("folders", [])
+                flow_agents = [a for a in flow.get("agents", []) if a in AGENT_ORDER]
+                # TEMP LOCK: แต่ละ flow รัน agent เดียวก่อน จนกว่าจะแก้ให้ agent ทำงานร่วมกันได้
+                # (multi-agent code ยังอยู่ แค่ truncate ที่นี่)
+                flow_agents = flow_agents[:1]
+                content_count = _clamp_content_count(flow.get("content_count", 1))
+                platforms = flow.get("platforms", ["facebook", "tiktok"])
+                media_type = flow.get("media_type", "image")
+                auto_image = flow.get("auto_image", None)
+                auto_video = flow.get("auto_video", None)
+
+                is_combined = len(folders) >= 2
+                folder_label = " + ".join(folders)
+
+                # Read product data
+                if is_combined:
+                    all_raw = []
+                    all_images = []
+                    all_ready = {}
+                    for folder in folders:
+                        raw_contents, image_paths, ready_contents = _read_folder(folder)
+                        all_raw.extend(raw_contents)
+                        all_images.extend(image_paths)
+                        for fname, content in ready_contents.items():
+                            all_ready[f"{folder}/{fname}"] = content
+                else:
+                    single_folder = folders[0]
+                    all_raw, all_images, all_ready = _read_folder(single_folder)
+
+                target_label = folder_label if is_combined else single_folder
+
+                def run_one_agent(agent_key: str, product: str, context: dict) -> str:
+                    nonlocal orch, llm, output_dir
+                    if _cancel_requested:
+                        return ""
+
+                    agent_name = AGENT_INFO.get(agent_key, {}).get("name", agent_key)
+                    set_label = f" ({content_count} โพสต์)" if agent_key == "content_creator" and content_count > 1 else ""
+                    q.put_nowait(_sse("agent_start", f"{agent_name} — {product}{set_label}", agent=agent_key, plan=plan_idx))
+
+                    try:
+                        def _status_cb(msg, _ak=agent_key):
+                            q.put_nowait(_sse("status", msg, agent=_ak, plan=plan_idx))
+
+                        results = _run_single_agent(
+                            agent_key, product, all_raw, all_images,
+                            all_ready, orch, llm, output_dir,
+                            save_output=True, quick_brief=quick_brief,
+                            context=context, content_count=content_count,
+                            auto_image=auto_image, auto_video=auto_video,
+                            platforms=platforms, media_type=media_type,
+                            status_callback=_status_cb,
+                        )
+                        result_text = results[0][0] if results else ""
+                        file_path = results[0][1] if results else None
+
+                        _dl = int(_sys_cfg().get("display_preview_length", 500))
+                        q.put_nowait(_sse("agent_done", result_text[:_dl], agent=agent_key, file=file_path, plan=plan_idx))
+
+                        return result_text
+                    except Exception as e:
+                        if _cancel_requested:
+                            q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
+                            return ""
+                        q.put_nowait(_sse("error", str(e), agent=agent_key, plan=plan_idx))
+                        return ""
+
+                run_flow_steps(flow_agents, folders, run_one_agent, AGENT_DEPENDENCIES)
+
+                if llm:
+                    try:
+                        llm.close()
+                        _active_llms.remove(llm)
+                    except (ValueError, Exception):
+                        pass
+
+            except Exception as e:
+                q.put_nowait(_sse("error", f"Flow {flow_idx+1}: {e}"))
+                if llm:
+                    try:
+                        llm.close()
+                        _active_llms.remove(llm)
+                    except (ValueError, Exception):
+                        pass
+
+        def master_worker():
+            try:
+                output_dir = OUTPUT_DIR / session_ts
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                threads = []
+                for flow_idx, flow in enumerate(flows):
+                    t = threading.Thread(target=_flow_worker, args=(flow_idx, flow, output_dir), daemon=True)
+                    t.start()
+                    threads.append(t)
+
+                for t in threads:
+                    t.join()
+
+                q.put_nowait(_sse("done", ""))
+                q.put_nowait(None)
+            except Exception as e:
+                q.put_nowait(_sse("error", str(e)))
+                q.put_nowait(_sse("done", ""))
+                q.put_nowait(None)
+
+        master_worker_thread = threading.Thread(target=master_worker, daemon=True)
+        master_worker_thread.start()
+
+        while True:
+            try:
+                event = q.get_nowait()
+            except _queue.Empty:
+                await asyncio.sleep(0.05)
+                continue
+            if event is None:
+                break
+            yield event
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @app.post("/api/run_auto")
 async def api_run_auto(request: Request) -> StreamingResponse:
     """Auto mode — agent เลือกสินค้าเอง + สร้างคอนเทนต์ที่ไม่ซ้ำ.
@@ -2493,15 +2744,17 @@ async def api_run_auto(request: Request) -> StreamingResponse:
     auto_video = body.get("auto_video", None)
     content_count = max(1, min(int(body.get("content_count", 1)), 20))
     product_count = max(1, min(int(body.get("product_count", 1)), 50))
+    # agents ที่ user เลือก — default ["content_creator"] สำหรับ backward compat
+    agents = body.get("agents", ["content_creator"])
+    # กรองเฉพาะ agent ที่รู้จัก + เรียงตาม AGENT_ORDER
+    agents = [a for a in AGENT_ORDER if a in agents]
+    # TEMP LOCK: auto flow รัน agent เดียวก่อน จนกว่าจะแก้ให้ agent ทำงานร่วมกันได้
+    agents = agents[:1]
 
     global _cancel_requested
     _cancel_requested = False
 
-    thai_months = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
-                   "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
-    now = datetime.now()
-    date_str = f"{now.day}_{thai_months[now.month-1]}_{now.year+543}_{now.strftime('%H.%M')}"
-    session_ts = f"{date_str} - AUTO"
+    session_ts = _session_ts_label([]).replace(' - ', ' - AUTO - ')
 
     async def event_stream():
         orch = Orchestrator(brand_dir="brand")
@@ -2524,6 +2777,101 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                 all_results: list[tuple[str, str | None]] = []
                 previous_summaries: list[str] = []
 
+                # ============================================================
+                # Multi-agent auto mode: ถ้า user เลือก agent อื่นนอกจาก content_creator
+                # ให้เลือกสินค้าครั้งเดียว แล้วรัน agent ที่เลือกตามลำดับ (เหมือน flow ปกติ
+                # แต่สินค้าถูกเลือกโดย AI แทน user)
+                # ============================================================
+                if len(agents) > 1 or (agents and agents[0] != "content_creator"):
+                    _status_cb("กำลังเลือกสินค้าและแนวคิด...")
+                    selection = orch.select_product_auto(
+                        llm=llm, quick_brief=quick_brief, platforms=platforms,
+                        product_count=product_count,
+                    )
+                    if "error" in selection:
+                        q.put_nowait(_sse("error", selection["error"], agent="content_creator"))
+                        q.put_nowait(_sse("done", ""))
+                        q.put_nowait(None)
+                        return
+
+                    chosen_pids = selection.get("product_ids", [])
+                    chosen_concept = selection.get("concept", "")
+                    reason = selection.get("reason", "")
+
+                    # ส่งข้อมูลการเลือกให้ frontend
+                    q.put_nowait(_sse("selection", json.dumps({
+                        "product_id": chosen_pids[0] if chosen_pids else "",
+                        "product_ids": chosen_pids,
+                        "pillar": selection.get("pillar", ""),
+                        "concept": chosen_concept,
+                        "reason": reason,
+                        "is_duplicate": False,
+                        "similarity": 0.0,
+                    }), agent="content_creator"))
+
+                    if _status_cb:
+                        _status_cb(f"เลือก: {', '.join(chosen_pids)} — {chosen_concept}")
+
+                    # อ่านข้อมูลสินค้าที่เลือก
+                    folder_label = " + ".join(chosen_pids)
+                    all_raw = []
+                    all_images = []
+                    all_ready = {}
+                    for pid in chosen_pids:
+                        raw, imgs, ready = _read_folder(pid)
+                        all_raw.extend(raw)
+                        all_images.extend(imgs)
+                        for fname, content in ready.items():
+                            all_ready[f"{pid}/{fname}"] = content
+
+                    # รัน agent ที่เลือกตามลำดับ (เหมือน flow_runner)
+                    flow_results: dict[str, str] = {}
+                    for agent_key in agents:
+                        if _cancel_requested:
+                            break
+
+                        agent_name = AGENT_INFO.get(agent_key, {}).get("name", agent_key)
+                        q.put_nowait(_sse("agent_start", f"{agent_name} — AUTO", agent=agent_key))
+
+                        try:
+                            def _agent_status(msg, _ak=agent_key):
+                                q.put_nowait(_sse("status", msg, agent=_ak))
+
+                            cc_count = content_count if agent_key == "content_creator" else 1
+                            results_list = _run_single_agent(
+                                agent_key, folder_label, all_raw, all_images,
+                                all_ready, orch, llm, output_dir,
+                                save_output=True, quick_brief=quick_brief,
+                                context=flow_results, content_count=cc_count,
+                                auto_image=auto_image, auto_video=auto_video,
+                                platforms=platforms, media_type=media_type,
+                                status_callback=_agent_status,
+                            )
+                            result_text = results_list[0][0] if results_list else ""
+                            file_path = results_list[0][1] if results_list else None
+                            flow_results[agent_key] = result_text
+
+                            _dl = int(_sys_cfg().get("display_preview_length", 500))
+                            q.put_nowait(_sse("agent_done", result_text[:_dl],
+                                              agent=agent_key, file=file_path))
+                        except Exception as e:
+                            if _cancel_requested:
+                                break
+                            q.put_nowait(_sse("error", str(e), agent=agent_key))
+
+                    if llm:
+                        llm.close()
+                        try:
+                            _active_llms.remove(llm)
+                        except ValueError:
+                            pass
+                    q.put_nowait(_sse("done", ""))
+                    q.put_nowait(None)
+                    return
+
+                # ============================================================
+                # Single-agent auto mode (backward compat): content_creator only
+                # ============================================================
                 for i in range(content_count):
                     if _cancel_requested:
                         q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
@@ -2544,11 +2892,14 @@ async def api_run_auto(request: Request) -> StreamingResponse:
 
                     q.put_nowait(_sse("agent_start", f"นักสร้างคอนเทนต์ — AUTO (โพสต์ที่ {i+1})", agent="content_creator"))
 
+                    # ส่ง platforms ทั้งหมดไป backend — run_content_creator_auto เลือกสินค้าครั้งเดียว
+                    # แล้ววนสร้างหลายแพลตฟอร์มเอง (สินค้าเดียวกันทุกแพลตฟอร์มในรอบเดียว)
+                    current_platform = platforms if platforms else None
                     result = orch.run_content_creator_auto(
                         llm=llm,
                         quick_brief=multi_brief,
                         media_type=media_type,
-                        platforms=platforms,
+                        platforms=current_platform,
                         product_count=product_count,
                         status_callback=_status_cb,
                     )
@@ -2593,6 +2944,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     q.put_nowait(_sse("agent_done", markdown[:_dl], agent="content_creator", file=saved_path, set_num=i+1, total_sets=content_count))
 
                     # Auto-generate media ถ้าเปิด
+                    print(f"[DEBUG api_run_auto] auto_image={auto_image!r} auto_video={auto_video!r} media_when={body.get('media_when', 'N/A')!r}", flush=True)
                     if auto_image or auto_video:
                         try:
                             parsed_media = media_gen.parse_media_prompts(content)
@@ -2762,7 +3114,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .sidebar-ms-btn { background: #1c1e2a; color: #888; border: 1px solid #2a2d3a; border-radius: 6px; padding: 8px 10px; font-size: 12px; cursor: pointer; white-space: nowrap; }
   .sidebar-ms-btn:hover { border-color: #7c8aff; color: #7c8aff; }
   .sidebar-ms-btn.active { background: #2a1a3a; border-color: #a78bfa; color: #a78bfa; }
-  /* Auto item ใน sidebar — draggable เหมือนสินค้าทั่วไป */
+  /* Auto item ใน sidebar — คลิกเลือกใน wizard */
   .folder-item.auto-item { border: 1px dashed #7c8aff; background: #1a1d2e; }
   .folder-item.auto-item:hover { border-color: #7c8aff; background: #1a2a4a; }
   /* Auto chip ใน agent box */
@@ -2822,9 +3174,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .pillar-add-btn { background: #1a1d2e; border: 1px dashed #7c8aff; color: #7c8aff; border-radius: 10px; padding: 14px; font-size: 14px; cursor: pointer; width: 100%; margin-top: 8px; }
   .pillar-add-btn:hover { background: #1a2a4a; }
 
-  .folder-item { display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 10px; background: #1c1e2a; margin-bottom: 8px; cursor: grab; transition: all 0.15s; }
+  .folder-item { display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: 10px; background: #1c1e2a; margin-bottom: 8px; cursor: pointer; transition: all 0.15s; }
   .folder-item:hover { background: #252836; transform: translateY(-1px); }
-  .folder-item:active { cursor: grabbing; }
   .folder-item.dragging { opacity: 0.4; }
   .folder-icon { font-size: 24px; flex-shrink: 0; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 6px; background: #1c1e2a; }
   .folder-icon img { width: 100%; height: 100%; object-fit: cover; }
@@ -2887,6 +3238,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .preview-toggle button { background: #161821; border: 1px solid #2a2d3a; color: #888; border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer; }
   .preview-toggle button.active { background: #7c8aff; color: #0f1117; border-color: #7c8aff; font-weight: 600; }
   .preview-toggle button:hover { border-color: #7c8aff; }
+
+  .post-selector-bar { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .post-selector-tab { background: #161821; border: 1px solid #2a2d3a; color: #888; border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer; }
+  .post-selector-tab.active { background: #1a2a4a; color: #7c9aff; border-color: #7c8aff; font-weight: 600; }
+  .post-selector-tab:hover { border-color: #7c8aff; }
 
   .preview-container { max-width: 520px; margin: 0 auto; }
   .preview-meta { font-size: 12px; color: #666; margin-bottom: 12px; display: flex; gap: 12px; flex-wrap: wrap; }
@@ -3100,7 +3456,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .agent-options .opt-count-input { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; padding: 4px 8px; color: #e0e0e0; font-size: 12px; width: 48px; text-align: center; }
   .agent-options .opt-label { font-size: 12px; color: #888; }
 
-  .agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
   .agent-box { background: #161821; border: 2px dashed #2a2d3a; border-radius: 16px; padding: 24px; min-height: 280px; display: flex; flex-direction: column; transition: all 0.2s; }
   .agent-box.drag-over { border-color: #7c8aff; background: #1a1d2e; }
   .agent-box.running { border-style: solid; border-color: #7c8aff; }
@@ -3194,13 +3549,156 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .flow-explain { margin-top: 10px; padding: 10px 12px; background: #0f1117; border-radius: 8px; font-size: 11px; color: #777; line-height: 1.8; }
   .flow-explain-item { display: flex; gap: 6px; align-items: flex-start; }
   .flow-explain-item b { color: #aaa; font-weight: 500; white-space: nowrap; }
+
+  /* Flow wizard */
+  .flow-wizard { background: #161922; border: 1px solid #252a3a; border-radius: 14px; padding: 20px; }
+  .wizard-stepper { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
+  .wizard-step-dot { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 20px; font-size: 13px; font-weight: 600; transition: all 0.2s; }
+  .wizard-step-dot .num { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+  .wizard-step-dot.active { background: rgba(99,102,241,0.15); color: #818cf8; }
+  .wizard-step-dot.active .num { background: #6366f1; color: white; }
+  .wizard-step-dot.done { color: #22c55e; }
+  .wizard-step-dot.done .num { background: #22c55e; color: white; }
+  .wizard-step-dot.pending { color: #52525b; }
+  .wizard-step-dot.pending .num { background: #252a3a; color: #71717a; }
+  .wizard-step-line { flex: 1; height: 2px; background: #252a3a; max-width: 40px; }
+  .wizard-step-line.done { background: #22c55e; }
+  .wizard-card { background: #1c2030; border: 1px solid #252a3a; border-radius: 12px; padding: 20px; display: none; }
+  .wizard-card.active { display: block; }
+  .wizard-card-title { font-size: 17px; font-weight: 700; margin-bottom: 6px; }
+  .wizard-card-subtitle { font-size: 13px; color: #71717a; margin-bottom: 18px; }
+  .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  .product-card {
+    background: #1c2030; border: 2px solid #252a3a; border-radius: 10px; padding: 14px;
+    cursor: pointer; transition: all 0.15s; text-align: center;
+  }
+  .product-card:hover { border-color: #6366f1; transform: translateY(-2px); }
+  .product-card.selected { border-color: #6366f1; background: rgba(99,102,241,0.08); }
+  .product-card .icon { font-size: 28px; margin-bottom: 6px; }
+  .product-card .name { font-size: 14px; font-weight: 600; }
+  .product-card .badge { font-size: 10px; color: #22c55e; margin-top: 4px; }
+  .product-card.auto { border-style: dashed; border-color: #6366f1; color: #818cf8; }
+  .product-card.auto.selected { background: rgba(99,102,241,0.12); }
+  .selected-summary {
+    background: #1c2030; border: 1px solid #252a3a; border-radius: 10px;
+    padding: 12px 16px; margin-top: 16px; font-size: 13px; color: #a1a1aa;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .selected-chip {
+    display: inline-flex; align-items: center; gap: 4px; background: #252a3a;
+    border-radius: 16px; padding: 4px 12px; font-size: 12px; font-weight: 500;
+  }
+  .selected-chip.combined { background: rgba(139,92,246,0.15); color: #a78bfa; }
+  .auto-controls { background: #1c2030; border: 1px solid #252a3a; border-radius: 10px; padding: 14px 16px; margin-top: 14px; display: none; }
+  .auto-controls.visible { display: block; }
+  .auto-controls label { font-size: 13px; color: #a1a1aa; display: block; margin-bottom: 8px; }
+  .auto-controls .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .auto-controls select, .auto-controls input {
+    background: #0d0f14; border: 1px solid #252a3a; border-radius: 8px;
+    padding: 8px 12px; color: #e4e4e7; font-size: 13px;
+  }
+  .agent-list { display: flex; flex-direction: column; gap: 8px; }
+  .agent-row {
+    display: flex; align-items: center; gap: 12px; background: #1c2030;
+    border: 1px solid #252a3a; border-radius: 10px; padding: 12px 16px;
+    transition: all 0.15s; cursor: default;
+  }
+  .agent-row:hover { border-color: #3a3f5a; }
+  .agent-row.dragging { opacity: 0.4; }
+  .agent-row.drag-over { border-color: #6366f1; background: rgba(99,102,241,0.08); }
+  .agent-row .drag-handle {
+    font-size: 18px; color: #71717a; cursor: grab; flex-shrink: 0;
+    user-select: none; padding: 4px; line-height: 1;
+  }
+  .agent-row .drag-handle:active { cursor: grabbing; }
+  .agent-row .order-num {
+    width: 28px; height: 28px; border-radius: 50%; background: #252a3a;
+    display: flex; align-items: center; justify-content: center; font-size: 13px;
+    font-weight: 700; color: #a1a1aa; flex-shrink: 0;
+  }
+  .agent-row .agent-icon { font-size: 20px; }
+  .agent-row .agent-name { font-size: 14px; font-weight: 600; }
+  .agent-row .agent-desc { font-size: 12px; color: #71717a; }
+  .agent-row .agent-text { flex: 1; min-width: 0; }
+  .agent-row .settings-btn {
+    background: #252a3a; border: none; color: #a1a1aa; width: 28px; height: 28px;
+    border-radius: 6px; cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center;
+  }
+  .agent-row .settings-btn:hover { background: #3a3f5a; color: white; }
+  .agent-row .remove-btn {
+    background: none; border: none; color: #71717a; cursor: pointer; font-size: 18px; padding: 4px;
+  }
+  .agent-row .remove-btn:hover { color: #ef4444; }
+  .add-agent-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .add-agent-chip {
+    display: flex; align-items: center; gap: 6px; padding: 8px 12px;
+    background: #1c2030; border: 1px solid #252a3a; border-radius: 8px;
+    color: #a1a1aa; font-size: 13px; cursor: pointer; transition: all 0.15s;
+  }
+  .add-agent-chip:hover { border-color: #6366f1; color: #e4e4e7; }
+  .add-agent-empty { color: #71717a; font-size: 13px; margin-top: 12px; }
+  .opt-group { margin-bottom: 18px; }
+  .opt-group:last-child { margin-bottom: 0; }
+  .opt-label { font-size: 13px; color: #a1a1aa; margin-bottom: 6px; display: block; font-weight: 600; }
+  .opt-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .opt-chip {
+    background: #1c2030; border: 1px solid #252a3a; border-radius: 8px; padding: 8px 14px;
+    font-size: 13px; cursor: pointer; transition: all 0.15s; font-weight: 500;
+  }
+  .opt-chip:hover { border-color: #6366f1; }
+  .opt-chip.active { background: rgba(99,102,241,0.15); border-color: #6366f1; color: #818cf8; }
+  .opt-input-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .opt-input-row input {
+    background: #1c2030; border: 1px solid #252a3a; border-radius: 8px; padding: 8px 12px;
+    color: #e4e4e7; font-size: 14px; width: 80px;
+  }
+  .opt-input-row input:focus { outline: none; border-color: #6366f1; }
+  .review-flow {
+    background: #1c2030; border: 1px solid #252a3a; border-radius: 10px;
+    padding: 16px; margin-bottom: 12px;
+  }
+  .review-flow-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .review-flow-title { font-size: 15px; font-weight: 700; }
+  .review-flow-badge { font-size: 11px; padding: 3px 8px; border-radius: 6px; font-weight: 600; }
+  .review-flow-badge.combined { background: rgba(139,92,246,0.15); color: #a78bfa; }
+  .review-flow-badge.separate { background: rgba(34,197,94,0.15); color: #22c55e; }
+  .review-flow-badge.auto { background: rgba(99,102,241,0.15); color: #818cf8; }
+  .review-steps { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: #a1a1aa; }
+  .review-step { display: flex; align-items: center; gap: 4px; }
+  .review-arrow { color: #52525b; }
+  .review-opts { margin-top: 10px; font-size: 12px; color: #71717a; padding-top: 10px; border-top: 1px solid #252a3a; }
+  .wizard-nav { display: flex; gap: 10px; margin-top: 20px; }
+  .wizard-nav .spacer { flex: 1; }
+  .btn { padding: 12px 24px; border-radius: 10px; font-size: 14px; cursor: pointer; border: none; font-weight: 600; transition: all 0.15s; }
+  .btn-primary { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(99,102,241,0.3); }
+  .btn-primary:disabled { background: #252a3a; color: #52525b; cursor: not-allowed; transform: none; box-shadow: none; }
+  .btn-secondary { background: #1c2030; color: #a1a1aa; border: 1px solid #252a3a; }
+  .btn-secondary:hover { border-color: #3a3f5a; color: #e4e4e7; }
+  .flow-tabs { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+  .flow-tab {
+    background: #1c2030; border: 1px solid #252a3a; border-radius: 8px; padding: 12px 14px;
+    font-size: 13px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 10px; font-weight: 500;
+  }
+  .flow-tab.active { border-color: #6366f1; background: rgba(99,102,241,0.1); color: #818cf8; }
+  .flow-tab .tab-x { color: #71717a; font-size: 14px; }
+  .flow-tab .tab-x:hover { color: #ef4444; }
+  .flow-tab-add { border-style: dashed; color: #818cf8; justify-content: center; }
+  #flow-wizard-list { display: flex; flex-direction: column; gap: 20px; margin-top: 20px; }
+  .flow-box { background: #1c2030; border: 1px solid #252a3a; border-radius: 12px; padding: 20px; }
+  .flow-box-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .flow-box-title { font-size: 16px; font-weight: 600; color: #a78bfa; }
+  .flow-box-remove { color: #71717a; font-size: 16px; cursor: pointer; }
+  .flow-box-remove:hover { color: #ef4444; }
+  .flow-box-nav { display: flex; gap: 10px; margin-top: 20px; }
+  .flow-box-nav .spacer { flex: 1; }
 </style>
 </head>
 <body>
 <div class="header">
   <div class="header-left">
     <h1>MKTApp</h1>
-    <p>โยนโฟลเดอร์สินค้าเข้ากล่อง agent → กดยืนยัน → ได้ผลลัพธ์</p>
+    <p>เลือกสินค้า → เรียงลำดับ agent → ตั้งค่า content → กดยืนยันรัน flow</p>
   </div>
   <div class="header-right">
     <div class="credits-badge" id="credits-badge" style="display:none">กำลังโหลด...</div>
@@ -3219,19 +3717,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
   <div id="main-area" class="main">
     <div class="hint-bar">
-      <span><b>วิธีใช้:</b> ลากโฟลเดอร์สินค้าจากแถบซ้าย → โยนลงกล่อง agent → กด <b>ยืนยัน</b> หรือกด <b>⚡ Auto</b> ในแถบซ้ายเพื่อให้ AI เลือกสินค้าเอง</span>
+      <span><b>วิธีใช้:</b> สร้าง flow ทีละขั้น → เลือกสินค้า → เลือก agent → ตั้งค่า → ยืนยัน</span>
     </div>
-    <div class="quick-brief-box">
-      <div class="flow-display" id="flow-display"></div>
-      <div class="agents-grid" id="agents-grid"></div>
-      <label>💬 มีอะไรที่อยากให้ทีมเน้นเป็นพิเศษไหม? (ไม่ใส่ก็ได้)</label>
-      <textarea id="quick-brief-input" placeholder="เช่น 'เจาะกลุ่มวัย 25-35 และเน้นขายผ่าน TikTok' — คำสั่งนี้ใช้ครั้งเดียวทิ้ง ไม่เซฟถาวร"></textarea>
-      <div id="quick-brief-conflict-banner" style="display:none;margin-top:8px"></div>
-      <div class="brief-actions">
-        <button class="global-confirm-btn" id="global-confirm" onclick="onConfirmClick()" disabled>ยืนยัน</button>
-        <button class="global-clear-btn" id="global-clear" onclick="clearAll()">ล้าง</button>
-        <span class="brief-hint" id="brief-hint">เลือกสินค้าก่อนกดยืนยัน</span>
+
+    <div class="flow-wizard" id="flow-wizard">
+      <div class="wizard-brief-box">
+        <label class="opt-label">คำสั่งเพิ่มเติม (ถ้าขัดแย้งกับค่าเริ่มต้น ให้ทำตามคำสั่งนี้แทน)</label>
+        <textarea id="quick-brief-input" class="brief-box" placeholder="เช่น 'เน้นจุดขายกันน้ำ'" style="width:100%; background:#1c2030; border:1px solid #252a3a; border-radius:10px; padding:12px 16px; color:#e4e4e7; font-size:14px; resize:vertical; min-height:80px;"></textarea>
+        <div id="quick-brief-conflict-banner" style="display:none;margin-top:8px"></div>
       </div>
+      <div id="flow-wizard-list"></div>
     </div>
   </div>
 </div>
@@ -3239,12 +3734,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
 let currentSidebarTab = 'folders';
 let runningAgents = {};
 let abortController = null;
-let agentFolders = {};
+let agentFolders = {};      // legacy — ไม่ใช้แล้วแต่เก็บไว้เพื่อไม่พัง
+let flows = [];             // new wizard flow data (per-flow step state lives in wizard_ui.js as flowSteps[])
+let wizardFlowCounter = 0;
 let savedAgentView = '';
 let _currentMediaSession = '';
 let _currentMediaFile = '';
 let _currentMediaContent = '';
 let _currentMediaPost = null;
+let _currentMediaPosts = [];   // ทุก posts ในไฟล์ (รองรับหลายแพลตฟอร์ม)
+let _currentMediaPostIdx = 0;  // index ของ post ที่กำลังดูอยู่
 let _resultNavFiles = [];   // รายการไฟล์ทั้งหมดในการสร้างครั้งนั้น (สำหรับ navigation)
 let _resultNavIdx = 0;      // index ของไฟล์ที่กำลังดูอยู่
 let multiSelectMode = false;
@@ -3272,8 +3771,8 @@ const AGENT_ORDER = ['product_spec', 'competitor_analysis', 'campaign_strategy',
 const AGENT_DEPENDENCIES = {
   product_spec: [],
   competitor_analysis: ['product_spec'],
-  campaign_strategy: ['product_spec'],
-  content_creator: ['product_spec'],
+  campaign_strategy: ['product_spec', 'competitor_analysis'],
+  content_creator: ['product_spec', 'competitor_analysis', 'campaign_strategy'],
 };
 const AGENT_INFO = {
   product_spec: { name: 'นักวิเคราะห์สินค้า', desc: 'สร้างสเปคสินค้าจากข้อมูลดิบ', icon: '📋', flow_reason: 'อ่านข้อมูลดิบแล้วสรุปเป็นสเปคสินค้า ซึ่งเป็นฐานให้ agent อื่นใช้ต่อ' },
@@ -3292,7 +3791,7 @@ function switchSidebarTab(tab, ev) {
 }
 
 function loadFolderList() {
-  fetch('/api/data_folders').then(r => r.json()).then(folders => {
+  return fetch('/api/data_folders').then(r => r.json()).then(folders => {
     const el = document.getElementById('sidebar-content');
     // นับสินค้า ready สำหรับ max ใน Auto count input
     readyProductCount = folders.filter(f => f.status === 'ready').length;
@@ -3304,11 +3803,11 @@ function loadFolderList() {
     const msBtnClass = multiSelectMode ? 'sidebar-ms-btn active' : 'sidebar-ms-btn';
     html += '<div class="sidebar-toolbar-row"><button class="' + msBtnClass + '" style="flex:1" onclick="toggleMultiSelect()" title="เลือกหลายรายการเพื่อส่งไป agent พร้อมกัน">☑ เลือกหลายรายการ</button></div>';
     html += '</div>';
-    // Auto item — draggable เหมือนสินค้าทั่วไป แต่ AI เลือกสินค้าเอง
+    // Auto item — คลิกเลือกใน wizard
     if (!multiSelectMode) {
-      html += '<div class="folder-item auto-item" data-name="__auto__" draggable="true" ondragstart="onDragStart(event,\'' + AUTO_ITEM + '\')" ondragend="onDragEnd(event)" title="AI เลือกสินค้าเอง — ลากไปลงนักสร้างคอนเทนต์">';
+      html += '<div class="folder-item auto-item" data-name="__auto__" title="AI เลือกสินค้าเอง — กดเลือกใน wizard">';
       html += '<span class="folder-icon" style="font-size:20px">⚡</span>';
-      html += '<div class="folder-info" style="cursor:grab">';
+      html += '<div class="folder-info">';
       html += '<div class="folder-name" style="color:#a5b4ff">Auto</div>';
       html += '<div class="folder-meta"><span style="font-size:11px;color:#888">AI เลือกสินค้าเอง</span></div>';
       html += '</div>';
@@ -3352,20 +3851,20 @@ function loadFolderList() {
 
         if (multiSelectMode && canUseAgent) {
           // Multi-select mode: click card toggles selection, no drag
-          html += '<div class="folder-item' + selectedCls + '" data-name="' + escapeHtml(f.name).toLowerCase() + '" onclick="toggleFolderSelect(\'' + safePath + '\')">';
+          html += '<div class="folder-item' + selectedCls + '" data-name="' + escapeHtml(f.name).toLowerCase() + '" data-folder="' + escapeHtml(f.path) + '" data-status="' + status + '" data-fname="' + escapeHtml(f.name) + '" onclick="toggleFolderSelect(\'' + safePath + '\')">';
           const checkCls = isSelected ? 'ms-check checked' : 'ms-check';
           html += '<span class="' + checkCls + '">' + (isSelected ? '✓' : '') + '</span>';
         } else if (isEmpty) {
           const title = status === 'no_usable_data' ? 'มีไฟล์แต่ไม่รองรับ — ลากไม่ได้' : 'ยังไม่มีไฟล์ข้อมูล — ลากไม่ได้';
-          html += '<div class="folder-item folder-item-disabled" data-name="' + escapeHtml(f.name).toLowerCase() + '" title="' + title + '">';
+          html += '<div class="folder-item folder-item-disabled" data-name="' + escapeHtml(f.name).toLowerCase() + '" data-folder="' + escapeHtml(f.path) + '" data-status="' + status + '" data-fname="' + escapeHtml(f.name) + '" title="' + title + '">';
         } else if (isProcessing) {
-          html += '<div class="folder-item folder-item-disabled" data-name="' + escapeHtml(f.name).toLowerCase() + '" title="กำลังประมวลผลข้อมูล — รอให้พร้อมก่อน">';
+          html += '<div class="folder-item folder-item-disabled" data-name="' + escapeHtml(f.name).toLowerCase() + '" data-folder="' + escapeHtml(f.path) + '" data-status="' + status + '" data-fname="' + escapeHtml(f.name) + '" title="กำลังประมวลผลข้อมูล — รอให้พร้อมก่อน">';
         } else if (isPending) {
-          html += '<div class="folder-item folder-item-disabled" data-name="' + escapeHtml(f.name).toLowerCase() + '" title="มีไฟล์แต่ยังไม่ได้ประมวลผล — กด⚙ เพื่อประมวลผลข้อมูลก่อน">';
+          html += '<div class="folder-item folder-item-disabled" data-name="' + escapeHtml(f.name).toLowerCase() + '" data-folder="' + escapeHtml(f.path) + '" data-status="' + status + '" data-fname="' + escapeHtml(f.name) + '" title="มีไฟล์แต่ยังไม่ได้ประมวลผล — กด⚙ เพื่อประมวลผลข้อมูลก่อน">';
         } else {
-          // ready หรือ stale → draggable
-          const dragTitle = status === 'stale' ? 'ข้อมูลเก่า — แนะนำให้กดประมวลผลใหม่' : '';
-          html += '<div class="folder-item" data-name="' + escapeHtml(f.name).toLowerCase() + '" draggable="true" ondragstart="onDragStart(event,\'' + safePath + '\')" ondragend="onDragEnd(event)" title="' + dragTitle + '">';
+          // ready หรือ stale → คลิกเลือกใน wizard
+          const staleTitle = status === 'stale' ? 'ข้อมูลเก่า — แนะนำให้กดประมวลผลใหม่' : '';
+          html += '<div class="folder-item" data-name="' + escapeHtml(f.name).toLowerCase() + '" data-folder="' + escapeHtml(f.path) + '" data-status="' + status + '" data-fname="' + escapeHtml(f.name) + '" title="' + staleTitle + '">';
         }
         const thumb = f.thumbnail
           ? '<img src="/api/product_image/' + encodeURIComponent(f.path) + '" alt="">'
@@ -5080,76 +5579,7 @@ function onDragEnd(ev) {
   ev.target.classList.remove('dragging');
 }
 
-function renderAgentBoxes() {
-  const grid = document.getElementById('agents-grid');
-  let html = '';
-  for (const key of AGENT_ORDER) {
-    if (!agentFolders[key]) agentFolders[key] = { separate: [], combined: [] };
-    const info = AGENT_INFO[key];
-    html += '<div class="agent-box" id="box-' + key + '"';
-    html += ' ondragover="onDragOver(event,\'' + key + '\')" ondragleave="onDragLeave(event,\'' + key + '\')" ondrop="onDrop(event,\'' + key + '\')">';
-    html += '<div class="agent-header"><span class="agent-icon">' + info.icon + '</span><span class="agent-title">' + info.name + '</span></div>';
-    html += '<div class="agent-desc">' + info.desc + '</div>';
-    html += '<div class="drop-zone" id="dropzone-' + key + '"></div>';
-    // content_creator: toggle chips โผล่ตอนมีสินค้าในกล่อง
-    if (key === 'content_creator') {
-      html += '<div class="agent-options" id="options-' + key + '">';
-      // แถว 1: แพลตฟอร์ม + จำนวน
-      html += '<div class="opt-row">';
-      html += '<span class="opt-row-label">แพลตฟอร์ม</span>';
-      html += '<select id="opt-platform" onchange="showFlow()">';
-      html += '<option value="auto" selected>อัตโนมัติ (FB หรือ TikTok)</option>';
-      html += '<option value="facebook">📘 Facebook</option>';
-      html += '<option value="tiktok">🎵 TikTok</option>';
-      html += '</select>';
-      html += '<span class="opt-row-label" style="margin-left:12px">จำนวน</span>';
-      html += '<input type="number" class="opt-count-input" id="opt-count" value="1" min="1" max="20" onchange="updateCountChip()">';
-      html += '<span class="opt-label">โพสต์</span>';
-      html += '</div>';
-      // แถว 2: context (คู่แข่ง + กลยุทธ์) — ซ่อนชั่วคราว ยังใช้งานไม่ได้จริง
-      // (chips แค่อ่าน cache แต่ไม่ trigger upstream agent + campaign_strategy ไม่เขียน cache)
-      // html += '<div class="opt-row">';
-      // html += '<span class="opt-row-label">ข้อมูล</span>';
-      // html += '<span class="opt-chip active green" id="opt-competitor" onclick="toggleOptChip(this)">📊 คู่แข่ง</span>';
-      // html += '<span class="opt-chip active green" id="opt-campaign" onclick="toggleOptChip(this)">📋 กลยุทธ์</span>';
-      // html += '</div>';
-      // แถว 3: สื่อ — เลือกว่าสร้างอะไร + เมื่อไหร่
-      html += '<div class="opt-row">';
-      html += '<span class="opt-row-label">สื่อ</span>';
-      html += '<span class="opt-label">สร้าง:</span>';
-      html += '<select id="opt-media-type" onchange="onMediaSettingsChange()">';
-      html += '<option value="image" selected>🎨 รูป</option>';
-      html += '<option value="video">🎬 วิดีโอ</option>';
-      html += '<option value="both">🎨 รูป + 🎬 วิดีโอ</option>';
-      html += '</select>';
-      html += '<span class="opt-label" style="margin-left:12px">เมื่อ:</span>';
-      html += '<select id="opt-media-when" onchange="onMediaSettingsChange()">';
-      html += '<option value="ask" selected>ถามก่อน</option>';
-      html += '<option value="auto">ทันทีหลังเสร็จ</option>';
-      html += '</select>';
-      html += '</div>';
-      html += '</div>';
-    }
-    html += '<div class="agent-status" id="status-' + key + '"></div>';
-    html += '<div class="agent-output" id="output-' + key + '"></div>';
-    html += '<div class="agent-file-link" id="file-' + key + '"></div>';
-    html += '<div class="agent-actions">';
-    html += '<button class="clear-btn" onclick="clearAgent(\'' + key + '\')">ล้าง</button>';
-    html += '<button class="agent-settings-btn" onclick="openAgentSettings(\'' + key + '\')">⚙ ตั้งค่า</button>';
-    html += '<span id="conflict-icon-' + key + '" style="display:none;color:#fbbf24;font-size:14px;cursor:pointer" onclick="openAgentSettings(\'' + key + '\')" title="การตั้งค่านี้ขัดกับกฎแบรนด์">⚠</span>';
-    html += '</div>';
-    html += '</div>';
-  }
-  grid.innerHTML = html;
-  // Render initial drop zones (shows 2 subzones for campaign_strategy/content_creator)
-  for (const key of AGENT_ORDER) {
-    updateDropZone(key);
-  }
-  // โหลด auto media config มาอัปเดต chips
-  loadMediaConfigToChips();
-  // โหลด conflict icons สำหรับทุก agent
-  loadConflictIcons();
-}
+// renderAgentBoxes ถูกแทนทีโดย flow wizard ใน src/wizard_ui.js
 
 function loadConflictIcons() {
   // ดึงจาก central cache — ตรวจครั้งเดียวตอน save, ไม่ตรวจใหม่ทุกครั้ง
@@ -5227,21 +5657,27 @@ function updateCountChip() {
 }
 
 function getContentCreatorOptions() {
-  const platformVal = document.getElementById('opt-platform')?.value || 'auto';
+  const platformEl = document.getElementById('opt-platform');
+  const platformVal = platformEl ? platformEl.value : 'auto';
   let platforms;
   if (platformVal === 'auto') {
     platforms = ['facebook', 'tiktok'];
   } else {
     platforms = [platformVal];
   }
-  const mediaType = document.getElementById('opt-media-type')?.value || 'image';
-  const mediaWhen = document.getElementById('opt-media-when')?.value || 'ask';
+  const mediaTypeEl = document.getElementById('opt-media-type');
+  const mediaType = mediaTypeEl ? mediaTypeEl.value : 'image';
+  const mediaWhenEl = document.getElementById('opt-media-when');
+  const mediaWhen = mediaWhenEl ? mediaWhenEl.value : 'ask';
+  const competitorEl = document.getElementById('opt-competitor');
+  const campaignEl = document.getElementById('opt-campaign');
+  const countEl = document.getElementById('opt-count');
   return {
     platforms: platforms,
     platform_mode: platformVal,
-    use_competitor: document.getElementById('opt-competitor')?.classList.contains('active') ?? true,
-    use_campaign: document.getElementById('opt-campaign')?.classList.contains('active') ?? true,
-    content_count: parseInt(document.getElementById('opt-count')?.value) || 1,
+    use_competitor: competitorEl ? competitorEl.classList.contains('active') : true,
+    use_campaign: campaignEl ? campaignEl.classList.contains('active') : true,
+    content_count: parseInt(countEl ? countEl.value : '1') || 1,
     media_type: mediaType,
     media_when: mediaWhen,
     auto_image: (mediaType === 'image' || mediaType === 'both') && mediaWhen === 'auto',
@@ -5616,7 +6052,7 @@ async function checkProductStatus(folder) {
     const r = await fetch('/api/ingest_status/' + encodeURIComponent(folder));
     const data = await r.json();
     return data.status || 'empty';
-  } catch {
+  } catch (e) {
     return 'empty';
   }
 }
@@ -6397,6 +6833,31 @@ function renderPostsToMarkdownJS(parsed) {
 //    - markdown ไม่ได้ส่งจาก LLM แล้ว เรา generate เองจาก posts (renderPostsToMarkdownJS)
 //    - รองรับ JSON เก่าที่มี markdown field อยู่ (backward compatible)
 // 2. Markdown (เดิม): ใช้ regex parser ตามรูปแบบใน agents.yaml
+// แปลง JSON ที่มีหลาย posts → คืน array ของ post objects
+function parseContentPosts(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && parsed.posts && parsed.posts.length > 0) {
+      const posts = parsed.posts.map(p => ({
+        platform: p.platform || '',
+        concept: p.concept || p.angle || '',
+        title: p.title || '',
+        caption: p.caption || p.content || '',
+        script: p.script || '',
+        content: p.caption || p.content || '',
+        hashtags: p.hashtags || '',
+        imagePrompt: (p.image_prompts && p.image_prompts.length > 0) ? p.image_prompts[0].prompt : '',
+        videoPrompt: (p.video_prompts && p.video_prompts.length > 0) ? p.video_prompts[0].prompt : '',
+        scriptReview: p.script_review || null,
+        raw: parsed.markdown || renderPostsToMarkdownJS(parsed),
+      }));
+      return posts;
+    }
+  } catch (e) {}
+  // fallback: ใช้ regex parser แบบเดิม → คืน array 1 ตัว
+  return [parseContentPost(text)];
+}
+
 function parseContentPost(text) {
   // --- Path 1: JSON (structured output) ---
   try {
@@ -6682,14 +7143,45 @@ function togglePreviewView(mode) {
   }
 }
 
+// สลับดู post ต่างๆ ในไฟล์เดียวกัน (เช่น Facebook + TikTok)
+function switchPostView(idx) {
+  if (!_currentMediaPosts || idx < 0 || idx >= _currentMediaPosts.length) return;
+  _currentMediaPostIdx = idx;
+  const post = _currentMediaPosts[idx];
+  _currentMediaPost = post;
+  // อัปเดต tab active
+  document.querySelectorAll('.post-selector-tab').forEach(t => t.classList.remove('active'));
+  const tab = document.querySelector('.post-selector-tab[data-post-idx="' + idx + '"]');
+  if (tab) tab.classList.add('active');
+  // อัปเดต meta tags
+  const metaEl = document.getElementById('preview-meta-tags');
+  if (metaEl) {
+    let mh = '';
+    if (post.platform) mh += '<span class="meta-tag">แพลตฟอร์ม: <b>' + escapeHtml(post.platform) + '</b></span>';
+    if (post.concept) mh += '<span class="meta-tag">มุมมอง: <b>' + escapeHtml(post.concept) + '</b></span>';
+    metaEl.innerHTML = mh;
+  }
+  // อัปเดต platform preview
+  findSessionMedia(_currentMediaSession, function(media) {
+    const el = document.getElementById('preview-platform-content');
+    if (el) el.innerHTML = renderPlatformPreview(post, _currentMediaSession, media.images, media.videos);
+    fetch('/api/media_status/' + encodeURIComponent(_currentMediaSession)).then(r => r.json()).then(st => {
+      renderMediaActionBar(_currentMediaSession, _currentMediaFile, post, media, st);
+    }).catch(() => renderMediaActionBar(_currentMediaSession, _currentMediaFile, post, media));
+  });
+}
+
 // แสดงผลลัพธ์ content_creator พร้อม toggle platform preview / ต้นฉบับ
 function renderContentResult(session, filename, content) {
-  const post = parseContentPost(content);
+  const posts = parseContentPosts(content);
+  const post = posts[0];  // backward compat — ใช้ post แรกเป็น default
   // เก็บ context สำหรับใช้ตอนสร้าง media
   _currentMediaSession = session;
   _currentMediaFile = filename;
   _currentMediaContent = content;
   _currentMediaPost = post;
+  _currentMediaPosts = posts;  // เก็บทั้งหมดไว้สำหรับสลับ
+  _currentMediaPostIdx = 0;
   let html = '<h2>' + escapeHtml(filename) + '</h2>';
   html += '<div class="file-info-display">Session: ' + escapeHtml(session) + '</div>';
   // Toggle
@@ -6697,8 +7189,19 @@ function renderContentResult(session, filename, content) {
   html += '<button class="active" data-mode="platform" onclick="togglePreviewView(\'platform\')">📱 ดูแบบโพสต์</button>';
   html += '<button data-mode="original" onclick="togglePreviewView(\'original\')">📄 ดูต้นฉบับ</button>';
   html += '</div>';
+  // Post selector — ถ้ามีหลาย posts (เช่น Facebook + TikTok)
+  if (posts.length > 1) {
+    html += '<div class="post-selector-bar">';
+    for (let i = 0; i < posts.length; i++) {
+      const p = posts[i];
+      const plat = p.platform || ('โพสต์ ' + (i+1));
+      const cls = i === 0 ? 'post-selector-tab active' : 'post-selector-tab';
+      html += '<button class="' + cls + '" data-post-idx="' + i + '" onclick="switchPostView(' + i + ')">' + escapeHtml(plat) + '</button>';
+    }
+    html += '</div>';
+  }
   // Meta tags
-  html += '<div class="preview-meta">';
+  html += '<div class="preview-meta" id="preview-meta-tags">';
   if (post.platform) html += '<span class="meta-tag">แพลตฟอร์ม: <b>' + escapeHtml(post.platform) + '</b></span>';
   if (post.concept) html += '<span class="meta-tag">มุมมอง: <b>' + escapeHtml(post.concept) + '</b></span>';
   html += '</div>';
@@ -7197,7 +7700,6 @@ function saveAgentSettings() {
   });
 }
 
-renderAgentBoxes();
 loadFolderList();
 loadCredits();
 
@@ -7432,6 +7934,7 @@ function loadCredits() {
     <div class="result-modal-body" id="result-modal-body"></div>
   </div>
 </div>
+<script src="/wizard_ui.js"></script>
 </body>
 </html>"""
 

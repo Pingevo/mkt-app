@@ -500,6 +500,175 @@ class Orchestrator:
         return f"เหตุผลที่เลือก: {reason}\n" + "\n".join(summaries)
 
     # ------------------------------------------------------------------
+    #  Script Review — self-review อัตโนมัติ (ใช้ร่วม auto + regular flow)
+    # ------------------------------------------------------------------
+
+    def _review_script_in_posts(
+        self,
+        posts: list[dict[str, Any]],
+        platform: str,
+        llm: LLMClient | None = None,
+        status_callback=None,
+        ch_cfg: dict | None = None,
+    ) -> dict[str, Any]:
+        """ตรวจ script ใน posts — แก้ script ถ้า score ต่ำ + สร้าง video_prompts ใหม่.
+
+        แก้ posts ใน place (อัปเดต script + video_prompts + เพิ่ม script_review field).
+        คืน script_review_result dict (สำหรับเก็บใน all_script_reviews).
+        """
+        import json as _json
+        from datetime import datetime as _dt
+
+        ch_cfg = ch_cfg or {}
+        script_review_result: dict[str, Any] = {}
+
+        try:
+            # หา post ที่มี script
+            script_post_idx = -1
+            original_script = ""
+            for i, p in enumerate(posts):
+                if p.get("script", "").strip():
+                    script_post_idx = i
+                    original_script = p["script"]
+                    break
+
+            if script_post_idx >= 0 and original_script:
+                from .script_reviewer import review_script
+                threshold = int(ch_cfg.get("script_review_threshold", 70))
+                max_iter = min(int(ch_cfg.get("script_review_max_iterations", 2)), 2)
+                iterations_done = 0
+
+                # รอบ 1: ตรวจ script เดิม
+                if status_callback:
+                    status_callback(f"กำลังตรวจ script (รอบที่ 1/{max_iter})...")
+                script_review_result = review_script(
+                    original_script,
+                    platform or "TikTok",
+                    llm,
+                )
+                iterations_done = 1
+
+                first_score = script_review_result.get("score", 0) if script_review_result else 0
+                if status_callback and script_review_result:
+                    status_callback(
+                        f"Script review รอบที่ 1: score {first_score}/100, "
+                        f"{len(script_review_result.get('issues', []))} จุดน่าเบื่อ"
+                    )
+
+                # ถ้ารอบ 1 ผ่าน → ใช้ script เดิม จบ
+                if first_score >= threshold or not script_review_result:
+                    final_script = original_script
+                    final_score = first_score
+                else:
+                    # รอบ 2: ใช้ revised_script แล้วตรวจใหม่
+                    revised = script_review_result.get("revised_script", "")
+                    if not revised.strip():
+                        final_script = original_script
+                        final_score = first_score
+                    else:
+                        if status_callback:
+                            status_callback(f"กำลังตรวจ script ที่แก้ (รอบที่ 2/{max_iter})...")
+                        re_review = review_script(
+                            revised,
+                            platform or "TikTok",
+                            llm,
+                        )
+                        iterations_done = 2
+                        re_score = re_review.get("score", 0) if re_review else 0
+
+                        if status_callback:
+                            status_callback(
+                                f"Script review รอบที่ 2: score {re_score}/100"
+                            )
+
+                        # Loop safety: ถ้า re-check ต่ำกว่า original → revert
+                        if re_score < first_score:
+                            if status_callback:
+                                status_callback(
+                                    f"⚠ Script ที่แก้ ({re_score}/100) แย่กว่าต้นฉบับ "
+                                    f"({first_score}/100) — ใช้ต้นฉบับ"
+                                )
+                            final_script = original_script
+                            final_score = first_score
+                            script_review_result["re_review"] = re_review
+                        else:
+                            final_script = revised
+                            final_score = re_score
+                            script_review_result = re_review
+                            script_review_result["original_score"] = first_score
+
+                # --- Apply: อัปเดต script ใน post ---
+                script_changed = final_script.strip() != original_script.strip()
+
+                if script_changed and final_script.strip():
+                    posts[script_post_idx]["script"] = final_script
+                    # สร้าง video_prompts ใหม่จาก script สุดท้าย
+                    if status_callback:
+                        status_callback("กำลังสร้าง video_prompts ใหม่จาก script ที่แก้...")
+                    try:
+                        from .config_loader import get_agent_config
+                        cc_cfg = get_agent_config(self.config, "content_creator")
+                        vp_system = cc_cfg.get("system_prompt", "")
+                        vp_user = (
+                            f"เขียน video_prompts ใหม่จาก script นี้ (platform: {platform or 'TikTok'}):\n\n"
+                            f"{final_script}\n\n"
+                            f"คืน JSON ตาม schema ใน system prompt"
+                        )
+                        from .content_schema import CONTENT_SCHEMA
+                        vp_response = llm.chat(
+                            [{"role": "system", "content": vp_system},
+                             {"role": "user", "content": vp_user}],
+                            temperature=cc_cfg.get("temperature", 0.9),
+                            max_tokens=cc_cfg.get("max_tokens", 4096),
+                            stream=False,
+                            response_format={
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": "content_output",
+                                    "strict": True,
+                                    "schema": CONTENT_SCHEMA,
+                                },
+                            },
+                            source="script_review.regenerate_prompts",
+                        )
+                        vp_clean = _strip_code_fence(vp_response)
+                        vp_data = _json.loads(vp_clean)
+                        vp_posts = vp_data.get("posts", [])
+                        if vp_posts and vp_posts[0].get("video_prompts"):
+                            posts[script_post_idx]["video_prompts"] = vp_posts[0]["video_prompts"]
+                    except Exception:
+                        pass  # สร้าง video_prompts ไม่ได้ → ใช้ของเดิม
+
+                # บันทึก review state ลงใน post
+                posts[script_post_idx]["script_review"] = {
+                    "status": "reviewed",
+                    "reviewed_at": _dt.now().isoformat(),
+                    "score": final_score,
+                    "iterations": iterations_done,
+                    "threshold": threshold,
+                    "script_changed": script_changed,
+                    "issues_count": len(script_review_result.get("issues", [])),
+                    "hooks_count": len(script_review_result.get("suggested_hooks", [])),
+                    "review": script_review_result,
+                }
+
+                if status_callback:
+                    if final_score >= threshold:
+                        status_callback(
+                            f"✓ Script review ผ่าน: {final_score}/100 "
+                            f"({iterations_done} รอบ, {'แก้แล้ว' if script_changed else 'ไม่ต้องแก้'})"
+                        )
+                    else:
+                        status_callback(
+                            f"⚠ Script score {final_score}/100 ยังต่ำกว่า {threshold} "
+                            f"หลัง {iterations_done} รอบ — ใช้ script ล่าสุด"
+                        )
+        except Exception:
+            pass  # review พังไม่ต้อง crash pipeline
+
+        return script_review_result
+
+    # ------------------------------------------------------------------
     #  Auto mode — agent เลือกสินค้าเอง + คอนเทนต์ไม่ซ้ำ
     # ------------------------------------------------------------------
 
@@ -884,263 +1053,143 @@ class Orchestrator:
                 quick_brief = (quick_brief or "") + multi_context
 
             # ส่งแนวคิดที่เลือกเป็น quick_brief เพิ่ม
-            auto_brief = f"แนวคิดที่ต้องใช้: {chosen_concept}"
+            base_auto_brief = f"แนวคิดที่ต้องใช้: {chosen_concept}"
             if quick_brief:
-                auto_brief += f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
-            if platforms:
-                platform_names = _PLATFORM_NAMES
-                selected = [platform_names.get(p, p) for p in platforms]
-                if len(selected) == 1:
-                    auto_brief += f"\nแพลตฟอร์มที่ต้องสร้าง: {selected[0]} เท่านั้น"
-                else:
-                    auto_brief += f"\nแพลตฟอร์มที่เลือก: {' หรือ '.join(selected)}"
+                base_auto_brief += f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
 
-            if status_callback:
-                status_callback(f"กำลังสร้างคอนเทนต์สำหรับ {', '.join(chosen_pids)}...")
-
-            # --- Phase 2: สร้างคอนเทนต์ + ตรวจซ้ำ (retry ถ้าซ้ำ) ---
             project_root = Path(__file__).resolve().parent.parent
             max_dedup_retries = int(ch_cfg.get("dedup_max_retries", 3))
-            content = ""
-            caption_summary = ""
-            platform_used = ""
-            dup_result = {"is_duplicate": False, "similarity": 0.0, "matched_entry": None}
-            retry_count = 0
+            platform_names = _PLATFORM_NAMES
+            target_platforms = platforms if platforms else [""]
 
-            for attempt in range(max_dedup_retries + 1):
-                # เพิ่ม feedback ให้ LLM รู้ว่าซ้ำ (รอบต่อๆ ไป)
-                attempt_brief = auto_brief
-                if retry_count > 0 and dup_result.get("is_duplicate"):
-                    matched = dup_result.get("matched_entry") or {}
-                    matched_caption = matched.get("caption_summary", "")[:200]
-                    attempt_brief = (
-                        auto_brief + "\n\n"
-                        f"--- คอนเทนต์ที่สร้างครั้งก่อนซ้ำกับที่เคยทำ (similarity {dup_result.get('similarity', 0):.2f}) ---\n"
-                        f"คอนเทนต์เดิมที่ซ้ำ: {matched_caption}\n"
-                        f"--- สิ้นสุด ---\n"
-                        f"สร้างคอนเทนต์ใหม่ที่แตกต่างจากด้านบนอย่างชัดเจน — เปลี่ยนมุมมอง/concept/เนื้อหา"
-                    )
-                    if status_callback:
-                        status_callback(f"คอนเทนต์ซ้ำ (ครั้งที่ {retry_count}) — กำลังสร้างใหม่...")
+            all_posts: list[dict[str, Any]] = []
+            all_script_reviews: list[dict[str, Any]] = []
+            overall_duplicate = False
+            max_similarity = 0.0
+            last_retry_count = 0
 
-                content = self.run_content_creator(
-                    "", "", "",
-                    llm=llm, quick_brief=attempt_brief,
-                    media_type=media_type,
-                    asset_summary=asset_summary,
-                )
-
-                # ดึง caption เพื่อตรวจซ้ำ
-                caption_summary = ""
-                platform_used = ""
-                try:
-                    parsed = _json.loads(content)
-                    posts = parsed.get("posts", [])
-                    if posts:
-                        first = posts[0]
-                        caption_summary = first.get("caption", "")
-                        platform_used = first.get("platform", "")
-                except (_json.JSONDecodeError, TypeError):
-                    pass
-
-                # ตรวจซ้ำ
-                dup_result = content_history.check_duplicate(
-                    project_root, caption_summary, config=ch_cfg,
-                )
-
-                if not dup_result.get("is_duplicate"):
-                    break  # ไม่ซ้ำ → ใช้ผลงานนี้
-
-                if attempt < max_dedup_retries:
-                    retry_count += 1
-
-            # แจ้ง user ถ้ายังซ้ำหลัง retry หมด
-            if dup_result.get("is_duplicate") and retry_count >= max_dedup_retries:
+            for platform in target_platforms:
+                platform_label = platform_names.get(platform, platform) if platform else ""
                 if status_callback:
-                    status_callback(
-                        f"⚠ ยังซ้ำหลังลอง {max_dedup_retries} ครั้ง — ใช้ผลงานล่าสุด (similarity {dup_result.get('similarity', 0):.2f})"
+                    if platform_label:
+                        status_callback(f"กำลังสร้างคอนเทนต์สำหรับ {', '.join(chosen_pids)} ({platform_label})...")
+                    else:
+                        status_callback(f"กำลังสร้างคอนเทนต์สำหรับ {', '.join(chosen_pids)}...")
+
+                platform_brief = base_auto_brief
+                if platform_label:
+                    platform_brief += f"\nแพลตฟอร์มที่ต้องสร้าง: {platform_label} เท่านั้น"
+
+                # --- Phase 2: สร้างคอนเทนต์ + ตรวจซ้ำ (retry ถ้าซ้ำ) ---
+                content = ""
+                caption_summary = ""
+                platform_used = platform_label
+                dup_result = {"is_duplicate": False, "similarity": 0.0, "matched_entry": None}
+                retry_count = 0
+
+                for attempt in range(max_dedup_retries + 1):
+                    attempt_brief = platform_brief
+                    if retry_count > 0 and dup_result.get("is_duplicate"):
+                        matched = dup_result.get("matched_entry") or {}
+                        matched_caption = matched.get("caption_summary", "")[:200]
+                        attempt_brief = (
+                            platform_brief + "\n\n"
+                            f"--- คอนเทนต์ที่สร้างครั้งก่อนซ้ำกับที่เคยทำ (similarity {dup_result.get('similarity', 0):.2f}) ---\n"
+                            f"คอนเทนต์เดิมที่ซ้ำ: {matched_caption}\n"
+                            f"--- สิ้นสุด ---\n"
+                            f"สร้างคอนเทนต์ใหม่ที่แตกต่างจากด้านบนอย่างชัดเจน — เปลี่ยนมุมมอง/concept/เนื้อหา"
+                        )
+                        if status_callback:
+                            status_callback(f"คอนเทนต์ซ้ำ (ครั้งที่ {retry_count}) — กำลังสร้างใหม่...")
+
+                    content = self.run_content_creator(
+                        "", "", "",
+                        llm=llm, quick_brief=attempt_brief,
+                        media_type=media_type,
+                        asset_summary=asset_summary,
                     )
 
-            # --- Phase 3: Script Review — self-review อัตโนมัติ ---
-            # อิงจากตลาด (Opus Clip / PrePublish / Retensis):
-            #   - ให้คะแนน 0-100 + คะแนนย่อย 4 มิติ
-            #   - ถ้า score < threshold → ใช้ revised_script แล้วตรวจใหม่ (1 ครั้ง)
-            #   - max 2 รอบ (review + 1 re-check) — ไม่วนไม่รู้จบ
-            #   - ถ้า re-check ต่ำกว่า original → revert ใช้ของเดิม (กัน oscillate)
-            #   - ไม่ต้อง approve จาก user — ระบบทำเอง อัปเดต script + video_prompts เอง
-            script_review_result: dict[str, Any] = {}
-            try:
-                parsed_content = _json.loads(content)
-                posts = parsed_content.get("posts", [])
-                # หา post ที่มี script
-                script_post_idx = -1
-                original_script = ""
-                for i, p in enumerate(posts):
-                    if p.get("script", "").strip():
-                        script_post_idx = i
-                        original_script = p["script"]
+                    # ดึง caption เพื่อตรวจซ้ำ
+                    caption_summary = ""
+                    platform_used = platform_label
+                    try:
+                        parsed = _json.loads(content)
+                        posts = parsed.get("posts", [])
+                        if posts:
+                            first = posts[0]
+                            caption_summary = first.get("caption", "")
+                            if not platform_used and first.get("platform"):
+                                platform_used = first.get("platform")
+                    except (_json.JSONDecodeError, TypeError):
+                        pass
+
+                    # ตรวจซ้ำ
+                    dup_result = content_history.check_duplicate(
+                        project_root, caption_summary, config=ch_cfg,
+                    )
+
+                    if not dup_result.get("is_duplicate"):
                         break
 
-                if script_post_idx >= 0 and original_script:
-                    from .script_reviewer import review_script
-                    from datetime import datetime as _dt
-                    threshold = int(ch_cfg.get("script_review_threshold", 70))
-                    # max 2 รอบ: review original → ถ้าต่ำ → review revised → จบ
-                    max_iter = min(int(ch_cfg.get("script_review_max_iterations", 2)), 2)
-                    iterations_done = 0
+                    if attempt < max_dedup_retries:
+                        retry_count += 1
 
-                    # รอบ 1: ตรวจ script เดิม
+                # แจ้ง user ถ้ายังซ้ำหลัง retry หมด
+                if dup_result.get("is_duplicate") and retry_count >= max_dedup_retries:
                     if status_callback:
-                        status_callback(f"กำลังตรวจ script (รอบที่ 1/{max_iter})...")
-                    script_review_result = review_script(
-                        original_script,
-                        platform_used or "TikTok",
-                        llm,
-                    )
-                    iterations_done = 1
-
-                    first_score = script_review_result.get("score", 0) if script_review_result else 0
-                    if status_callback and script_review_result:
                         status_callback(
-                            f"Script review รอบที่ 1: score {first_score}/100, "
-                            f"{len(script_review_result.get('issues', []))} จุดน่าเบื่อ"
+                            f"⚠ ยังซ้ำหลังลอง {max_dedup_retries} ครั้ง — ใช้ผลงานล่าสุด (similarity {dup_result.get('similarity', 0):.2f})"
                         )
 
-                    # ถ้ารอบ 1 ผ่าน → ใช้ script เดิม จบ
-                    if first_score >= threshold or not script_review_result:
-                        final_script = original_script
-                        final_score = first_score
-                    else:
-                        # รอบ 2: ใช้ revised_script แล้วตรวจใหม่
-                        revised = script_review_result.get("revised_script", "")
-                        if not revised.strip():
-                            final_script = original_script
-                            final_score = first_score
-                        else:
-                            if status_callback:
-                                status_callback(f"กำลังตรวจ script ที่แก้ (รอบที่ 2/{max_iter})...")
-                            re_review = review_script(
-                                revised,
-                                platform_used or "TikTok",
-                                llm,
-                            )
-                            iterations_done = 2
-                            re_score = re_review.get("score", 0) if re_review else 0
+                overall_duplicate = overall_duplicate or dup_result.get("is_duplicate", False)
+                max_similarity = max(max_similarity, dup_result.get("similarity", 0.0))
+                last_retry_count = retry_count
 
-                            if status_callback:
-                                status_callback(
-                                    f"Script review รอบที่ 2: score {re_score}/100"
-                                )
+                # --- Phase 3: Script Review — self-review อัตโนมัติ ---
+                script_review_result: dict[str, Any] = {}
+                try:
+                    parsed_content = _json.loads(content)
+                    posts = parsed_content.get("posts", [])
+                    if posts and platform_label:
+                        posts[0]["platform"] = platform_label
 
-                            # Loop safety: ถ้า re-check ต่ำกว่า original → revert
-                            if re_score < first_score:
-                                if status_callback:
-                                    status_callback(
-                                        f"⚠ Script ที่แก้ ({re_score}/100) แย่กว่าต้นฉบับ "
-                                        f"({first_score}/100) — ใช้ต้นฉบับ"
-                                    )
-                                final_script = original_script
-                                final_score = first_score
-                                # เก็บ re_review ไว้ใน result ด้วย (เพื่อความโปร่งใส)
-                                script_review_result["re_review"] = re_review
-                            else:
-                                # re-check ดีขึ้นหรือเท่าเดิม → ใช้ revised
-                                final_script = revised
-                                final_score = re_score
-                                script_review_result = re_review
-                                script_review_result["original_score"] = first_score
+                    script_review_result = self._review_script_in_posts(
+                        posts, platform_used, llm, status_callback, ch_cfg,
+                    )
 
-                    # --- Apply: อัปเดต script ใน content JSON เอง ---
-                    script_changed = final_script.strip() != original_script.strip()
+                    if posts:
+                        all_posts.append(posts[0])
+                    all_script_reviews.append(script_review_result)
+                except Exception:
+                    pass  # review พังไม่ต้อง crash pipeline
 
-                    if script_changed and final_script.strip():
-                        posts[script_post_idx]["script"] = final_script
-                        # สร้าง video_prompts ใหม่จาก script สุดท้าย
-                        if status_callback:
-                            status_callback("กำลังสร้าง video_prompts ใหม่จาก script ที่แก้...")
-                        try:
-                            from .config_loader import get_agent_config
-                            cc_cfg = get_agent_config(self.config, "content_creator")
-                            vp_system = cc_cfg.get("system_prompt", "")
-                            vp_user = (
-                                f"เขียน video_prompts ใหม่จาก script นี้ (platform: {platform_used or 'TikTok'}):\n\n"
-                                f"{final_script}\n\n"
-                                f"คืน JSON ตาม schema ใน system prompt"
-                            )
-                            from .content_schema import CONTENT_SCHEMA
-                            vp_response = llm.chat(
-                                [{"role": "system", "content": vp_system},
-                                 {"role": "user", "content": vp_user}],
-                                temperature=cc_cfg.get("temperature", 0.9),
-                                max_tokens=cc_cfg.get("max_tokens", 4096),
-                                stream=False,
-                                response_format={
-                                    "type": "json_schema",
-                                    "json_schema": {
-                                        "name": "content_output",
-                                        "strict": True,
-                                        "schema": CONTENT_SCHEMA,
-                                    },
-                                },
-                                source="script_review.regenerate_prompts",
-                            )
-                            vp_clean = _strip_code_fence(vp_response)
-                            vp_data = _json.loads(vp_clean)
-                            vp_posts = vp_data.get("posts", [])
-                            if vp_posts and vp_posts[0].get("video_prompts"):
-                                posts[script_post_idx]["video_prompts"] = vp_posts[0]["video_prompts"]
-                        except Exception:
-                            pass  # สร้าง video_prompts ไม่ได้ → ใช้ของเดิม
-
-                    # บันทึก review state ลงใน post
-                    posts[script_post_idx]["script_review"] = {
-                        "status": "reviewed",
-                        "reviewed_at": _dt.now().isoformat(),
-                        "score": final_score,
-                        "iterations": iterations_done,
-                        "threshold": threshold,
-                        "script_changed": script_changed,
-                        "issues_count": len(script_review_result.get("issues", [])),
-                        "hooks_count": len(script_review_result.get("suggested_hooks", [])),
-                        "review": script_review_result,
-                    }
-
-                    # อัปเดต content JSON + self.results
-                    parsed_content["posts"] = posts
-                    content = _json.dumps(parsed_content, ensure_ascii=False, indent=2)
-                    self.results["content_creator"] = content
-                    try:
-                        from .content_schema import render_posts_to_markdown
-                        self.results["content_creator_markdown"] = render_posts_to_markdown(parsed_content)
-                    except Exception:
-                        self.results["content_creator_markdown"] = content
-
-                    if status_callback:
-                        if final_score >= threshold:
-                            status_callback(
-                                f"✓ Script review ผ่าน: {final_score}/100 "
-                                f"({iterations_done} รอบ, {'แก้แล้ว' if script_changed else 'ไม่ต้องแก้'})"
-                            )
-                        else:
-                            status_callback(
-                                f"⚠ Script score {final_score}/100 ยังต่ำกว่า {threshold} "
-                                f"หลัง {iterations_done} รอบ — ใช้ script ล่าสุด"
-                            )
+            # รวมผลลัพธ์ทุกแพลตฟอร์มเป็น JSON เดียว
+            combined = {"posts": all_posts}
+            content = _json.dumps(combined, ensure_ascii=False, indent=2)
+            try:
+                from .content_schema import render_posts_to_markdown
+                markdown = render_posts_to_markdown(combined)
             except Exception:
-                pass  # review พังไม่ต้อง crash pipeline
+                markdown = content
+            self.results["content_creator"] = content
+            self.results["content_creator_markdown"] = markdown
 
             # บันทึก history (1 entry ต่อการสร้าง — เก็บ product_ids ทั้งหมด + pillar)
+            record_platform = ", ".join(
+                platform_names.get(p, p) for p in target_platforms if p
+            ) or platform_used
+            record_caption = "\n".join(
+                p.get("caption", "") for p in all_posts
+            )
             content_history.record_entry(
                 project_root,
                 product_ids=chosen_pids,
                 concept=chosen_concept,
                 pillar=chosen_pillar,
-                platform=platform_used,
-                caption_summary=caption_summary,
+                platform=record_platform,
+                caption_summary=record_caption,
                 config=ch_cfg,
             )
-
-            markdown = self.results.get("content_creator_markdown", content)
 
             return {
                 "product_ids": chosen_pids,
@@ -1150,10 +1199,10 @@ class Orchestrator:
                 "reason": reason,
                 "content": content,
                 "markdown": markdown,
-                "is_duplicate": dup_result.get("is_duplicate", False),
-                "similarity": dup_result.get("similarity", 0.0),
-                "dedup_retries": retry_count,
-                "script_review": script_review_result,
+                "is_duplicate": overall_duplicate,
+                "similarity": max_similarity,
+                "dedup_retries": last_retry_count,
+                "script_review": all_script_reviews,
             }
         finally:
             if own:

@@ -17,9 +17,10 @@ video_resolution: 720p
 video_poll_interval_seconds: 5
 video_max_wait_seconds: 600
 
-# Auto-generate toggle
-auto_generate_image: true
-auto_generate_video: true
+# Auto-generate toggle (default: false — ต้องสั่งจาก UI เท่านั้น
+# ไม่ใช้เป็น fallback เมื่อ API ไม่ส่งค่ามา)
+auto_generate_image: false
+auto_generate_video: false
 
 # LLM ที่ใช้แก้ prompt เมื่อ auto-gen ถูก reject (copyright, safety, etc.)
 # auto mode: วนแก้จนกว่าจะออก (ไม่มี limit)
