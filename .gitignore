@@ -56,6 +56,9 @@ cache/assets/
 cache/scheduled_jobs.json
 cache/scheduled_runs.json
 
+# Content history — runtime state, เปลี่ยนทุกครั้งที่รัน
+cache/content_history.json
+
 # IDE / editor
 .idea/
 .vscode/
