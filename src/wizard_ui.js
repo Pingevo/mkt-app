@@ -128,6 +128,7 @@
     html += '<div class="wizard-nav flow-box-nav">';
     html += '<button class="btn btn-secondary" id="flow-back-' + idx + '" data-flow-idx="' + idx + '" onclick="wizardPrevStep(this.dataset.flowIdx)">← กลับ</button>';
     html += '<div class="spacer"></div>';
+    html += '<button class="btn btn-secondary" id="flow-schedule-' + idx + '" data-flow-idx="' + idx + '" onclick="openScheduleModal(this.dataset.flowIdx)">📅 ตั้งเวลา</button>';
     html += '<button class="btn btn-primary" id="flow-next-' + idx + '" data-flow-idx="' + idx + '" onclick="wizardNextStep(this.dataset.flowIdx)">ถัดไป →</button>';
     html += '</div>';
 
@@ -203,6 +204,8 @@
       nextBtn.textContent = step === WIZARD_STEPS ? '✓ ยืนยัน' : 'ถัดไป →';
       nextBtn.disabled = !wizardCanNext(idx);
     }
+    const scheduleBtn = document.getElementById('flow-schedule-' + idx);
+    if (scheduleBtn) scheduleBtn.style.display = step === WIZARD_STEPS ? 'inline-block' : 'none';
 
     if (step === 1) renderStep1(idx);
     if (step === 2) renderStep2(idx);
@@ -1076,6 +1079,9 @@
     if (clearBtn) clearBtn.disabled = false;
     if (hintEl) hintEl.textContent = 'เลือกสินค้าก่อนกดยืนยัน';
   };
+
+  // Expose helper for schedule modal in web_viewer.py
+  window.buildFlowsForBackend = buildFlowsForBackend;
 
   init();
 })();

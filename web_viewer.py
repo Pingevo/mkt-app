@@ -2721,6 +2721,123 @@ async def api_run_flows(request: Request) -> StreamingResponse:
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ============================================================
+# Scheduler — /api/schedule/* endpoints
+# ============================================================
+
+_scheduler_instance = None
+
+
+def _get_scheduler():
+    """ดึง scheduler instance — lazy init ถ้ายังไม่มี."""
+    global _scheduler_instance
+    if _scheduler_instance is None:
+        try:
+            from src.scheduler import Scheduler
+            from src.config_loader import load_config, get_section
+            _cfg = load_config()
+            _main_sys_cfg = get_section(_cfg, "system", {"web_port": 8778})
+            _port = int(os.environ.get("VIEWER_PORT", str(_main_sys_cfg.get("web_port", 8778))))
+            _scheduler_instance = Scheduler(project_root=PROJECT_ROOT, web_port=_port)
+            _scheduler_instance.start()
+        except Exception as e:
+            print(f"[Scheduler] init ไม่ได้: {e}", flush=True)
+            return None
+    return _scheduler_instance
+
+
+def _attach_schedule_endpoints(app, scheduler):
+    @app.get("/api/schedule/jobs")
+    def schedule_list_jobs() -> JSONResponse:
+        jobs = scheduler.list_jobs()
+        return JSONResponse(jobs)
+
+    @app.get("/api/schedule/status")
+    def schedule_running_status() -> JSONResponse:
+        return JSONResponse(scheduler.get_running_status())
+
+    @app.post("/api/schedule/save")
+    async def schedule_save(request: Request) -> JSONResponse:
+        body = await request.json()
+        job_spec = {
+            "name": body.get("name", "unnamed"),
+            "enabled": body.get("enabled", True),
+            "schedule_type": body.get("schedule_type", "one_time"),
+            "schedule": body.get("schedule", {}),
+            "flow": body.get("flow", {}),
+            "quick_brief": body.get("quick_brief", ""),
+        }
+        job_id = scheduler.add_job(job_spec)
+        return JSONResponse({"job_id": job_id})
+
+    @app.post("/api/schedule/delete")
+    async def schedule_delete(request: Request) -> JSONResponse:
+        body = await request.json()
+        removed = scheduler.remove_job(body.get("job_id", ""))
+        return JSONResponse({"ok": removed})
+
+    @app.post("/api/schedule/toggle")
+    async def schedule_toggle(request: Request) -> JSONResponse:
+        body = await request.json()
+        ok = scheduler.toggle_job(body.get("job_id", ""), body.get("enabled", True))
+        return JSONResponse({"ok": ok})
+
+    @app.post("/api/schedule/run_now")
+    async def schedule_run_now(request: Request) -> JSONResponse:
+        body = await request.json()
+        ok = scheduler.run_now(body.get("job_id", ""))
+        return JSONResponse({"ok": ok})
+
+    @app.post("/api/schedule/rerun")
+    async def schedule_rerun(request: Request) -> JSONResponse:
+        body = await request.json()
+        ok = scheduler.rerun_run(body.get("job_id", ""), body.get("started_at", ""))
+        return JSONResponse({"ok": ok})
+
+    @app.get("/api/schedule/runs")
+    def schedule_runs(job_id: str = "", limit: int = 50) -> JSONResponse:
+        runs = scheduler.get_run_log(job_id=job_id or None, limit=limit)
+        return JSONResponse(runs)
+
+
+class _SchedulerProxy:
+    """Proxy สำหรับ lazy scheduler — ส่งต่อไปยัง instance จริงตอนเรียก."""
+    def list_jobs(self):
+        s = _get_scheduler()
+        return s.list_jobs() if s else []
+
+    def add_job(self, spec):
+        s = _get_scheduler()
+        return s.add_job(spec) if s else ""
+
+    def remove_job(self, jid):
+        s = _get_scheduler()
+        return s.remove_job(jid) if s else False
+
+    def toggle_job(self, jid, en):
+        s = _get_scheduler()
+        return s.toggle_job(jid, en) if s else False
+
+    def run_now(self, jid):
+        s = _get_scheduler()
+        return s.run_now(jid) if s else False
+
+    def rerun_run(self, jid, started_at):
+        s = _get_scheduler()
+        return s.rerun_run(jid, started_at) if s else False
+
+    def get_run_log(self, **kw):
+        s = _get_scheduler()
+        return s.get_run_log(**kw) if s else []
+
+    def get_running_status(self):
+        s = _get_scheduler()
+        return s.get_running_status() if s else {}
+
+
+_attach_schedule_endpoints(app, _SchedulerProxy())
+
+
 @app.post("/api/run_auto")
 async def api_run_auto(request: Request) -> StreamingResponse:
     """Auto mode — agent เลือกสินค้าเอง + สร้างคอนเทนต์ที่ไม่ซ้ำ.
@@ -3702,6 +3819,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
   <div class="header-right">
     <div class="credits-badge" id="credits-badge" style="display:none">กำลังโหลด...</div>
+    <button class="home-header-btn" onclick="openScheduleList()" id="schedule-header-btn" style="position:relative;">📅 ตารางเวลา<span id="schedule-badge" style="display:none;position:absolute;top:-4px;right:-4px;background:#fbbf24;color:#0f1117;border-radius:10px;font-size:10px;padding:1px 6px;font-weight:700;">●</span></button>
     <button class="home-header-btn" onclick="openPillarsModal()">🎯 Pillars</button>
     <button class="home-header-btn" onclick="goHome()">🏠 หน้าหลัก</button>
   </div>
@@ -7935,11 +8053,361 @@ function loadCredits() {
   </div>
 </div>
 <script src="/wizard_ui.js"></script>
+<div class="settings-modal-overlay" id="schedule-overlay">
+  <div class="settings-modal" style="width:520px">
+    <h3>📅 ตั้งเวลารัน Flow</h3>
+    <input type="hidden" id="schedule-flow-idx" value="">
+    <div style="margin-bottom:12px;">
+      <label for="schedule-name" style="font-size:12px;color:#888;display:block;margin-bottom:4px;">ชื่องาน</label>
+      <input type="text" id="schedule-name" placeholder="เช่น โพสต์รายสัปดาห์" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid #2a2d3a;background:#0f111a;color:#e0e0e0;">
+    </div>
+    <div style="display:flex;gap:12px;margin-bottom:12px;">
+      <div style="flex:1;">
+        <label for="schedule-date" style="font-size:12px;color:#888;display:block;margin-bottom:4px;">วันที</label>
+        <input type="date" id="schedule-date" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid #2a2d3a;background:#0f111a;color:#e0e0e0;color-scheme:dark;">
+      </div>
+      <div style="flex:0 0 120px;">
+        <label for="schedule-time" style="font-size:12px;color:#888;display:block;margin-bottom:4px;">เวลา</label>
+        <input type="time" id="schedule-time" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid #2a2d3a;background:#0f111a;color:#e0e0e0;color-scheme:dark;">
+      </div>
+    </div>
+    <div style="display:flex;align-items:flex-start;gap:10px;margin-top:12px;">
+      <input type="checkbox" id="schedule-repeat" style="width:auto; accent-color:#6366f1; margin-top:2px; flex:none;">
+      <label for="schedule-repeat" style="font-size:13px;color:#e0e0e0;line-height:1.4;cursor:pointer;">ซ้ำทุกวันเวลานี้ (ทุกวัน)</label>
+    </div>
+    <div class="settings-actions">
+      <button class="settings-cancel" onclick="closeScheduleModal()">ยกเลิก</button>
+      <button class="settings-save" onclick="saveScheduleJob()">บันทึก</button>
+    </div>
+  </div>
+</div>
+<script>
+function openScheduleModal(idx) {
+  document.getElementById('schedule-flow-idx').value = idx;
+  document.getElementById('schedule-name').value = '';
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const y = now.getFullYear();
+  const m = pad(now.getMonth() + 1);
+  const d = pad(now.getDate());
+  const h = pad(now.getHours());
+  const min = pad(now.getMinutes());
+  const dateStr = y + '-' + m + '-' + d;
+  document.getElementById('schedule-date').min = dateStr;
+  document.getElementById('schedule-date').value = dateStr;
+  document.getElementById('schedule-time').value = h + ':' + min;
+  document.getElementById('schedule-repeat').checked = false;
+  document.getElementById('schedule-overlay').className = 'settings-modal-overlay visible';
+}
+function closeScheduleModal() {
+  document.getElementById('schedule-overlay').className = 'settings-modal-overlay';
+}
+async function saveScheduleJob() {
+  const idx = parseInt(document.getElementById('schedule-flow-idx').value);
+  const name = document.getElementById('schedule-name').value.trim() || 'งานตั้งเวลา';
+  const date = document.getElementById('schedule-date').value;
+  const time = document.getElementById('schedule-time').value;
+  const repeat = document.getElementById('schedule-repeat').checked;
+  if (!date || !time) { alert('เลือกวันและเวลาก่อน'); return; }
+  const when = new Date(date + 'T' + time);
+  if (isNaN(when.getTime())) { alert('วันเวลาไม่ถูกต้อง'); return; }
+  if (!repeat && when.getTime() < Date.now()) { alert('วันเวลาต้องไม่อยู่ในอดีต'); return; }
+  const all = (typeof buildFlowsForBackend === 'function') ? buildFlowsForBackend() : [];
+  const flow = all[idx] || null;
+  if (!flow) { alert('ไม่พบ flow นี้'); return; }
+  const localISO = date + 'T' + time + ':00';
+  const schedule = repeat
+    ? { type: 'cron', value: time.split(':').reverse().join(' ') + ' * * *' }
+    : { type: 'date', value: localISO };
+  const payload = {
+    name: name,
+    schedule_type: repeat ? 'recurring' : 'one_time',
+    schedule: schedule,
+    flow: flow,
+    quick_brief: (document.getElementById('quick-brief-input') || {}).value || ''
+  };
+  const res = await fetch('/api/schedule/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) { alert('บันทึกไม่ได้'); return; }
+  const data = await res.json();
+  alert('ตั้งเวลาสำเร็จ: ' + data.job_id);
+  closeScheduleModal();
+}
+</script>
+<div class="settings-modal-overlay" id="schedule-list-overlay">
+  <div class="settings-modal" style="width:680px;max-height:88vh">
+    <h3>📅 ตารางเวลา — ทำงานอัตโนมัติ</h3>
+    <p style="font-size:12px;color:#888;margin:0 0 14px 0">ตั้งเวลาให้ flow ทำงานเองตอนถึงเวลาที่กำหนด — ปิดเว็บได้ ผลลัพธ์จะอยู่ในหน้าผลลัพธ์ (server ต้องเปิดอยู่ตอนถึงเวลา)</p>
+    <div style="display:flex;gap:8px;margin-bottom:14px">
+      <button class="home-header-btn" onclick="loadScheduleJobs();loadScheduleRuns()">รีเฟรช</button>
+    </div>
+    <div id="schedule-jobs-list" style="max-height:35vh;overflow-y:auto;margin-bottom:16px"></div>
+    <h4 style="font-size:13px;color:#888;margin:14px 0 8px 0">ประวัติการรัน</h4>
+    <div id="schedule-runs-list" style="max-height:25vh;overflow-y:auto"></div>
+    <div class="settings-actions">
+      <button class="settings-cancel" onclick="closeScheduleList()">ปิด</button>
+    </div>
+  </div>
+</div>
+<script>
+function openScheduleList() {
+  loadScheduleJobs();
+  loadScheduleRuns();
+  document.getElementById('schedule-list-overlay').className = 'settings-modal-overlay visible';
+  if (window._scheduleRefreshTimer) clearInterval(window._scheduleRefreshTimer);
+  window._scheduleRefreshTimer = setInterval(() => { loadScheduleJobs(); loadScheduleRuns(); }, 2000);
+}
+function closeScheduleList() {
+  document.getElementById('schedule-list-overlay').className = 'settings-modal-overlay';
+  if (window._scheduleRefreshTimer) { clearInterval(window._scheduleRefreshTimer); window._scheduleRefreshTimer = null; }
+}
+function loadScheduleJobs() {
+  Promise.all([
+    fetch('/api/schedule/jobs').then(r => r.json()),
+    fetch('/api/schedule/runs?limit=50').then(r => r.json()),
+    fetch('/api/schedule/status').then(r => r.json()).catch(() => ({}))
+  ]).then(([jobs, runs, runningStatus]) => {
+    const list = document.getElementById('schedule-jobs-list');
+    jobs = jobs || [];
+    // เพิ่ม virtual entry สำหรับ rerun ที่กำลังรัน แต่ไม่มี job entry ใน list
+    // (เช่น one_time job ที่ถูกลบไปแล้ว แต่ user กดรันใหม่จากประวัติ)
+    const jobIds = new Set(jobs.map(j => j.id));
+    const virtualJobs = [];
+    if (runningStatus) {
+      for (const [rid, info] of Object.entries(runningStatus)) {
+        if (!jobIds.has(rid)) {
+          // หาชื่อ + flow จากประวัติล่าสุดของ job_id นี้
+          const latestRun = (runs || []).filter(r => r.job_id === rid).sort((a, b) => new Date(b.started_at || 0) - new Date(a.started_at || 0))[0];
+          virtualJobs.push({
+            id: rid,
+            name: (latestRun && latestRun.job_name) || 'รันใหม่',
+            enabled: true,
+            schedule_type: 'one_time',
+            schedule: {},
+            flow: latestRun ? latestRun.flow : {},
+            run_count: 0,
+            next_run: '',
+            _isVirtual: true,
+          });
+        }
+      }
+    }
+    const allJobs = virtualJobs.concat(jobs);
+    if (allJobs.length === 0) {
+      list.innerHTML = '<div style="color:#555;font-size:12px;padding:12px">ยังไม่มีงานตั้งเวลา</div>';
+      return;
+    }
+    list.innerHTML = allJobs.map(j => {
+      const isVirtual = !!j._isVirtual;
+      const isEnabled = j.enabled;
+      const hasNext = !!j.next_run;
+      const isDone = !isVirtual && j.schedule_type === 'one_time' && !hasNext && (j.run_count || 0) > 0;
+      const isRunning = runningStatus && runningStatus[j.id];
+      let statusText, statusColor, subText;
+      if (isRunning) {
+        statusText = 'กำลังรัน';
+        statusColor = '#fbbf24';
+        const msg = runningStatus[j.id].message || '';
+        const agent = runningStatus[j.id].agent || '';
+        subText = agent ? (agent + ': ' + msg) : msg;
+      } else if (isDone) { statusText = 'รันแล้ว'; statusColor = '#888'; subText = 'รันล่าสุด: ' + (j.last_run ? new Date(j.last_run).toLocaleString('th-TH') : '-'); }
+      else if (!isEnabled) { statusText = 'หยุดไว้'; statusColor = '#888'; subText = 'หยุดไว้'; }
+      else { statusText = 'เปิดใช้งาน'; statusColor = '#22c55e'; subText = 'รอเวลา'; }
+      const scheduleLabel = isVirtual ? 'รันใหม่' : (j.schedule_type === 'one_time' ? 'ครั้งเดียว' : 'ทุกวัน');
+      // เวลาที่ตั้งไว้ — ดึงจาก schedule.value
+      // one_time: ISO date string → parse เป็น Date ปกติ
+      // recurring: cron string "MM HH * * *" → แปลงเป็น "HH:MM ทุกวัน"
+      let schedTimeStr = '';
+      if (j.schedule && j.schedule.value) {
+        if (j.schedule.type === 'cron') {
+          const parts = j.schedule.value.split(' ');
+          if (parts.length >= 2) {
+            const minute = parts[0].padStart(2, '0');
+            const hour = parts[1].padStart(2, '0');
+            schedTimeStr = hour + ':' + minute + ' ทุกวัน';
+          }
+        } else {
+          const schedTime = new Date(j.schedule.value);
+          if (!isNaN(schedTime.getTime())) {
+            schedTimeStr = schedTime.toLocaleTimeString('th-TH');
+          }
+        }
+      }
+      const latestRun = (runs || []).filter(r => r.job_id === j.id).sort((a, b) => new Date(b.started_at || 0) - new Date(a.started_at || 0))[0];
+      const latestStatus = (!isRunning && latestRun) ? (' · ผลลัพธ์ล่าสุด: <span style="color:' + (latestRun.status === 'success' ? '#22c55e' : '#f44336') + '">' + (latestRun.status || '-') + '</span>') : '';
+      const latestTime = (!isRunning && latestRun && latestRun.started_at) ? ' (' + new Date(latestRun.started_at).toLocaleString('th-TH') + ')' : '';
+      const toggleLabel = j.enabled ? 'ปิด' : 'เปิด';
+      const toggleIcon = j.enabled ? '⏸' : '▶';
+      const runBtn = isRunning
+        ? '<button class="home-header-btn" style="font-size:11px;padding:4px 8px;background:#f44336;color:#fff" onclick="stopScheduleJob()" title="หยุดการทำงานทันที">⏹ หยุด</button>'
+        : '<button class="home-header-btn" style="font-size:11px;padding:4px 8px" onclick="runNowScheduleJob(\'' + j.id + '\')" title="รันทันที ไม่ต้องรอเวลา">▶ รันทันที</button>';
+      // เส้นคั่นวันที่ (ใช้ next_run หรือ created_at)
+      const dateSrc = j.next_run || j.created_at || '';
+      const dateStr = dateSrc ? new Date(dateSrc).toLocaleDateString('th-TH') : '';
+      const dateDivider = dateStr ? '<div style="border-top:1px solid #444;margin:10px 0 8px 0;padding-top:6px;font-size:11px;color:#888;font-weight:600">' + dateStr + '</div>' : '';
+      return dateDivider +
+      '<div style="background:#1a1a2e;border:1px solid ' + (isRunning ? '#fbbf24' : '#333') + ';border-radius:8px;padding:12px;margin-bottom:10px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:14px;font-weight:600;color:#e0e0e0;margin-bottom:4px">' + escapeHtml(j.name) + ' <span style="font-size:11px;color:#888;font-weight:normal">(' + scheduleLabel + ')</span></div>' +
+            '<div style="font-size:11px;color:#888;line-height:1.5">สถานะ: <span style="color:' + statusColor + ';font-weight:600">' + statusText + '</span> · ' + escapeHtml(subText) + latestStatus + latestTime + '</div>' +
+            (schedTimeStr ? '<div style="font-size:11px;color:#a1a1aa;margin-top:2px">⏰ ' + schedTimeStr + '</div>' : '') +
+          '</div>' +
+          '<div style="display:flex;gap:6px;flex-shrink:0">' +
+            runBtn +
+            (!isVirtual && !isRunning ? '<button class="home-header-btn" style="font-size:11px;padding:4px 8px" onclick="toggleScheduleJob(\'' + j.id + '\', ' + !j.enabled + ')" title="' + (j.enabled ? 'ปิดชั่วคราว' : 'เปิดใช้งาน') + '">' + toggleIcon + ' ' + toggleLabel + '</button>' : '') +
+            (!isVirtual && !isRunning ? '<button class="home-header-btn" style="font-size:11px;padding:4px 8px;background:#f44336;color:#fff" onclick="deleteScheduleJob(\'' + j.id + '\')" title="ลบงานทิ้ง">🗑️ ลบ</button>' : '') +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  }).catch(e => {
+    document.getElementById('schedule-jobs-list').innerHTML = '<div style="color:#f44336;font-size:12px;padding:12px">โหลดไม่ได้: ' + e + '</div>';
+  });
+}
+function loadScheduleRuns() {
+  fetch('/api/schedule/runs?limit=50').then(r => r.json()).then(runs => {
+    const list = document.getElementById('schedule-runs-list');
+    if (!runs || runs.length === 0) {
+      list.innerHTML = '<div style="color:#555;font-size:12px;padding:8px">ยังไม่มีประวัติการรัน</div>';
+      return;
+    }
+    // เรียงจากใหม่ไปเก่า — เพื่อใส่เส้นคั่นวันที่เมื่อวันเปลี่ยน
+    const sorted = runs.slice().sort((a, b) => new Date(b.started_at || 0) - new Date(a.started_at || 0));
+    let lastDateStr = '';
+    let html = '';
+    for (const r of sorted) {
+      const d = r.started_at ? new Date(r.started_at) : null;
+      const dateStr = d ? d.toLocaleDateString('th-TH') : '';
+      if (dateStr && dateStr !== lastDateStr) {
+        html += '<div style="border-top:1px solid #444;margin:10px 0 8px 0;padding-top:6px;font-size:11px;color:#888;font-weight:600">' + dateStr + '</div>';
+        lastDateStr = dateStr;
+      }
+      const statusColor = r.status === 'success' ? '#22c55e' : (r.status === 'error' ? '#f44336' : '#3b82f6');
+      const time = d ? d.toLocaleTimeString('th-TH') : '-';
+      const triggerText = r.trigger === 'manual' ? 'รันด้วยมือ' : (r.trigger === 'rerun' ? 'รันใหม่' : 'รันตามเวลา');
+      const files = (r.output_files || []).map(f => '<div style="font-size:11px;color:#3b82f6;cursor:pointer;margin-top:4px" onclick="viewResult(\'' + f.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')">' + escapeHtml(f.split('/').pop()) + '</div>').join('');
+      const rerunBtn = (r.status === 'success' || r.status === 'error')
+        ? '<button class="home-header-btn" style="font-size:10px;padding:2px 6px" onclick="rerunScheduleRun(\'' + r.job_id + '\', \'' + (r.started_at || '').replace(/'/g, "\\'") + '\')" title="รันใหม่จากการตั้งค่าเดิม">↻ รันใหม่</button>'
+        : '';
+      html += '<div style="background:#1a1a2e;border:1px solid #333;border-radius:8px;padding:10px;margin-bottom:8px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
+          '<strong style="font-size:13px;color:#e0e0e0">' + escapeHtml(r.job_name || r.job_id) + '</strong>' +
+          '<div style="display:flex;gap:6px;align-items:center">' +
+            '<span style="color:' + statusColor + ';font-size:11px;font-weight:600">' + (r.status || '') + '</span>' +
+            rerunBtn +
+          '</div>' +
+        '</div>' +
+        '<div style="font-size:11px;color:#888;margin-bottom:4px">' + time + ' · ' + triggerText + '</div>' +
+        (r.error ? '<div style="font-size:11px;color:#fbbf24;margin-bottom:4px">' + escapeHtml(r.error) + '</div>' : '') +
+        (r.output_files && r.output_files.length ? '<div style="font-size:11px;color:#888;margin-bottom:2px">output files:</div>' + files : '') +
+      '</div>';
+    }
+    list.innerHTML = html;
+  }).catch(e => {
+    document.getElementById('schedule-runs-list').innerHTML = '<div style="color:#555;font-size:12px;padding:8px">โหลดประวัติไม่ได้</div>';
+  });
+}
+async function rerunScheduleRun(jobId, startedAt) {
+  const res = await fetch('/api/schedule/rerun', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({job_id: jobId, started_at: startedAt}) });
+  const data = await res.json();
+  if (!data.ok) { alert('รันใหม่ไม่ได้ — อาจไม่พบประวัติที่เลือก'); return; }
+  // รอให้ backend เริ่ม job แล้ว refresh จนกว่าจะเห็นสถานะ "กำลังรัน"
+  // pollScheduleStatus ที่หน้าหลักจะแจ้งเตือนเอง — แค่ refresh list ใน modal
+  let attempts = 0;
+  const poll = () => {
+    if (attempts >= 20) return; // รอ ~30 วินาที
+    loadScheduleJobs();
+    loadScheduleRuns();
+    attempts++;
+    setTimeout(poll, 1500);
+  };
+  setTimeout(poll, 500);
+}
+async function stopScheduleJob() {
+  await fetch('/api/cancel', { method: 'POST' });
+  loadScheduleJobs();
+  loadScheduleRuns();
+}
+async function toggleScheduleJob(id, enabled) {
+  await fetch('/api/schedule/toggle', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({job_id: id, enabled: enabled}) });
+  loadScheduleJobs();
+}
+// Global poller — แจ้งเตือนบนหน้าหลักตอนมี job กำลังรัน
+let _lastRunningJobs = new Set();
+async function pollScheduleStatus() {
+  try {
+    const status = await fetch('/api/schedule/status').then(r => r.json());
+    const runningIds = Object.keys(status || {});
+    const badge = document.getElementById('schedule-badge');
+    if (badge) badge.style.display = runningIds.length > 0 ? 'inline' : 'none';
+    // แจ้งเตือน job ที่เริ่มรันใหม่
+    for (const id of runningIds) {
+      if (!_lastRunningJobs.has(id)) {
+        const info = status[id];
+        showScheduleToast('📅 งานตั้งเวลาเริ่มรัน: ' + (info.message || 'กำลังรัน...'));
+      }
+    }
+    _lastRunningJobs = new Set(runningIds);
+  } catch (e) {}
+}
+function showScheduleToast(msg) {
+  let toast = document.getElementById('schedule-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'schedule-toast';
+    toast.style.cssText = 'position:fixed;bottom:20px;right:20px;background:#1a1a2e;border:1px solid #fbbf24;border-radius:10px;padding:12px 16px;font-size:13px;color:#e0e0e0;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.4);transition:opacity 0.3s;max-width:400px;';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.style.opacity = '1';
+  clearTimeout(window._scheduleToastTimer);
+  window._scheduleToastTimer = setTimeout(() => { toast.style.opacity = '0'; }, 5000);
+}
+setInterval(pollScheduleStatus, 3000);
+pollScheduleStatus();
+async function runNowScheduleJob(id) {
+  const res = await fetch('/api/schedule/run_now', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({job_id: id}) });
+  const data = await res.json();
+  if (!data.ok) { alert('รันไม่ได้'); return; }
+  const list = document.getElementById('schedule-runs-list');
+  list.insertAdjacentHTML('afterbegin', '<div id="schedule-pending" style="background:#1a1a2e;border:1px solid #333;border-radius:8px;padding:10px;margin-bottom:8px"><div style="font-size:13px;color:#fbbf24">⏳ กำลังรัน...</div><div style="font-size:11px;color:#888">รอผลลัพธ์สักครู่</div></div>');
+  let attempts = 0;
+  const poll = () => {
+    if (attempts >= 20) { // รอ ~30 วินาที
+      const p = document.getElementById('schedule-pending');
+      if (p) { p.innerHTML = '<div style="font-size:13px;color:#f44336">หมดเวลารอ กดรีเฟรชดูผล</div>'; }
+      return;
+    }
+    loadScheduleJobs();
+    loadScheduleRuns();
+    attempts++;
+    const existing = Array.from(document.querySelectorAll('#schedule-runs-list > div')).some(el => el.id !== 'schedule-pending');
+    if (existing) {
+      const p = document.getElementById('schedule-pending');
+      if (p) p.remove();
+    } else {
+      setTimeout(poll, 1500);
+    }
+  };
+  setTimeout(poll, 1500);
+}
+async function deleteScheduleJob(id) {
+  if (!confirm('ลบงานนี้?')) return;
+  await fetch('/api/schedule/delete', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({job_id: id}) });
+  loadScheduleJobs();
+  loadScheduleRuns();
+}
+</script>
 </body>
 </html>"""
 
 
 if __name__ == "__main__":
+    import atexit
     from src.config_loader import load_config, get_section
     _cfg = load_config()
     _main_sys_cfg = get_section(_cfg, "system", {"web_port": 8778})
@@ -7949,5 +8417,15 @@ if __name__ == "__main__":
         _refresh_conflict_cache()
     except Exception:
         pass  # brand files might not exist yet
+    # Initialize scheduler on startup
+    try:
+        _sched_cfg = get_section(_cfg, "scheduler", {})
+        if _sched_cfg.get("enabled", True):
+            _sched = _get_scheduler()
+            if _sched:
+                atexit.register(_sched.stop)
+                print("  Scheduler: เปิดใช้งาน", flush=True)
+    except Exception as e:
+        print(f"  Scheduler: เปิดไม่ได้ ({e})", flush=True)
     print(f"\n  MKTApp Viewer → http://localhost:{port}\n")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")

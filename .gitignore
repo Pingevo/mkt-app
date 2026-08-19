@@ -52,6 +52,10 @@ brand/audience.json
 brand/assets/
 cache/assets/
 
+# Scheduler — job store + run log (user data, not templates)
+cache/scheduled_jobs.json
+cache/scheduled_runs.json
+
 # IDE / editor
 .idea/
 .vscode/

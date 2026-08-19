@@ -29,3 +29,16 @@ display_preview_length: 500       # preview สั้น
 display_preview_long: 800         # preview ยาว
 caption_display_length: 500       # caption สำหรับ display
 filename_max_length: 30           # ชื่อไฟล์สูงสุด
+
+# Scheduler — ระบบทำงานอัตโนมัติตามเวลาที่ตั้ง
+scheduler:
+  enabled: true                   # เปิด/ปิด scheduler ทั้งระบบ
+  max_concurrent_jobs: 1          # จำกัดขนาน (ป้องกัน OpenRouter rate limit)
+  misfire_grace_time: 1           # 1 = เกือบไม่ยิงชดเชย (เลย 1 วินาที = บันทึก "missed" ลงประวัติแทน — กดรันใหม่ได้)
+                                  # (APScheduler ไม่ยอมรับ 0 — ระบบแปลง 0/ลบ เป็น 1 อัตโนมัติ)
+  coalesce: true                  # ถ้าพลาดหลายครั้ง ยิงครั้งเดียวรวม
+  job_store_path: "cache/scheduled_jobs.json"
+  run_log_path: "cache/scheduled_runs.json"
+  run_log_retention_days: 30      # ล้างประวัติเกิน 30 วัน (เทียบระดับวัน)
+  max_run_log_entries: 200        # fallback จำกัดประวัติตามจำนวน
+  job_timeout: 600                # timeout สำหรับยิง job ผ่าน HTTP (วินาที)
