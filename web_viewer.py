@@ -4663,7 +4663,7 @@ function loadBrandFiles() {
     html += '<div class="brand-file-item" onclick="editBrandSection(\'audience\')">👥 กลุ่มเป้าหมาย (Audience)</div>';
     html += '<div class="brand-file-item" onclick="editBrandSection(\'visual\')">🎨 แนวทางภาพ (Visual)</div>';
     html += '<div style="border-top:1px solid #2a2d3a;margin:8px 0"></div>';
-    html += '<div class="brand-file-item" onclick="openAssetLibraryModal()">🗂 Asset Library (วัตถุดิบแบรนด์)</div>';
+    html += '<div class="brand-file-item" onclick="openAssetLibraryModal()" title="โลโก้ รูปพรีเซนเตอร์ เพลง ฯลฯ ที่ใช้ซ้ำข้ามการรัน">🗂 วัตถุดิบแบรนด์</div>';
     el.innerHTML = html;
     // โหลด conflict icons สำหรับแต่ละ section ใน sidebar
     loadConflictIcons();
@@ -4970,12 +4970,12 @@ function _renderAssetCard(a) {
 
   const statusBadge = a.status === 'ready'
     ? '<span style="color:#4caf50;font-size:10px">●พร้อม</span>'
-    : '<span style="color:#f44336;font-size:10px">●' + escapeHtml(a.status || 'error') + '</span>';
+    : '<span style="color:#f44336;font-size:10px">●' + escapeHtml(_statusTh(a.status || 'error')) + '</span>';
 
   return '<div style="background:#1c1e2a;border-radius:10px;padding:10px;cursor:pointer" onclick="editAsset(\'' + a.id + '\')">' +
     thumb +
     '<div style="margin-top:8px;font-size:12px;font-weight:600;color:#e0e0e0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(a.file) + '</div>' +
-    '<div style="margin-top:4px;font-size:11px;color:#888">' + escapeHtml(a.subject || '') + ' · ' + escapeHtml(a.type) + ' ' + statusBadge + '</div>' +
+    '<div style="margin-top:4px;font-size:11px;color:#888">' + escapeHtml(_subjectTh(a.subject)) + ' · ' + escapeHtml(_typeTh(a.type)) + ' ' + statusBadge + '</div>' +
     (a.description ? '<div style="margin-top:4px;font-size:11px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(a.description) + '</div>' : '') +
     '</div>';
 }
@@ -4984,6 +4984,16 @@ function _assetIcon(type) {
   const icons = { audio: '🎵', video: '🎬', text: '📄', other: '📦' };
   return icons[type] || '📄';
 }
+
+// แปล enum อังกฤษ (เก็บใน backend) เป็น label ไทยสำหรับโชว์ใน UI
+const _ASSET_SUBJECT_TH = { person: 'คน', product: 'สินค้า', logo: 'โลโก้', background: 'พื้นหลัง', graphic: 'กราฟิก', scene: 'ฉาก', other: 'อื่นๆ' };
+const _ASSET_STYLE_TH   = { photo: 'ถ่ายภาพ', illustration: 'ภาพประกอบ', graphic: 'กราฟิก', '3d': '3 มิติ', other: 'อื่นๆ' };
+const _ASSET_TYPE_TH    = { image: 'รูปภาพ', audio: 'เสียง', video: 'วิดีโอ', text: 'ข้อความ', other: 'อื่นๆ' };
+const _ASSET_STATUS_TH  = { ready: 'พร้อม', processing: 'กำลังประมวลผล', pending: 'รอประมวลผล', error: 'ผิดพลาด' };
+function _subjectTh(s) { return _ASSET_SUBJECT_TH[s] || s || ''; }
+function _styleTh(s)   { return _ASSET_STYLE_TH[s] || s || ''; }
+function _typeTh(t)    { return _ASSET_TYPE_TH[t] || t || ''; }
+function _statusTh(s)  { return _ASSET_STATUS_TH[s] || s || ''; }
 
 function uploadAssets(files) {
   if (!files || !files.length) return;
@@ -5000,7 +5010,7 @@ function uploadAssets(files) {
     .then(data => {
       if (data.ok) {
         status.className = 'upload-status ok';
-        status.textContent = 'อัปโหลดแล้ว — กำลัง tag อัตโนมัติ...';
+        status.textContent = 'อัปโหลดแล้ว — กำลังติดแท็กอัตโนมัติ...';
         // poll ทุก 3 วินาทีจนกว่าจะเห็น asset ใหม่
         if (_assetsPolling) clearInterval(_assetsPolling);
         let attempts = 0;
@@ -5052,24 +5062,24 @@ function editAsset(id) {
       h += '<img src="/api/assets/file/' + a.id + '" style="width:100%;max-height:300px;object-fit:contain;border-radius:8px;background:#0f1117;margin-bottom:12px">';
     }
 
-    h += '<div style="font-size:13px;color:#888;margin-bottom:4px">ไฟล์: ' + escapeHtml(a.file) + ' · ' + escapeHtml(a.type) + '</div>';
+    h += '<div style="font-size:13px;color:#888;margin-bottom:4px">ไฟล์: ' + escapeHtml(a.file) + ' · ' + escapeHtml(_typeTh(a.type)) + '</div>';
     h += '<div style="font-size:11px;color:#555;margin-bottom:12px">ID: ' + escapeHtml(a.id) + ' · hash: ' + escapeHtml((a.hash || '').substring(0, 12)) + '...</div>';
 
     // subject dropdown
-    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Subject</label><select id="asset-subject" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">';
-    for (const s of subjects) h += '<option value="' + s + '"' + (a.subject === s ? ' selected' : '') + '>' + s + '</option>';
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px" title="แยกไฟล์ตามเนื้อหา เช่น คน สินค้า โลโก้">ประเภทเนื้อหา</label><select id="asset-subject" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">';
+    for (const s of subjects) h += '<option value="' + s + '"' + (a.subject === s ? ' selected' : '') + '>' + _subjectTh(s) + '</option>';
     h += '</select></div>';
 
     // style dropdown
-    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Style</label><select id="asset-style" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">';
-    for (const s of styles) h += '<option value="' + s + '"' + (a.style === s ? ' selected' : '') + '>' + s + '</option>';
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px" title="รูปแบบของภาพ เช่น ถ่ายภาพ ภาพประกอบ 3 มิติ">สไตล์ภาพ</label><select id="asset-style" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">';
+    for (const s of styles) h += '<option value="' + s + '"' + (a.style === s ? ' selected' : '') + '>' + _styleTh(s) + '</option>';
     h += '</select></div>';
 
     // tags
-    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Tags <span style="color:#555">(คั่นด้วยจุลภาค)</span></label><textarea id="asset-tags" style="width:100%;min-height:50px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml((a.tags || []).join(', ')) + '</textarea></div>';
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px" title="คำสำคัญที่ช่วยให้ AI ค้นหาไฟล์นี้เจอ">แท็ก <span style="color:#555">(คั่นด้วยจุลภาค)</span></label><textarea id="asset-tags" style="width:100%;min-height:50px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml((a.tags || []).join(', ')) + '</textarea></div>';
 
     // description
-    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">Description (AI บรรยาย — แก้ได้)</label><textarea id="asset-description" style="width:100%;min-height:80px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(a.description || '') + '</textarea></div>';
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px" title="AI บรรยายไฟล์นี้ให้ตอนอัปโหลด แก้ไข้ได้">คำบรรยาย <span style="color:#555">(AI สร้าง — แก้ได้)</span></label><textarea id="asset-description" style="width:100%;min-height:80px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(a.description || '') + '</textarea></div>';
 
     // user_note
     h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">หมายเหตุของคุณ</label><textarea id="asset-user-note" style="width:100%;min-height:50px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical" placeholder="เช่น โลโก้หลักใช้ทุกแพลตฟอร์ม">' + escapeHtml(a.user_note || '') + '</textarea></div>';
@@ -8131,8 +8141,8 @@ function loadCredits() {
 </div>
 <div class="settings-modal-overlay" id="asset-overlay">
   <div class="settings-modal" style="width:720px;max-height:85vh;overflow-y:auto">
-    <h3>🗂 Asset Library — วัตถุดิบแบรนด์</h3>
-    <p style="font-size:12px;color:#888;margin:0 0 14px 0">อัปโหลดไฟล์ที่ใช้ซ้ำข้ามการรัน (โลโก้ รูปพรีเซนเตอร์ เพลง) — AI บรรยายและติด tag อัตโนมัติ แก้ไข metadata ได้ทุกไฟล์</p>
+    <h3>🗂 วัตถุดิบแบรนด์</h3>
+    <p style="font-size:12px;color:#888;margin:0 0 14px 0">อัปโหลดไฟล์ที่ใช้ซ้ำข้ามการรัน (โลโก้ รูปพรีเซนเตอร์ เพลง) — AI บรรยายและติดแท็กอัตโนมัติ แก้ไขรายละเอียดได้ทุกไฟล์</p>
     <div id="asset-modal-body"></div>
     <div class="settings-actions">
       <button class="settings-cancel" onclick="closeAssetModal()">ปิด</button>
