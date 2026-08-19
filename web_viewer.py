@@ -13,6 +13,7 @@ import json
 import os
 import queue as _queue
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,8 @@ from src.brand_loader import load_brand_visual
 from src import media_gen
 from src import product_db
 from src import content_history
+from src.flow_context import set_flow_id, clear_flow_id
+from src.cost_summary import write_cost_summary, write_flow_meta, find_flow_id_for_file, find_any_flow_id, update_cost_summary
 
 
 def _sys_cfg() -> dict:
@@ -395,6 +398,19 @@ async def api_generate_media(request: Request) -> StreamingResponse:
     output_path = output_dir / filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # หา flow_id ของ session นี้ — เพื่อผูก cost สร้างสื่อภายหลังเข้า flow เดิม
+    # หา content_creator file ใน output_dir ก่อน แล้วใช้ path นั้นหา flow_id ที่ตรง
+    # ถ้าไม่เจอ content file ใช้ find_any_flow_id เป็น fallback
+    media_flow_id = ""
+    if output_dir.exists():
+        for f in output_dir.iterdir():
+            if f.is_file() and "content_creator" in f.name.lower() and f.suffix == ".md":
+                media_flow_id = find_flow_id_for_file(output_dir, f)
+                if media_flow_id:
+                    break
+    if not media_flow_id:
+        media_flow_id = find_any_flow_id(output_dir)
+
     # หารูปสินค้าจริงจาก product_id (ถ้าไม่มี ลองอ่านจาก session meta)
     if not product_id:
         meta_path = output_dir / "_session_meta.json"
@@ -416,6 +432,9 @@ async def api_generate_media(request: Request) -> StreamingResponse:
     q: _queue.Queue[str | None] = _queue.Queue()
 
     def worker():
+        # ผูก LLM call ใน thread นี้เข้า flow เดิม (ถ้าเจอ) — สร้างสื่อภายหลัง
+        if media_flow_id:
+            set_flow_id(media_flow_id)
         try:
             if media_type == "image":
                 q.put_nowait(_sse("status", "กำลังสร้างรูป..."))
@@ -466,6 +485,13 @@ async def api_generate_media(request: Request) -> StreamingResponse:
         except Exception as e:
             q.put_nowait(_sse("error", str(e)))
         finally:
+            # อัปเดต cost summary ของ flow เดิม (รวม cost สร้างสื่อภายหลัง)
+            if media_flow_id:
+                try:
+                    update_cost_summary(output_dir, media_flow_id)
+                except Exception:
+                    pass
+                clear_flow_id()
             q.put_nowait(None)
 
     thread = threading.Thread(target=worker, daemon=True)
@@ -538,6 +564,9 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
     output_dir = p.parent
     session_rel = str(output_dir.relative_to(OUTPUT_DIR)) if output_dir.is_relative_to(OUTPUT_DIR) else str(output_dir)
 
+    # หา flow_id ของ output file นี้ — เพื่อผูก cost สร้างสื่อภายหลังเข้า flow เดิม
+    media_flow_id = find_flow_id_for_file(output_dir, p)
+
     # Persistent status file — เก็บสถานะ media gen ให้เห็นได้หลัง refresh
     status_file = output_dir / "_media_status.json"
 
@@ -576,6 +605,9 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
 
     def worker():
         errors: list[str] = []
+        # ผูก LLM call ใน thread นี้เข้า flow เดิม (ถ้าเจอ) — สร้างสื่อภายหลัง
+        if media_flow_id:
+            set_flow_id(media_flow_id)
         try:
             total = (len(images) if auto_image else 0) + (len(videos) if auto_video else 0)
             done = 0
@@ -682,6 +714,13 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
             })
             q.put_nowait(_sse("error", str(e)))
         finally:
+            # อัปเดต cost summary ของ flow เดิม (รวม cost สร้างสื่อภายหลัง)
+            if media_flow_id:
+                try:
+                    update_cost_summary(output_dir, media_flow_id)
+                except Exception:
+                    pass
+                clear_flow_id()
             q.put_nowait(None)
 
     thread = threading.Thread(target=worker, daemon=True)
@@ -717,6 +756,40 @@ def api_media_retry_log(session: str) -> JSONResponse:
         return JSONResponse({"error": "session not found", "entries": []})
     entries = media_gen.load_retry_history(session_dir)
     return JSONResponse({"entries": entries})
+
+
+@app.get("/api/cost_summary/{session}")
+def api_cost_summary(session: str, file: str = "") -> JSONResponse:
+    """ดึง cost summary ของ flow ที่ output file สังกัด — ใช้ใน output modal.
+
+    Query param ``file`` (optional): ชื่อไฟล์หรือ path ของ output file
+    ถ้าส่งมา จะหา flow_id ที่ตรงกับไฟล์นั้น
+    ถ้าไม่ส่ง จะเอา flow_id แรกที่เจอใน session
+
+    คืน: cost summary dict หรือ {"status": "none"} ถ้าไม่มี
+    """
+    session_dir = OUTPUT_DIR / session
+    if not session_dir.exists():
+        return JSONResponse({"status": "none"})
+
+    # หา flow_id จาก _flow_meta_*.json
+    flow_id = ""
+    if file:
+        flow_id = find_flow_id_for_file(session_dir, file)
+    if not flow_id:
+        flow_id = find_any_flow_id(session_dir)
+    if not flow_id:
+        return JSONResponse({"status": "none"})
+
+    # อ่าน cost summary ไฟล์
+    summary_path = session_dir / f"_cost_summary_{flow_id}.json"
+    if not summary_path.exists():
+        return JSONResponse({"status": "none"})
+    try:
+        data = json.loads(summary_path.read_text(encoding="utf-8"))
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)})
 
 
 @app.post("/api/media_retry/{session}")
@@ -2590,6 +2663,11 @@ async def api_run_flows(request: Request) -> StreamingResponse:
             from src.flow_runner import run_flow_steps, build_context_for_agent
             plan_idx = flow.get("index", flow_idx)
 
+            # ผูก LLM call ทั้งหมดใน thread นี้เข้ากับ flow_id
+            flow_id = f"flow_{uuid.uuid4().hex[:8]}"
+            set_flow_id(flow_id)
+            flow_output_files: list[str] = []  # เก็บ output file paths ของ flow นี้
+
             llm = None
             try:
                 orch = Orchestrator(brand_dir="brand")
@@ -2654,6 +2732,8 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                         )
                         result_text = results[0][0] if results else ""
                         file_path = results[0][1] if results else None
+                        if file_path:
+                            flow_output_files.append(str(file_path))
 
                         _dl = int(_sys_cfg().get("display_preview_length", 500))
                         q.put_nowait(_sse("agent_done", result_text[:_dl], agent=agent_key, file=file_path, plan=plan_idx))
@@ -2683,6 +2763,26 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                         _active_llms.remove(llm)
                     except (ValueError, Exception):
                         pass
+            finally:
+                # เขียน cost summary + flow meta สำหรับ flow นี้ (เก็บไว้หลังบ้านสำหรับ dev)
+                try:
+                    agent_label = " + ".join(flow.get("agents", []))
+                    product_label = " + ".join(flow.get("folders", []))
+                    write_cost_summary(
+                        output_dir, flow_id,
+                        label=f"Flow {flow_idx+1}: {agent_label} — {product_label}",
+                        agents=flow.get("agents", []),
+                        products=product_label,
+                    )
+                    # เก็บ mapping output_file → flow_id เพื่อให้ "สร้างสื่อภายหลัง" หา flow_id ได้
+                    write_flow_meta(
+                        output_dir, flow_id, flow_output_files,
+                        label=f"Flow {flow_idx+1}: {agent_label} — {product_label}",
+                        agents=flow.get("agents", []),
+                    )
+                except Exception:
+                    pass
+                clear_flow_id()
 
         def master_worker():
             try:
@@ -2879,6 +2979,10 @@ async def api_run_auto(request: Request) -> StreamingResponse:
 
         def worker():
             global _active_llms
+            # ผูก LLM call ทั้งหมดใน thread นี้เข้ากับ flow_id
+            flow_id = f"auto_{uuid.uuid4().hex[:8]}"
+            set_flow_id(flow_id)
+            flow_output_files: list[str] = []  # เก็บ output file paths ของ flow นี้
             llm = None
             try:
                 output_dir = OUTPUT_DIR / session_ts
@@ -2967,6 +3071,8 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                             result_text = results_list[0][0] if results_list else ""
                             file_path = results_list[0][1] if results_list else None
                             flow_results[agent_key] = result_text
+                            if file_path:
+                                flow_output_files.append(str(file_path))
 
                             _dl = int(_sys_cfg().get("display_preview_length", 500))
                             q.put_nowait(_sse("agent_done", result_text[:_dl],
@@ -3049,6 +3155,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     md_filepath = output_dir / f"{fname_base}.md"
                     md_filepath.write_text(markdown, encoding="utf-8")
                     saved_path = str(md_filepath)
+                    flow_output_files.append(saved_path)
 
                     # อัปเดต history entry ล่าสุดให้มี output_file (orchestrator บันทึกก่อนเซฟไฟล์)
                     content_history.update_last_entry_output_file(PROJECT_ROOT, saved_path)
@@ -3147,6 +3254,24 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                 q.put_nowait(_sse("error", str(e)))
                 q.put_nowait(_sse("done", ""))
                 q.put_nowait(None)
+            finally:
+                # เขียน cost summary + flow meta สำหรับ auto flow นี้ (เก็บไว้หลังบ้านสำหรับ dev)
+                try:
+                    output_dir_for_cost = OUTPUT_DIR / session_ts
+                    write_cost_summary(
+                        output_dir_for_cost, flow_id,
+                        label=f"AUTO — {', '.join(agents)}",
+                        agents=agents,
+                    )
+                    # เก็บ mapping output_file → flow_id เพื่อให้ "สร้างสื่อภายหลัง" หา flow_id ได้
+                    write_flow_meta(
+                        output_dir_for_cost, flow_id, flow_output_files,
+                        label=f"AUTO — {', '.join(agents)}",
+                        agents=agents,
+                    )
+                except Exception:
+                    pass
+                clear_flow_id()
 
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
@@ -3345,6 +3470,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .content-box tr:nth-child(even) td { background: #161821; }
   .empty { text-align: center; padding: 60px; color: #555; }
   .file-info-display { font-size: 12px; color: #666; margin-bottom: 12px; }
+  .modal-cost-info { margin-top: 6px; padding-top: 6px; border-top: 1px solid #2a2d3a; font-size: 12px; }
   .back-btn { background: none; border: 1px solid #2a2d3a; color: #888; border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer; margin-bottom: 16px; display: inline-block; }
   .back-btn:hover { border-color: #7c8aff; color: #7c8aff; }
   .home-btn { background: none; border: 1px solid #2a2d3a; color: #888; border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer; margin-bottom: 16px; margin-left: 8px; display: inline-block; }
@@ -6685,6 +6811,7 @@ function _viewResultInternal(filepath) {
     html += '</div>';
     bodyEl.innerHTML = html;
     overlay.classList.add('visible');
+    loadModalCost(session, filename);
     return;
   }
   fetch('/api/file/' + encodeURIComponent(session) + '/' + encodeURIComponent(filename)).then(r => r.json()).then(data => {
@@ -6701,20 +6828,24 @@ function _viewResultInternal(filepath) {
               bodyEl.innerHTML = renderContentResult(session, filename, data.content);
             }
             overlay.classList.add('visible');
+            loadModalCost(session, filename);
           })
           .catch(() => {
             bodyEl.innerHTML = renderContentResult(session, filename, data.content);
             overlay.classList.add('visible');
+            loadModalCost(session, filename);
           });
       } else {
         bodyEl.innerHTML = renderContentResult(session, filename, data.content);
         overlay.classList.add('visible');
+        loadModalCost(session, filename);
       }
     } else {
       let html = '<div class="file-info-display" style="margin-bottom:12px">Session: ' + escapeHtml(session) + '</div>';
       html += '<div class="content-box">' + renderMarkdown(data.content) + '</div>';
       bodyEl.innerHTML = html;
       overlay.classList.add('visible');
+      loadModalCost(session, filename);
     }
   });
 }
@@ -6729,6 +6860,40 @@ function navResult(delta) {
 function closeResultOverlay(event) {
   if (event && event.target && !event.target.classList.contains('result-overlay') && event.type === 'click') return;
   document.getElementById('result-overlay').classList.remove('visible');
+}
+
+// โหลด cost summary ของ flow ที่ไฟล์สังกัด แล้วแสดงใน output modal
+// วางใต้ "Session: ..." ใน .file-info-display
+function loadModalCost(session, filename) {
+  const bodyEl = document.getElementById('result-modal-body');
+  if (!bodyEl) return;
+  const infoEl = bodyEl.querySelector('.file-info-display');
+  if (!infoEl) return;
+  // ล้าง cost info เดิม (ถ้ามี) — กันซ้ำตอนเปลี่ยนไฟล์ใน nav
+  const oldCost = infoEl.querySelector('.modal-cost-info');
+  if (oldCost) oldCost.remove();
+  fetch('/api/cost_summary/' + encodeURIComponent(session) + '?file=' + encodeURIComponent(filename))
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'none' || data.status === 'error') return;
+      const cost = data.total_cost_usd || 0;
+      const calls = data.total_calls || 0;
+      const tokensIn = data.prompt_tokens || 0;
+      const tokensOut = data.completion_tokens || 0;
+      // สร้าง breakdown สั้น — top 3 sources
+      const sources = data.by_source || {};
+      const topSrc = Object.entries(sources).slice(0, 3)
+        .filter(([,v]) => v > 0)
+        .map(([k,v]) => escapeHtml(k.split('.').pop()) + ': $' + Number(v).toFixed(4))
+        .join(' · ');
+      let html = '<div class="modal-cost-info">';
+      html += '<span style="color:#4ade80">💰 ค่าใช้จ่าย: $' + cost.toFixed(4) + '</span>';
+      html += ' <span style="color:#888;font-size:11px">(' + calls + ' calls · ' + tokensIn + '→' + tokensOut + ' tokens)</span>';
+      if (topSrc) html += '<div style="font-size:11px;color:#666;margin-top:2px">' + topSrc + '</div>';
+      html += '</div>';
+      infoEl.insertAdjacentHTML('beforeend', html);
+    })
+    .catch(() => {});
 }
 
 function deleteCurrentResult() {

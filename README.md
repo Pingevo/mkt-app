@@ -288,10 +288,29 @@ MKTApp/
 │   └── target_audience.md
 ├── src/
 │   ├── __init__.py
-│   ├── brand_loader.py          # โหลดไฟล์ brand/ → brand context
-│   ├── config_loader.py         # โหลด YAML config
-│   ├── llm_client.py            # OpenRouter API client
-│   ├── orchestrator.py          # ประสานงาน 4 agent
+│   ├── ai_usage.py             # log AI usage ไป Hub + local JSONL (fire-and-forget)
+│   ├── asset_library.py        # จัดการ asset library + embedding
+│   ├── brand_loader.py         # โหลดไฟล์ brand/ → brand context
+│   ├── brand_migrate.py        # migrate brand folder structure
+│   ├── brand_priority.py       # hard/soft rules + conflict detection
+│   ├── config_loader.py        # โหลด YAML config
+│   ├── content_history.py      # ประวัติคอนเทนต์ + duplicate detection
+│   ├── content_schema.py       # schema ของ content output
+│   ├── cost_summary.py         # รวมค่าใช้จ่าย LLM ต่อ flow → _cost_summary_*.json
+│   ├── data_loader.py          # สแกนไฟล์ข้อมูลดิบ
+│   ├── file_loader.py          # โหลดไฟล์ตาม type
+│   ├── flow_context.py         # thread-local flow_id (ผูก LLM call เข้า flow)
+│   ├── flow_runner.py          # รัน agent ตามลำดับใน flow + ส่ง context ต่อ
+│   ├── ingestion.py            # ประมวลผลไฟล์ดิบ → product DB
+│   ├── llm_client.py           # OpenRouter API client
+│   ├── media_gen.py            # สร้างรูป/วิดีโอ (Gemini image/video)
+│   ├── orchestrator.py         # ประสานงาน agent + auto mode
+│   ├── pillar_manager.py       # content pillar management
+│   ├── product_db.py           # product database (ready/stale status)
+│   ├── scheduler.py            # APScheduler — scheduled jobs
+│   ├── script_reviewer.py      # ตรวจ script ก่อนใช้
+│   ├── voice_learner.py        # เรียนรู้ tone of voice
+│   ├── web_searcher.py         # web search helper
 │   └── agents/
 │       ├── __init__.py
 │       ├── base_agent.py        # Base class (generate + review + brand context)

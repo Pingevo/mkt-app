@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,19 +30,29 @@ except ImportError:
 _DEFAULT_URL = "https://digital.in.th"
 
 # Local usage log — เก็บทุก AI call ลงไฟล์เพื่อ track ค่าใช้จ่าย (ไม่ต้องมี Hub token)
-_USAGE_LOG_PATH = Path(__file__).resolve().parent.parent / "logs" / "llm_usage.jsonl"
+# shared constant — cost_summary.py import จากที่นี่แทนการประกาศซ้ำ
+USAGE_LOG_PATH = Path(__file__).resolve().parent.parent / "logs" / "llm_usage.jsonl"
 
 
 def log_local_usage(entry: dict[str, Any]) -> None:
     """เซฟ usage ลง local file (JSONL) — ไม่ต้อง Hub ก็ดูย้อนหลังได้.
 
     เพิ่ม timestamp อัตโนมัติ ไม่มีวัน throw ออกมา
+    อ่าน flow_id จาก thread-local (flow_context) — ใส่ลง entry ถ้าไม่ว่าง
     """
     try:
-        _USAGE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        USAGE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         entry = dict(entry)  # copy ไม่แก้ของเดิม
         entry["timestamp"] = datetime.now().isoformat()
-        with open(_USAGE_LOG_PATH, "a", encoding="utf-8") as f:
+        # ผูก flow_id จาก thread-local — ว่าง = ไม่อยู่ใน flow (เช่น ingestion)
+        try:
+            from .flow_context import get_flow_id
+        except ImportError:
+            from flow_context import get_flow_id  # type: ignore
+        fid = get_flow_id()
+        if fid:
+            entry["flow_id"] = fid
+        with open(USAGE_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass  # ไม่ให้ logging error ทำลาย main flow
@@ -58,11 +67,22 @@ def _system_cfg() -> dict:
         return {}
 
 
-def _read_cfg() -> tuple[str | None, str | None]:
+def _read_hub_credentials() -> tuple[str | None, str | None]:
     """คืน (url, token) — ถ้ายังไม่ตั้งค่า คืน (None, None) แล้วข้ามเงียบๆ."""
     url = get_env("AI_USAGE_HUB_URL", _DEFAULT_URL)
     token = get_env("AI_USAGE_HUB_TOKEN")
     return url, token
+
+
+def _build_payload(entry: dict[str, Any]) -> dict[str, Any]:
+    """สร้าง payload สำหรับส่งให้ Hub — ค่า default + merge entry."""
+    payload = {
+        "environment": get_env("AI_USAGE_HUB_ENV", "production"),
+        "attempt": 1,
+        "status": "success",
+    }
+    payload.update(entry)
+    return payload
 
 
 def log_ai_usage(entry: dict[str, Any]) -> None:
@@ -76,20 +96,14 @@ def log_ai_usage(entry: dict[str, Any]) -> None:
                  prompt_tokens, completion_tokens, cost_usd,
                  duration_ms, status, error_message
     """
-    url, token = _read_cfg()
+    url, token = _read_hub_credentials()
     if not url or not token:
         return  # ยังไม่ตั้งค่า — ข้ามเงียบๆ
 
     if not entry.get("provider"):
         return  # ไม่มี provider ไม่ยิง
 
-    # ค่า default
-    payload = {
-        "environment": get_env("AI_USAGE_HUB_ENV", "production"),
-        "attempt": 1,
-        "status": "success",
-    }
-    payload.update(entry)
+    payload = _build_payload(entry)
 
     # ยิงใน background thread เพื่อไม่ block caller
     t = threading.Thread(
@@ -116,25 +130,6 @@ def _post(endpoint: str, token: str, payload: dict[str, Any]) -> None:
             )
     except Exception:
         pass  # ไม่ให้ log error ทำลาย flow หลัก
-
-
-def log_ai_usage_sync(entry: dict[str, Any]) -> None:
-    """เหมือน ``log_ai_usage`` แต่ยิง synchronous (รอผล) — ใช้เฉพาะตอน debug.
-
-    ปกติใช้ ``log_ai_usage`` แบบ fire-and-forget พอ
-    """
-    url, token = _read_cfg()
-    if not url or not token:
-        return
-    if not entry.get("provider"):
-        return
-    payload = {
-        "environment": get_env("AI_USAGE_HUB_ENV", "production"),
-        "attempt": 1,
-        "status": "success",
-    }
-    payload.update(entry)
-    _post(url.rstrip("/") + "/internal/ai-usage/logs", token, payload)
 
 
 def make_entry(
