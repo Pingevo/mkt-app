@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import queue as _queue
+import re
 import threading
 import uuid
 from datetime import datetime
@@ -228,6 +229,50 @@ def _scan_data_folders() -> list[dict[str, Any]]:
     return folders
 
 
+def _is_content_creator_file(path: Path) -> bool:
+    """ตรวจว่าไฟล์เป็น content_creator output ทีเราจะเอาชื่อโพสต์ไปใช้แสดง."""
+    lower = path.name.lower()
+    return "content_creator" in lower and path.suffix.lower() in (".md", ".json")
+
+
+def _extract_title_from_content_file(path: Path) -> str:
+    """ดึง title ของโพสต์แรกจาก content_creator output (.json หรือ .md)."""
+    def _from_json(p: Path) -> str:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            posts = data.get("posts", [])
+            if posts:
+                return (posts[0].get("title") or "").strip()
+        except Exception:
+            pass
+        return ""
+
+    def _from_markdown(p: Path) -> str:
+        try:
+            text = p.read_text(encoding="utf-8")
+            m = re.search(r"\*\*หัวข้อ\*\*\s*[—\-:]?\s*(.+)", text)
+            if m:
+                return m.group(1).strip()
+        except Exception:
+            pass
+        return ""
+
+    if path.suffix.lower() == ".json":
+        title = _from_json(path)
+        if title:
+            return title
+        md_path = path.with_suffix(".md")
+        if md_path.exists():
+            return _from_markdown(md_path)
+        return ""
+
+    json_path = path.with_suffix(".json")
+    title = _from_json(json_path) if json_path.exists() else ""
+    if title:
+        return title
+    return _from_markdown(path)
+
+
 def _scan_sessions() -> list[dict[str, Any]]:
     sessions = []
     if not OUTPUT_DIR.exists():
@@ -249,13 +294,22 @@ def _scan_sessions() -> list[dict[str, Any]]:
                 md_pair = f.stem + ".md"
                 if md_pair in all_names:
                     continue
+            if not _is_content_creator_file(f):
+                continue
+            title = _extract_title_from_content_file(f)
             files.append({
                 "name": f.name,
+                "title": title,
                 "size": f.stat().st_size,
                 "modified": datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
             })
         if files:
-            sessions.append({"name": item.name, "files": files})
+            session_title = ""
+            for f in files:
+                if f["title"]:
+                    session_title = f["title"]
+                    break
+            sessions.append({"name": item.name, "title": session_title, "files": files})
     return sessions
 
 
@@ -1943,7 +1997,7 @@ def api_content_history_for_product(folder: str, limit: int = 20) -> JSONRespons
 
 
 @app.get("/api/file/{session}/{filename:path}")
-def api_file(session: str, filename: str):
+def api_file(session: str, filename: str, download: int = 0):
     from fastapi.responses import Response
     filepath = OUTPUT_DIR / session / filename
     if not filepath.exists() or not filepath.is_file():
@@ -1956,9 +2010,14 @@ def api_file(session: str, filename: str):
             ".gif": "image/gif", ".webp": "image/webp",
             ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
         }
+        headers = {}
+        if download:
+            from urllib.parse import quote
+            headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
         return Response(
             content=filepath.read_bytes(),
             media_type=media_types.get(suffix, "application/octet-stream"),
+            headers=headers,
         )
     return JSONResponse({"content": filepath.read_text(encoding="utf-8")})
 
@@ -3631,6 +3690,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .media-action-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
   .media-gen-btn { background: #1c1e2a; border: 1px solid #7c8aff; color: #7c8aff; border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer; font-weight: 600; }
   .media-gen-btn:hover { background: #7c8aff; color: #0f1117; }
+  .post-action-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .post-action-btn { background: #1c1e2a; border: 1px solid #4ade80; color: #4ade80; border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer; font-weight: 600; }
+  .post-action-btn:hover { background: #4ade80; color: #0f1117; }
   .media-status { font-size: 13px; padding: 6px 12px; border-radius: 6px; }
   .media-status.done { background: #1a3320; color: #4ade80; }
   .media-status.working { background: #1c2333; color: #7c8aff; }
@@ -3638,6 +3700,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .media-status.none { color: #555; }
 
   .media-retry-history { margin-bottom: 16px; }
+  .retry-history-block { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; }
+  .retry-history-summary { cursor: pointer; font-size: 13px; color: #888; font-weight: 600; }
   .retry-history-title { font-size: 13px; color: #888; margin-bottom: 8px; font-weight: 600; }
   .retry-entry { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 12px; }
   .retry-entry.success { border-left: 3px solid #4ade80; }
@@ -7523,20 +7587,27 @@ function loadSessions() {
   fetch('/api/sessions').then(r => r.json()).then(sessions => {
     const el = document.getElementById('sidebar-content');
     if (!sessions.length) {
-      el.innerHTML = '<div style="color:#555;font-size:12px;padding:12px">ยังไม่มี session</div>';
+      el.innerHTML = '<div style="color:#555;font-size:12px;padding:12px">ยังไม่มี output</div>';
       return;
     }
     let html = '';
     for (const s of sessions) {
-      html += '<div class="session-item" onclick="expandSession(\'' + s.name + '\',this)">' + s.name + '</div>';
-      html += '<div id="files-' + s.name + '" style="display:none">';
-      for (const f of s.files) {
-        html += '<div class="sub-file-item" onclick="loadSessionFile(\'' + s.name + '\',\'' + f.name + '\',this)">📄 ' + f.name + '<br><span style="color:#555">' + f.size + ' B · ' + f.modified + '</span></div>';
-      }
-      html += '</div>';
+      const sessionLabel = s.title || s.name;
+      html += '<div class="session-item" style="cursor:pointer" onclick="openSessionOutput(\'' + s.name + '\')">' + escapeHtml(sessionLabel) + '</div>';
     }
     el.innerHTML = html;
   });
+}
+
+function openSessionOutput(session) {
+  fetch('/api/session_files/' + encodeURIComponent(session)).then(r => r.json()).then(files => {
+    const contentFiles = files.filter(f => /content_creator.*\.md$/i.test(f.name)).map(f => session + '/' + f.name);
+    if (!contentFiles.length) {
+      alert('ไม่พบ content output ใน session นี้');
+      return;
+    }
+    viewResult(contentFiles[0], contentFiles);
+  }).catch(() => alert('โหลดไฟล์ไม่สำเร็จ'));
 }
 
 function expandSession(name, el) {
@@ -7898,10 +7969,10 @@ function renderFacebookCard(post, session, images) {
   html += '</div>';
   html += '<div class="fb-body">';
   if (post.title) html += '<div class="fb-title">' + escapeHtml(post.title) + '</div>';
-  // caption + hashtag ต่อกันเป็นโพสต์เดียว เหมือน Facebook จริง
+  // caption + hashtag แยกกัน — hashtag สีน้้ำเงินเหมือน Facebook
   let bodyText = post.caption || post.content || '';
-  if (post.hashtags) bodyText += '\n' + post.hashtags;
   if (bodyText) html += escapeHtml(bodyText);
+  if (post.hashtags) html += '<div style="color:#1877f2;margin-top:8px">' + escapeHtml(post.hashtags) + '</div>';
   html += '</div>';
   if (images.length === 1) {
     const url = '/api/file/' + encodeURIComponent(session) + '/' + encodeURIComponent(images[0]);
@@ -8027,6 +8098,9 @@ function switchPostView(idx) {
     if (post.concept) mh += '<span class="meta-tag">มุมมอง: <b>' + escapeHtml(post.concept) + '</b></span>';
     metaEl.innerHTML = mh;
   }
+  // อัปเดต modal title ตามโพสต์
+  const titleEl = document.getElementById('result-modal-title');
+  if (titleEl && post && post.title) titleEl.textContent = post.title;
   // อัปเดต platform preview
   findSessionMedia(_currentMediaSession, function(media) {
     const el = document.getElementById('preview-platform-content');
@@ -8048,7 +8122,9 @@ function renderContentResult(session, filename, content) {
   _currentMediaPost = post;
   _currentMediaPosts = posts;  // เก็บทั้งหมดไว้สำหรับสลับ
   _currentMediaPostIdx = 0;
-  let html = '<h2>' + escapeHtml(filename) + '</h2>';
+  const displayTitle = post && post.title ? post.title : filename;
+  document.getElementById('result-modal-title').textContent = displayTitle;
+  let html = '<h2>' + escapeHtml(displayTitle) + '</h2>';
   html += '<div class="file-info-display">Session: ' + escapeHtml(session) + '</div>';
   // Toggle
   html += '<div class="preview-toggle">';
@@ -8078,6 +8154,10 @@ function renderContentResult(session, filename, content) {
   // Original (hidden by default) — แสดง markdown ไม่ใช่ JSON
   // post.raw เป็น markdown แม้ตอนโหลดจาก .json (parseContentPost แยก markdown field ออกมา)
   html += '<div class="preview-original" id="preview-original-view"><div class="content-box">' + renderMarkdown(post.raw || content) + '</div></div>';
+  html += '<div class="post-action-bar">';
+  html += '<button class="post-action-btn" onclick="copyPostCaption()">📝 คัดลอก Caption</button>';
+  html += '<button class="post-action-btn" onclick="downloadPostMedia()">⬇️ ดาวน์โหลดสื่อ</button>';
+  html += '</div>';
   // Load media + status then render platform card + action bar
   findSessionMedia(session, function(media) {
     const el = document.getElementById('preview-platform-content');
@@ -8087,6 +8167,64 @@ function renderContentResult(session, filename, content) {
     }).catch(() => renderMediaActionBar(session, filename, post, media));
   });
   return html;
+}
+
+function copyPostCaption() {
+  const post = _currentMediaPost;
+  if (!post) return;
+  const text = (post.title ? post.title + '\n\n' : '') + (post.caption || post.content || '') + (post.hashtags ? '\n' + post.hashtags : '');
+  if (!text.trim()) {
+    alert('ไม่มี caption ให้คัดลอก');
+    return;
+  }
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(() => {
+      alert('คัดลอก caption แล้ว');
+    }).catch(() => {
+      alert('คัดลอกไม่สำเร็จ ลองใหม่อีกครั้ง');
+    });
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+      alert('คัดลอก caption แล้ว');
+    } catch (e) {
+      alert('คัดลอกไม่สำเร็จ ลองใหม่อีกครั้ง');
+    }
+    document.body.removeChild(ta);
+  }
+}
+
+function downloadPostMedia() {
+  const post = _currentMediaPost;
+  const session = _currentMediaSession;
+  if (!post || !session) return;
+  findSessionMedia(session, function(media) {
+    const platform = (post.platform || '').toLowerCase();
+    let filename = '';
+    if ((platform.includes('tiktok') || platform.includes('video')) && media.videos.length) {
+      filename = media.videos[0];
+    } else if (media.images.length) {
+      filename = media.images[0];
+    }
+    if (!filename) {
+      alert('ยังไม่มีรูปหรือวิดีโอให้ดาวน์โหลด');
+      return;
+    }
+    const url = '/api/file/' + encodeURIComponent(session) + '/' + encodeURIComponent(filename) + '?download=1';
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  });
 }
 
 // แสดงปุ่มสร้างรูป/วิดีโอในหน้า output — ถ้ายังไม่มี
@@ -8167,16 +8305,13 @@ function renderMediaActionBar(session, filename, post, media, mediaStatus) {
       // มี script แต่ยังไม่ได้ตรวจ (pipeline ยังไม่ผ่าน review)
       html += '<span class="media-status" style="background:#2a2d3a;color:#888;padding:6px 12px;border-radius:6px;font-size:12px">⏳ ยังไม่ได้ตรวจ script</span>';
     }
-  } else {
-    // ไม่มี script (Facebook post ไม่มี video script) — แสดงสถานะ
-    html += '<span class="media-status" style="background:#2a2d3a;color:#666;padding:6px 12px;border-radius:6px;font-size:12px">— ไม่มี video script (ไม่ต้องตรวจ)</span>';
   }
   if (!hasImagePrompt && !hasVideoPrompt && !(post.script && post.script.trim())) {
     html = '<span class="media-status none">โพสต์นี้ไม่มี prompt รูป/วิดีโอ</span>';
   }
   bar.innerHTML = html;
 
-  // โหลดประวัติ retry แล้วแสดงใต้ action bar
+  // โหลดประวัติ retry แล้วแสดงใต้ action bar (พับเก็บได้)
   fetch('/api/media_retry_log/' + encodeURIComponent(session)).then(r => r.json()).then(data => {
     renderRetryHistory(data.entries || []);
   }).catch(() => {});
@@ -8198,7 +8333,9 @@ function renderRetryHistory(entries) {
     existing.innerHTML = '';
     return;
   }
-  let html = '<div class="retry-history-title">📋 ประวัติการสร้างสื่อ (' + entries.length + ' ครั้ง)</div>';
+  let html = '<details class="retry-history-block">';
+  html += '<summary class="retry-history-summary">📋 ประวัติการสร้างสื่อ (' + entries.length + ' ครั้ง)</summary>';
+  html += '<div class="retry-history-entries">';
   entries.forEach(function(e) {
     const ok = e.ok;
     const statusCls = ok ? 'success' : 'failed';
@@ -8234,6 +8371,7 @@ function renderRetryHistory(entries) {
     entryHtml += '</div>';
     html += entryHtml;
   });
+  html += '</div></details>';
   existing.innerHTML = html;
 }
 
