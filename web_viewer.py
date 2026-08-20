@@ -3998,6 +3998,30 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .flow-box-remove:hover { color: #ef4444; }
   .flow-box-nav { display: flex; gap: 10px; margin-top: 20px; }
   .flow-box-nav .spacer { flex: 1; }
+  /* custom tooltip: แสดงทันทีตอนชี้ ไม่รอ title attribute */
+  span[data-tooltip] { position: relative; cursor: help; }
+  span[data-tooltip]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    left: 50%;
+    bottom: 120%;
+    transform: translateX(-50%);
+    background: #1a1d27;
+    border: 1px solid #3a3d4a;
+    color: #e0e0e0;
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    white-space: pre-wrap;
+    width: auto;
+    max-width: 240px;
+    min-width: 120px;
+    opacity: 0;
+    visibility: hidden;
+    z-index: 1000;
+    pointer-events: none;
+  }
+  span[data-tooltip]:hover::after, span[data-tooltip]:focus::after { opacity: 1; visibility: visible; }
 </style>
 </head>
 <body>
@@ -4878,14 +4902,18 @@ function _renderBrandForm(section, data) {
   return '';
 }
 
+function _tipIcon(tip) {
+  return tip ? ' <span tabindex="0" style="cursor:help;color:#7c8aff;font-size:12px" data-tooltip="' + escapeHtml(tip) + '">ⓘ</span>' : '';
+}
+
 function _field(label, id, value, placeholder, tip) {
-  const tipIcon = tip ? ' <span style="cursor:help;color:#7c8aff;font-size:12px" title="' + escapeHtml(tip) + '">ⓘ</span>' : '';
+  const tipIcon = _tipIcon(tip);
   return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + tipIcon + '</label>' +
     '<input id="' + id + '" value="' + escapeHtml(String(value || '')) + '" placeholder="' + (placeholder || '') + '" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px"></div>';
 }
 
 function _textarea(label, id, value, placeholder, tip) {
-  const tipIcon = tip ? ' <span style="cursor:help;color:#7c8aff;font-size:12px" title="' + escapeHtml(tip) + '">ⓘ</span>' : '';
+  const tipIcon = _tipIcon(tip);
   return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + tipIcon + '</label>' +
     '<textarea id="' + id + '" placeholder="' + (placeholder || '') + '" style="width:100%;min-height:80px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(String(value || '')) + '</textarea></div>';
 }
@@ -4893,7 +4921,7 @@ function _textarea(label, id, value, placeholder, tip) {
 function _listField(label, id, items, placeholder, tip) {
   const arr = Array.isArray(items) ? items : (items ? String(items).split(',').map(s => s.trim()).filter(Boolean) : []);
   const text = arr.join(', ');
-  const tipIcon = tip ? ' <span style="cursor:help;color:#7c8aff;font-size:12px" title="' + escapeHtml(tip) + '">ⓘ</span>' : '';
+  const tipIcon = _tipIcon(tip);
   const ph = placeholder ? ' placeholder="' + placeholder + '"' : '';
   return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + tipIcon + '</label>' +
     '<textarea id="' + id + '"' + ph + ' style="width:100%;min-height:60px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(text) + '</textarea></div>';
@@ -4902,12 +4930,13 @@ function _listField(label, id, items, placeholder, tip) {
 function _chipField(label, id, items, placeholder, tip) {
   const arr = Array.isArray(items) ? items : (items ? String(items).split(',').map(s => s.trim()).filter(Boolean) : []);
   const text = arr.join(', ');
-  const tipIcon = tip ? ' <span style="cursor:help;color:#7c8aff;font-size:12px" title="' + escapeHtml(tip) + '">ⓘ</span>' : '';
+  const tipIcon = _tipIcon(tip);
   const chips = arr.map(x => _chipHtml(id, x)).join('');
   const ph = placeholder ? ' placeholder="' + placeholder + '"' : '';
   return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + tipIcon + '</label>' +
     '<div id="' + id + '-chips" style="margin-bottom:6px">' + chips + '</div>' +
-    '<input type="text" id="' + id + '-add"' + ph + ' style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px" onkeydown="_chipKeydown(\'' + id + '\', event)" onblur="_addChip(\'' + id + '\', this.value); this.value=\'\';">' +
+    '<button type="button" id="' + id + '-add-btn" onclick="_showChipInput(\'' + id + '\')" style="display:inline-block;background:#1a1d27;border:1px dashed #3a3d4a;color:#7c8aff;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;margin-top:4px">+ เพิ่ม</button>' +
+    '<input type="text" id="' + id + '-add"' + ph + ' style="display:none;width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px" onkeydown="_chipKeydown(\'' + id + '\', event)" onblur="_addChip(\'' + id + '\', this.value); this.value=\'\'; _hideChipInput(\'' + id + '\');">' +
     '<input type="hidden" id="' + id + '" value="' + escapeHtml(text) + '"></div>';
 }
 
@@ -4916,14 +4945,32 @@ function _chipHtml(id, x) {
   return '<span class="pp-chip" data-value="' + v + '" style="display:inline-block;background:#2a2d3a;color:#e0e0e0;border:1px solid #3a3d4a;border-radius:4px;padding:4px 8px;margin:0 4px 4px 0;font-size:12px">' + escapeHtml(x) + ' <span style="cursor:pointer;color:#f87171" onclick="_removeChip(\'' + id + '\', this)">×</span></span>';
 }
 
+function _showChipInput(id) {
+  const input = document.getElementById(id + '-add');
+  const btn = document.getElementById(id + '-add-btn');
+  if (input) input.style.display = 'block';
+  if (btn) btn.style.display = 'none';
+  if (input) setTimeout(() => input.focus(), 0);
+}
+
+function _hideChipInput(id) {
+  const input = document.getElementById(id + '-add');
+  const btn = document.getElementById(id + '-add-btn');
+  if (input) { input.value = ''; input.style.display = 'none'; }
+  if (btn) btn.style.display = 'inline-block';
+}
+
 function _chipKeydown(id, e) {
   const input = e.target;
   if (e.key === 'Enter' || e.key === ',') {
     e.preventDefault();
     _addChip(id, input.value);
     input.value = '';
+    _hideChipInput(id);
   } else if (e.key === 'Backspace' && input.value === '') {
     _removeLastChip(id);
+  } else if (e.key === 'Escape') {
+    _hideChipInput(id);
   }
 }
 
@@ -5219,36 +5266,36 @@ function _renderProductProfileInto(body, data) {
 
 function _renderProductProfileForm(d) {
   let h = '';
-  h += '<button id="pp-suggest-btn" onclick="suggestProductProfile()" title="วิเคราะห์สเปคสินค้าแล้วเติมค่าให้อัตโนมัติ (กดซ้ำได้ถ้าอยากให้เดาใหม่)" style="background:#7c8aff;border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:12px">🎓 ตั้งค่าด้วย AI</button>';
+  h += '<button id="pp-suggest-btn" onclick="suggestProductProfile()" title="AI จะอ่านสเปคสินค้าและเติมค่าลงในฟอร์มให้ ยังไม่บันทึกจนกว่าจะกด บันทึก (กดซ้ำได้ถ้าอยากให้เดาใหม่)" style="background:#7c8aff;border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:12px">🎓 ตั้งค่าด้วย AI</button>';
   h += '<span id="pp-suggest-status" style="display:none;margin-left:8px;font-size:12px;vertical-align:middle"></span>';
   // Audience
   const aud = d.audience || {};
   const prim = aud.primary || {};
   const eu = aud.end_user || {};
   h += '<div style="font-size:13px;color:#7c8aff;margin-bottom:8px">กลุ่มเป้าหมาย</div>';
-  h += _field('ช่วงอายุผู้ซื้อ', 'pp-age', prim.age, 'เช่น 28-45 ปี', 'ช่วงอายุของผู้ซื้อจริง มีผลต่อท่อนและข้อความของคอนเทนต์');
-  h += _field('บทบาทผู้ซื้อ', 'pp-role', prim.role, 'เช่น ผู้ปกครองยุคใหม่ที่ใส่ใจเทคโนโลยี', 'บทบาทหรือตัวตนของผู้ซื้อ เช่น พ่อแม่ผู้ปกครอง นักธุรกิจ');
-  h += _field('ช่วงอายุผู้ใช้ปลายทาง', 'pp-eu-age', eu.age, 'เช่น 5-12 ปี', 'ถ้าผู้ใช้งานจริงต่างจากผู้ซื้อ เช่น นาฬิกาเด็ก = ลูก แต่คนซื้อ = ผู้ปกครอง');
-  h += _field('ลักษณะผู้ใช้ปลายทาง', 'pp-eu-desc', eu.desc, 'เช่น เด็กวัยประถมที่ชอบเล่นกีฬา', 'ลักษณะนิสัย/พฤติกรรมของคนใช้งานจริง ช่วยให้ภาพ/วิดีโอตรงกลุ่ม');
+  h += _field('ช่วงอายุผู้ซื้อ', 'pp-age', prim.age, 'เช่น 28-45 ปี', 'กำหนดช่วงอายุผู้ซื้อหลัก มีผลต่อภาษา มุมมอง และช่องทางที AI เลือกใช้');
+  h += _field('บทบาทผู้ซื้อ', 'pp-role', prim.role, 'เช่น ผู้ปกครองยุคใหม่ที่ใส่ใจเทคโนโลยี', 'บทบาทช่วย AI รู้ว่าคุยกับใคร มีผลต่อลำดับภาษาและ pain points ทีเน้น');
+  h += _field('ช่วงอายุผู้ใช้ปลายทาง', 'pp-eu-age', eu.age, 'เช่น 5-12 ปี', 'ถ้าผู้ใช้งานจริงต่างจากผู้ซื้อ ระบุช่วงอายุช่วยให้คอนเทนต์/ภาพตรงกับคนใช้งาน');
+  h += _field('ลักษณะผู้ใช้ปลายทาง', 'pp-eu-desc', eu.desc, 'เช่น เด็กวัยประถมที่ชอบเล่นกีฬา', 'ลักษณะของผู้ใช้ปลายทาง ช่วย AI สร้างเนื้อหาและภาพที่ตรงกับคนที่จริงใช้สินค้า');
   // Positioning
   h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">ตำแหน่งสินค้า</div>';
-  h += _chipField('คู่แข่งหลัก', 'pp-competitors', d.competitors, 'พิมพ์แล้วกด Enter', 'รายชื่อคู่แข่งในตลาด ใช้เทียบจุดขายของเรา');
-  h += _chipField('จุดขายหลัก', 'pp-differentiators', d.differentiators, 'พิมพ์แล้วกด Enter', 'สิ่งที่ทำให้สินค้านี้ต่างจากคู่แข่ง เอาไปใช้เขียนคอนเทนต์');
-  h += _chipField('Use cases', 'pp-use-cases', d.use_cases, 'พิมพ์แล้วกด Enter', 'สถานการณ์ใช้งานจริง ช่วยให้คอนเทนต์สื่อตรง');
-  h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">ระดับราคา <span style="cursor:help;color:#7c8aff;font-size:12px" title="กำหนดระดับราคาเพื่อปรับโทนคอนเทนต์ให้เหมาะสม เช่น entry=คุ้มค่า mid=สมดุล flagship=พรีเมียม">ⓘ</span></label>' +
+  h += _chipField('คู่แข่งหลัก', 'pp-competitors', d.competitors, 'เช่น Apple Watch, Fitbit (กด Enter)', 'บอกคู่แข่งหลักเพื่อให้ AI เปรียบเทียบจุดขายและหามุมที่แตกต่างได้');
+  h += _chipField('จุดขายหลัก', 'pp-differentiators', d.differentiators, 'เช่น กล้อง 5MP, กันน้ำ IP68 (กด Enter)', 'จุดขายที่ทำให้สินค้านี้ต่างจากคู่แข่ง AI จะหยิบจุดนี้มาเขียนข้อความโน้มน้าวใจ');
+  h += _chipField('Use cases', 'pp-use-cases', d.use_cases, 'เช่น ติดตามลูก, ออกกำลังกาย (กด Enter)', 'สถานการณ์ใช้งานจริง ช่วย AI เลือกมุมมองที่ตรงกับชีวิตลูกค้า');
+  h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">ระดับราคา <span style="cursor:help;color:#7c8aff;font-size:12px" data-tooltip="ระดับราคาช่วยกำหนดทิศทางโทนคอนเทนต์: entry=คุ้มค่า/เข้าถึงง่าย, mid=สมดุล, flagship=พรีเมียม/น่าเชื่อถือ">ⓘ</span></label>' +
     '<select id="pp-price-tier" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">' +
     '<option value=""' + (d.price_tier === '' || !d.price_tier ? ' selected' : '') + '>— เลือก —</option>' +
     '<option value="entry"' + (d.price_tier === 'entry' ? ' selected' : '') + '>entry (ราคาเริ่มต้น)</option>' +
     '<option value="mid"' + (d.price_tier === 'mid' ? ' selected' : '') + '>mid (กลาง)</option>' +
     '<option value="flagship"' + (d.price_tier === 'flagship' ? ' selected' : '') + '>flagship (ระดับสูง)</option>' +
     '</select></div>';
-  h += _textarea('ปรับโทน', 'pp-tone', d.tone_adjustment, 'เช่น อบอุ่น วางใจได้ ให้ความรู้สึกปลอดภัย', 'ทิศทางโทนเฉพาะสินค้านี้ ไม่เปลี่ยน voice แบรนด์ทั้งหมด แค่ปรับน้ำหนัก เช่น มั่นใจ พรีเมียม สนุก คึกคัก');
+  h += _textarea('ปรับโทน', 'pp-tone', d.tone_adjustment, 'เช่น อบอุ่น วางใจได้ ให้ความรู้สึกปลอดภัย', 'ปรับน้ำหนักโทนของเนื้อหาให้เหมาะกับสินค้าตัวนี้ โดยไม่เปลี่ยน Voice ของแบรนด์ ถ้าเว้นว่างจะใช้โทนแบรนด์');
   // Visual override
   const vo = d.visual_override || {};
   const vis = vo.image_style || {};
-  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">ปรับภาพ <span style="cursor:help;color:#7c8aff;font-size:12px" title="ค่าพวกนี้จะทับแนวทางภาพของแบรนด์ถ้ากรอก">ⓘ</span></div>';
-  h += _textarea('โทนภาพ', 'pp-visual-tone', vis.tone, 'เช่น ดำ-ทอง พรีเมียม แสงนุ่ม', 'คำอธิบายภาพรวมสำหรับสร้างรูป/วิดีโอของสินค้านี้');
-  h += _chipField('Keywords ภาพ', 'pp-visual-keywords', vo.keywords, 'พิมพ์แล้วกด Enter', 'คำสำคัญสำหรับ AI สร้างภาพ');
+  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">ปรับภาพ <span style="cursor:help;color:#7c8aff;font-size:12px" data-tooltip="กรอกเฉพาะตอนต้องการให้สินค้านี้มีภาพลักษณ์ต่างจากแบรนด์ ถ้าเว้นว่างจะใช้ของแบรนด์">ⓘ</span></div>';
+  h += _textarea('โทนภาพ', 'pp-visual-tone', vis.tone, 'เช่น ดำ-ทอง พรีเมียม แสงนุ่ม', 'อธิบายสไตล์ภาพ/วิดีโอเฉพาะสินค้านี้ ถ้าเว้นว่างจะใช้ของแบรนด์');
+  h += _chipField('Keywords ภาพ', 'pp-visual-keywords', vo.keywords, 'เช่น golden black, premium lighting (กด Enter)', 'คีย์เวิร์ดภาพเฉพาะสินค้านี้ ใช้ปรับ AI Image Prompt ถ้าเว้นว่างจะใช้ของแบรนด์');
   return h;
 }
 
