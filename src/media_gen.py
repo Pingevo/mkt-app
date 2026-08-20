@@ -323,11 +323,14 @@ def build_visual_suffix(visual: dict[str, Any]) -> str:
         if color_hints:
             parts.append("Brand colors: " + ", ".join(color_hints))
 
-    # Image style tone
+    # Image style tone + product shot
     image_style = visual.get("image_style", {})
     tone = image_style.get("tone", "")
     if tone:
         parts.append(f"Overall tone: {tone}")
+    product_shot = image_style.get("product_shot", "")
+    if product_shot:
+        parts.append(f"Product shot style: {product_shot}")
 
     # Avoid — คำที่หลีกเลี่ยง
     avoid = visual.get("avoid", [])

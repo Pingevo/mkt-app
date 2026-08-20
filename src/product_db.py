@@ -4,11 +4,11 @@
 แยกออกจาก product_spec agent (ที่ทำ deliverable ให้ user)
 
 โครงสร้างไฟล์:
-  data/{product_id}/                — raw files ที่ user upload (เท่านั้น ไม่มีไฟล์ระบบปน)
+  data/{product_id}/                — raw files ที่ user upload + product_profile.json
   cache/{product_id}/product.json   — DB ของระบบ (status, raw_text, image_descriptions, ฯลฯ)
   cache/{product_id}/               — deliverables ของ product_spec agent (เอกสารสเปค)
 
-data/ มีแค่ไฟล์ user เท่านั้น — ไฟล์ระบบทั้งหมดอยู่ใน cache/
+data/ มีไฟล์ user + product_profile.json (ระบบสร้าง/ผู้ใช้แก้ไข) — ไฟล์ระบบอื่นๆ อยู่ใน cache/
 อนาคต: เปลี่ยนเป็น MongoDB ได้โดยแก้แค่ไฟล์นี้
 """
 
@@ -233,6 +233,8 @@ def find_stale_files(product_id: str) -> list[dict[str, Any]]:
     # ตรวจไฟล์ที่มีใน DB
     for f in record.get("files", []):
         file_path = Path(f.get("path", ""))
+        if file_path.name == "product_profile.json":
+            continue  # system file — not part of source data
         db_paths.add(str(file_path))
         if not file_path.exists():
             stale.append({**f, "reason": "deleted"})
@@ -247,7 +249,7 @@ def find_stale_files(product_id: str) -> list[dict[str, Any]]:
     pdir = _project_root() / "data" / product_id
     if pdir.exists():
         for item in sorted(pdir.iterdir()):
-            if not item.is_file() or item.name.startswith(".") or item.name == ".DS_Store":
+            if not item.is_file() or item.name.startswith(".") or item.name == ".DS_Store" or item.name == "product_profile.json":
                 continue
             if str(item) not in db_paths:
                 stale.append({

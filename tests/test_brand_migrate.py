@@ -72,12 +72,24 @@ _SAMPLE_AUDIENCE = """# กลุ่มเป้าหมายของแบ�
 
 ## กลุ่มเป้าหมายหลัก
 - อายุ: 30-45 (ผู้ปกครอง)
+- เพศ: หญิง 70% / ชาย 30%
 - อาชีพ: มืออาชีพ
 - รายได้: กลาง-บน
+- ที่อยู่: กรุงเทพฯ และปริมณฑล
 
 ## ผู้ใช้ปลายทาง (End User)
 - อายุ: 5-12
 - เด็กวัยเรียน
+
+## ไลฟ์สไตล์
+- ใส่ใจสุขภาพลูก
+- ใช้สมาร์ทโฟนทุกวัน
+- ติดตามข่าวเทคโนโลยี
+
+## พฤติกรรมการซื้อ
+- ตัดสินใจซื้อจาก: ความปลอดภัย > คุณสมบัติ > ราคา
+- งบประมาณต่อครั้ง: 2,000-5,000 บาท
+- ซื้อผ่าน: ออนไลน์
 
 ## ปัญหา/ความต้องการ (Pain Points)
 - ความปลอดภัย
@@ -87,6 +99,7 @@ _SAMPLE_AUDIENCE = """# กลุ่มเป้าหมายของแบ�
 ## ช่องทางที่ใช้บ่อย
 - Social Media: Facebook, TikTok
 - ช้อปออนไลน์: Shopee, Lazada
+- ค้นหาข้อมูล: Google, YouTube review
 """
 
 _SAMPLE_PROFILE = """# ประวัติแบรนด์ (Brand Profile)
@@ -181,6 +194,51 @@ def test_migrate_audience_to_audience_json():
         assert "ความปลอดภัย" in pain, f"pain_points wrong: {pain}"
 
         assert "audience.json" in status.get("created", [])
+
+
+def test_migrate_audience_extracts_lifestyle_and_buying_behavior():
+    """migrate audience ต้องดึงฟิลด์ที่เคยหาย: lifestyle, buying_behavior, search_channels, เพศ, ที่อยู่.
+
+    Bug เดิม: _parse_target_audience ดึงแค่ primary/end_user/pain_points/channels
+    ทิ้งฟิลด์: เพศ, ที่อยู่, ไลฟ์สไตล์, พฤติกรรมการซื้อ, ช่องค้นหาข้อมูล.
+    """
+    from src.brand_migrate import migrate_brand
+
+    with tempfile.TemporaryDirectory() as tmp:
+        brand_dir = Path(tmp)
+        (brand_dir / "target_audience.md").write_text(_SAMPLE_AUDIENCE, encoding="utf-8")
+
+        migrate_brand(brand_dir)
+
+        audience = json.loads((brand_dir / "audience.json").read_text(encoding="utf-8"))
+
+        # primary มีเพศ + ที่อยู่
+        primary = audience.get("primary", {})
+        assert "หญิง" in str(primary.get("เพศ", "") or primary.get("gender", "")), \
+            f"gender missing: {primary}"
+        assert "กรุงเทพ" in str(primary.get("ที่อยู่", "") or primary.get("location", "")), \
+            f"location missing: {primary}"
+
+        # lifestyle เป็น list
+        lifestyle = audience.get("lifestyle", [])
+        assert isinstance(lifestyle, list) and len(lifestyle) > 0, \
+            f"lifestyle missing or not list: {audience}"
+        assert any("สุขภาพ" in s for s in lifestyle), \
+            f"lifestyle content wrong: {lifestyle}"
+
+        # buying_behavior เป็น dict
+        bb = audience.get("buying_behavior", {})
+        assert isinstance(bb, dict), f"buying_behavior not dict: {audience}"
+        assert "ความปลอดภัย" in str(bb.get("decision_factors", "")), \
+            f"decision_factors missing: {bb}"
+        assert "2,000" in str(bb.get("budget_per_purchase", "")), \
+            f"budget missing: {bb}"
+
+        # search_channels แยกจาก channels
+        search = audience.get("search_channels", [])
+        assert isinstance(search, list), f"search_channels not list: {audience}"
+        assert any("Google" in s for s in search) or any("YouTube" in s for s in search), \
+            f"search_channels content wrong: {search}"
 
 
 def test_migrate_keeps_profile_md():
@@ -286,6 +344,7 @@ if __name__ == "__main__":
         test_migrate_tone_to_voice_and_terms,
         test_migrate_visual_to_visual_json,
         test_migrate_audience_to_audience_json,
+        test_migrate_audience_extracts_lifestyle_and_buying_behavior,
         test_migrate_keeps_profile_md,
         test_migrate_no_md_does_nothing,
         test_migrate_backs_up_md,

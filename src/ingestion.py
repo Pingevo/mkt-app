@@ -23,6 +23,7 @@ Flow:
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import time
@@ -32,6 +33,7 @@ from typing import Any
 import yaml
 
 from . import product_db
+from .config_loader import _project_root
 from .file_loader import load_file
 from .llm_client import LLMClient
 
@@ -289,6 +291,36 @@ PREPROCESSORS = {
 #  Main pipeline
 # ------------------------------------------------------------------
 
+def _generate_product_profile(product_id: str, llm=None) -> None:
+    """สร้าง/บันทึก product_profile.json อัตโนมัติจากเนื้อหาที ingest ได้."""
+    from .voice_learner import analyze_product_positioning
+    from .config_loader import _project_root
+
+    spec_text = product_db.get_agent_context_text(product_id)
+    if not spec_text or not spec_text.strip():
+        return
+
+    client = llm or _make_llm()
+    if client is None:
+        return
+
+    try:
+        suggested = analyze_product_positioning(spec_text, client)
+        if suggested:
+            profile_dir = _project_root() / "data" / product_id
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            profile_path = profile_dir / "product_profile.json"
+            # สร้างเฉพาะครั้งแรก — ไม่ทับของ user ทีแก้ไว้ใน modal
+            if not profile_path.exists():
+                profile_path.write_text(json.dumps(suggested, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        # ถ้า AI สร้าง product profile ไม่ได้ ไม่ขัดขวาง status ready
+        pass
+    finally:
+        if client is not llm and client is not None:
+            client.close()
+
+
 def _make_llm() -> LLMClient | None:
     """สร้าง LLM client สำหรับ ingestion (ใช้สำหรับ image/video/field extraction)."""
     from .config_loader import get_env, load_config, get_section
@@ -538,6 +570,8 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
     if ingested_count == 0:
         product_db.set_status(product_id, product_db.STATUS_NO_USABLE)
     else:
+        # สร้าง product profile ก่อนเปลี่ยน status เป็น ready
+        _generate_product_profile(product_id, llm)
         product_db.set_status(product_id, product_db.STATUS_READY)
 
     if llm is not None:

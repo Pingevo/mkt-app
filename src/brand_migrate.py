@@ -283,8 +283,29 @@ def _parse_visual_guidelines(content: str) -> dict[str, Any]:
     return visual
 
 
+# Mapping คำไทยใน .md → key มาตรฐานใน audience.json
+# (เพิ่ม/แก้ได้โดยไม่ต้องแก้ logic — เป็น data ไม่ใช่ code)
+_BUYING_BEHAVIOR_KEY_MAP = {
+    "ตัดสินใจ": "decision_factors",
+    "งบ": "budget_per_purchase",
+    "budget": "budget_per_purchase",
+    "ซื้อผ่าน": "channels_purchase",
+    "channel": "channels_purchase",
+}
+
+
 def _parse_target_audience(content: str) -> dict[str, Any]:
-    """แยก target_audience.md → audience_dict."""
+    """แยก target_audience.md → audience_dict.
+
+    ดึงครบทุก section ตาม target_audience.example.md:
+      - primary (age, role, เพศ, อาชีพ, รายได้, ที่อยู่)
+      - end_user
+      - lifestyle (list)
+      - buying_behavior (dict: decision_factors, budget_per_purchase, channels_purchase)
+      - pain_points (list)
+      - channels (list — social + shop)
+      - search_channels (list — ค้นหาข้อมูล)
+    """
     sections = _split_sections(content)
     audience: dict[str, Any] = {}
 
@@ -329,25 +350,59 @@ def _parse_target_audience(content: str) -> dict[str, Any]:
         if end_user:
             audience["end_user"] = end_user
 
+    # Lifestyle — bullet list
+    life_text = sections.get("ไลฟ์สไตล์", "")
+    if life_text:
+        lifestyle = _parse_list_items(life_text)
+        if lifestyle:
+            audience["lifestyle"] = lifestyle
+
+    # Buying Behavior — key: value pairs
+    bb_text = sections.get("พฤติกรรมการซื้อ", "")
+    if bb_text:
+        bb: dict[str, str] = {}
+        for line in bb_text.split("\n"):
+            line = line.strip()
+            if not line.startswith("- "):
+                continue
+            item = line[2:].strip()
+            if ":" in item:
+                key, val = item.split(":", 1)
+                key_lower = key.strip().lower()
+                # map คำไทย → key มาตรฐาน (ดู _BUYING_BEHAVIOR_KEY_MAP)
+                mapped = next((std for thai, std in _BUYING_BEHAVIOR_KEY_MAP.items() if thai in key_lower), None)
+                key = mapped or key_lower.replace(" ", "_")
+                bb[key] = val.strip()
+        if bb:
+            audience["buying_behavior"] = bb
+
     # Pain Points
     pain_text = sections.get("ปัญหา/ความต้องการ (Pain Points)", "")
     if pain_text:
         audience["pain_points"] = _parse_list_items(pain_text)
 
-    # Channels
+    # Channels — แยก search_channels ออกจาก channels ปกติ
     chan_text = sections.get("ช่องทางที่ใช้บ่อย", "")
     if chan_text:
         channels: list[str] = []
+        search_channels: list[str] = []
         for line in chan_text.split("\n"):
             line = line.strip()
             if not line.startswith("- "):
                 continue
             item = line[2:].strip()
             if ":" in item:
-                _, val = item.split(":", 1)
-                channels.extend(x.strip() for x in val.split(",") if x.strip())
+                key, val = item.split(":", 1)
+                key_lower = key.strip().lower()
+                vals = [x.strip() for x in val.split(",") if x.strip()]
+                if "ค้นหา" in key_lower or "search" in key_lower:
+                    search_channels.extend(vals)
+                else:
+                    channels.extend(vals)
         if channels:
             audience["channels"] = channels
+        if search_channels:
+            audience["search_channels"] = search_channels
 
     return audience
 

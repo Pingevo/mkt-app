@@ -81,6 +81,26 @@ LLM บรรยาย + ติด tag ตาม taxonomy ใน `config/assets.
 
 ดูนิยามเต็มใน `config/ingestion.yaml` ส่วน `status_labels`
 
+## ตำแหน่งสินค้า (Product Positioning)
+
+### Brand Voice (เสียงแบรนด์) vs Product Positioning (ตำแหน่งสินค้า)
+- **Brand Voice** = ตัวตน "เราเป็นใคร" ตั้งครั้งเดียว ใช้ทุกรุ่น คงที่ข้ามสินค้าทุกตัว (เสียงพูด คำใช้ สี ประวัติ)
+- **Product Positioning** = ตำแหน่ง "รุ่นนี้เอาไปแข่งกับใคร ทำไมซื้อ" ตั้งใหม่ทุกรุ่น เปลี่ยนตาม product update (กลุ่มเป้าหมายเฉพาะรุ่น คู่แข่ง จุดขาย ระดับราคา use case ปรับโทน)
+
+ความสัมพันธ์: Voice เป็นกรอบ — Positioning ปรับภายในกรอบ ไม่ใช่เสียงใหม่
+ตัวอย่าง: Lagenio voice = "เหมือนพ่อแม่ที่เข้าใจเทคโนโลยี" (ทุกรุ่น). K9 positioning = พรีเมียม มั่นใจ (ปรับโทนภายใน voice เดิม ไม่ใช่เสียงใหม่)
+
+### Product Profile (ไฟล์ตำแหน่งสินค้า)
+ไฟล์ `data/{product}/product_profile.json` เก็บเฉพาะสิ่งที่ต่างจากแบรนด์ ถ้าฟิลด์ไหนไม่มี → ใช้ของแบรนด์
+
+ฟิลด์: audience (ทับของแบรนด์), competitors, differentiators, use_cases, price_tier, tone_adjustment, visual_override
+
+กฎรวม: ทับทั้งฟิลด์ — สินค้ามีฟิลด์ไหน → ใช้ของสินค้าทั้งก้อน ไม่ผสมลึกระดับฟิลด์ย่อยกับแบรนด์
+
+ในระบบนี้: โหลดโดย `brand_loader.py` (รับ `product_id` พารามิเตอร์) รวมกับ brand config อัตโนมัติ ผู้เรียกไม่ต้องรวมเอง
+
+ไม่ใช่: Brand Voice (ตัวตน — อยู่ที่ `brand/`), Terms (คำใช้ — อยู่ที่ `brand/terms.json`), ประวัติแบรนด์ (อยู่ที่ `brand/brand_profile.md`)
+
 ## โหมดการสร้าง
 
 ### Separate Mode

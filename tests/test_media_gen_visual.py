@@ -82,6 +82,38 @@ def test_build_visual_suffix_with_image_style_tone():
     assert "อบอุ่น" in suffix, f"tone missing: {suffix}"
 
 
+def test_build_visual_suffix_with_image_style_product_shot():
+    """มี image_style.product_shot → suffix มี product shot hint.
+
+    Bug เดิม: ฟอร์ม Visual มีช่อง "Product shot" เซฟลง visual.json
+    แต่ build_visual_suffix ไม่อ่านค่านี้ → ผู้ใช้กรอกแล้วไม่มีผล.
+    """
+    from src.media_gen import build_visual_suffix
+
+    visual = {
+        "image_style": {"product_shot": "สะอาด พื้นขาว โฟกัสที่ตัวสินค้า"},
+        "keywords": [],
+    }
+    suffix = build_visual_suffix(visual)
+
+    assert "สะอาด" in suffix, f"product_shot missing: {suffix}"
+    assert "พื้นขาว" in suffix, f"product_shot value missing: {suffix}"
+
+
+def test_build_visual_suffix_with_tone_and_product_shot():
+    """มีทั้ง tone และ product_shot → suffix มีทั้งคู่ (ไม่ทับกัน)."""
+    from src.media_gen import build_visual_suffix
+
+    visual = {
+        "image_style": {"tone": "อบอุ่น สดใส", "product_shot": "สะอาด พื้นขาว"},
+        "keywords": [],
+    }
+    suffix = build_visual_suffix(visual)
+
+    assert "อบอุ่น" in suffix, f"tone missing: {suffix}"
+    assert "สะอาด" in suffix, f"product_shot missing: {suffix}"
+
+
 def test_build_visual_suffix_no_keywords_no_colors():
     """มีแค่ avoid (ไม่มี keywords, colors) → suffix มีแค่ avoid."""
     from src.media_gen import build_visual_suffix
@@ -100,6 +132,8 @@ if __name__ == "__main__":
         test_build_visual_suffix_empty_dict,
         test_build_visual_suffix_with_colors,
         test_build_visual_suffix_with_image_style_tone,
+        test_build_visual_suffix_with_image_style_product_shot,
+        test_build_visual_suffix_with_tone_and_product_shot,
         test_build_visual_suffix_no_keywords_no_colors,
     ]
     passed = 0

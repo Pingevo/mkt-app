@@ -26,7 +26,7 @@ from .agents import (
     ManagerAgent,
     ProductSpecAgent,
 )
-from .brand_loader import load_brand_rules, load_brand_reference, load_brand_visual
+from .brand_loader import load_brand_rules, load_brand_reference, load_brand_visual, load_product_profile
 from .brand_priority import load_brand_priority
 from .config_loader import get_agent_config, load_config
 from .data_loader import detect_data_files, get_agent_data
@@ -71,15 +71,15 @@ class Orchestrator:
         product_id: str | None = None,
     ) -> None:
         self.config = load_config(config_path)
-        self.brand_context = load_brand_rules(brand_dir)
-        self.brand_reference = load_brand_reference(brand_dir)
-        self.brand_visual = load_brand_visual(brand_dir)
+        self.brand_context = load_brand_rules(brand_dir, product_id=product_id)
+        self.brand_reference = load_brand_reference(brand_dir, product_id=product_id)
+        self.brand_visual = load_brand_visual(brand_dir, product_id=product_id)
         self.brand_rules = load_brand_priority(brand_dir)
         self.product_images = product_images or []
         self.product_id = product_id
         self.results: dict[str, str] = {}
 
-    def _make_client(self) -> LLMClient:
+    def make_client(self) -> LLMClient:
         defaults = self.config.get("defaults", {})
         from .config_loader import get_env
 
@@ -798,11 +798,15 @@ class Orchestrator:
                         ctx = product_db.get_agent_context(pid)
                         text = ctx.get("text", "")
                         summary = text[:summary_fallback_len].replace("\n", " ").strip()
+                    # ดึง product_profile positioning — ช่วย LLM เลือกสินค้าฉลาดขึ้น
+                    profile = load_product_profile(pid)
                     result.append({
                         "product_id": pid,
                         "summary": summary[:summary_len],
                         "category": meta.get("category", ""),
                         "image_count": meta.get("image_count", 0),
+                        "price_tier": profile.get("price_tier", ""),
+                        "differentiators": profile.get("differentiators", []),
                     })
                 return result
 
@@ -810,10 +814,12 @@ class Orchestrator:
                 if not product_db.is_ready(product_id):
                     return {"error": f"สินค้า {product_id} ไม่พร้อมหรือไม่มีในระบบ"}
                 ctx = product_db.get_agent_context(product_id)
+                profile = load_product_profile(product_id)
                 return {
                     "product_id": product_id,
                     "text_context": ctx.get("text", "")[:detail_text_len],
                     "image_count": len(ctx.get("image_paths", [])),
+                    "product_profile": profile,
                 }
 
             def _get_content_history(product_id: str = "") -> list[dict]:

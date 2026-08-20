@@ -8,10 +8,19 @@
   brand/visual.json    — สี สไตล์ keyword สำหรับ image prompt (structured → media_gen)
 
 3 ฟังก์ชันแยกตามชั้น:
-  load_brand_rules(brand_dir) -> str     — voice.json + terms.json → rules string
-  load_brand_reference(brand_dir) -> str — profile.md + audience.json → reference string
-  load_brand_visual(brand_dir) -> dict   — visual.json → dict สำหรับ media_gen
+  load_brand_rules(brand_dir, product_id=None) -> str
+      — voice.json + terms.json → rules string
+      — ถ้ามี product_profile.tone_adjustment → แป๊ะท้าย
+  load_brand_reference(brand_dir, product_id=None) -> str
+      — profile.md + audience.json → reference string
+      — ถ้ามี product_profile.audience → ทับของแบรนด์
+      — ถ้ามี competitors/differentiators/use_cases/price_tier → เพิ่ม section
+  load_brand_visual(brand_dir, product_id=None) -> dict
+      — visual.json → dict สำหรับ media_gen
+      — ถ้ามี product_profile.visual_override → merge (ทับทั้งก้อนฟิลด์ย่อย)
 
+กฎรวม: สินค้ามีฟิลด์ไหน → ใช้ของสินค้า (ทับทั้งก้อน); ไม่มี → ใช้ของแบรนด์
+Backward compat: product_id=None → ทำงานเหมือนเดิมทุกประการ
 Backward compat: load_brand_context() ยังทำงาน — delegate ไป load_brand_rules
 """
 from __future__ import annotations
@@ -95,20 +104,31 @@ def _format_audience(audience: dict[str, Any]) -> str:
     if end_user:
         eu_lines = [f"  {k}: {v}" for k, v in end_user.items()]
         parts.append("ผู้ใช้ปลายทาง:\n" + "\n".join(eu_lines))
+    lifestyle = audience.get("lifestyle", [])
+    if lifestyle:
+        parts.append("ไลฟ์สไตล์: " + ", ".join(lifestyle))
+    bb = audience.get("buying_behavior", {})
+    if bb:
+        bb_lines = [f"  {k}: {v}" for k, v in bb.items()]
+        parts.append("พฤติกรรมการซื้อ:\n" + "\n".join(bb_lines))
     pain = audience.get("pain_points", [])
     if pain:
         parts.append("ปัญหา/ความต้องการ: " + ", ".join(pain))
     channels = audience.get("channels", [])
     if channels:
         parts.append("ช่องทาง: " + ", ".join(channels))
+    search = audience.get("search_channels", [])
+    if search:
+        parts.append("ช่องทางค้นหาข้อมูล: " + ", ".join(search))
     return "\n".join(parts)
 
 
-def load_brand_rules(brand_dir: str | Path | None = None) -> str:
+def load_brand_rules(brand_dir: str | Path | None = None, *, product_id: str | None = None) -> str:
     """อ่าน voice.json + terms.json → รวมเป็น rules string ใส่ system prompt.
 
     ถ้าไม่มีไฟล์เลย → คืน string ว่าง (agent ยังทำงานได้ แค่ไม่มี brand rules)
     Fallback: ถ้ามี .md เดิมแต่ไม่มี .json → เรียก migrate_brand อัตโนมัติ
+    ถ้ามี product_id และ product_profile.tone_adjustment → แป๊ะท้าย rules string
     """
     brand_dir = _resolve_brand_dir(brand_dir)
     if not brand_dir:
@@ -127,18 +147,27 @@ def load_brand_rules(brand_dir: str | Path | None = None) -> str:
     if terms_text:
         sections.append(f"--- คำที่ใช้/ห้ามใช้ (Terms) ---\n{terms_text}")
 
+    # Product profile — tone_adjustment แป๊ะท้าย rules (ปรับโทนภายใน voice เดิม)
+    if product_id:
+        profile = load_product_profile(product_id)
+        tone_adj = profile.get("tone_adjustment", "")
+        if tone_adj:
+            sections.append(f"--- ปรับโทนสำหรับสินค้านี้ ({product_id}) ---\n{tone_adj}")
+
     if not sections:
         return ""
 
     return "--- กฎของแบรนด์ (Brand Rules) ---\n\n" + "\n\n".join(sections) + "\n\n--- สิ้นสุดกฎของแบรนด์ ---"
 
 
-def load_brand_reference(brand_dir: str | Path | None = None) -> str:
+def load_brand_reference(brand_dir: str | Path | None = None, *, product_id: str | None = None) -> str:
     """อ่าน profile.md + audience.json → รวมเป็น reference string.
 
     reference ดึงตาม relevance — ไม่ได้ใส่ใน system prompt ทุก agent
     ใส่เฉพาะ agent ที่ต้องการบริบทเพิ่ม (content_creator, campaign_strategy)
     Fallback: ถ้ามี .md เดิมแต่ไม่มี .json → เรียก migrate_brand อัตโนมัติ
+    ถ้ามี product_id และ product_profile.audience → ทับของแบรนด์ (ทั้งก้อน)
+    ถ้ามี competitors/differentiators/use_cases/price_tier → เพิ่มเป็น section ใหม่
     """
     brand_dir = _resolve_brand_dir(brand_dir)
     if not brand_dir:
@@ -147,7 +176,11 @@ def load_brand_reference(brand_dir: str | Path | None = None) -> str:
     _auto_migrate_if_needed(brand_dir)
 
     profile = _read_text(brand_dir / "brand_profile.md")
-    audience = _read_json(brand_dir / "audience.json")
+    brand_audience = _read_json(brand_dir / "audience.json")
+
+    # ถ้ามี product_profile.audience → ทับของแบรนด์ทั้งก้อน
+    product_profile = load_product_profile(product_id) if product_id else {}
+    audience = product_profile.get("audience") or brand_audience
 
     sections: list[str] = []
     if profile:
@@ -156,17 +189,23 @@ def load_brand_reference(brand_dir: str | Path | None = None) -> str:
     if audience_text:
         sections.append(f"### Target Audience\n\n{audience_text}")
 
+    # Positioning section — เฉพาะสินค้าที่มี product_profile
+    positioning = _format_positioning(product_profile, product_id or "")
+    if positioning:
+        sections.append(positioning)
+
     if not sections:
         return ""
 
     return "--- ข้อมูลแบรนด์อ้างอิง ---\n\n" + "\n\n---\n\n".join(sections) + "\n\n--- สิ้นสุดข้อมูลแบรนด์อ้างอิง ---"
 
 
-def load_brand_visual(brand_dir: str | Path | None = None) -> dict[str, Any]:
+def load_brand_visual(brand_dir: str | Path | None = None, *, product_id: str | None = None) -> dict[str, Any]:
     """อ่าน visual.json → dict สำหรับ media_gen.
 
     คืน {} ถ้าไม่มี visual.json — media_gen จะไม่แป๊ะ visual keywords
     Fallback: ถ้ามี .md เดิมแต่ไม่มี .json → เรียก migrate_brand อัตโนมัติ
+    ถ้ามี product_profile.visual_override → merge dict (ทับทั้งก้อนฟิลด์ย่อยที่ระบุ)
     """
     brand_dir = _resolve_brand_dir(brand_dir)
     if not brand_dir:
@@ -174,16 +213,25 @@ def load_brand_visual(brand_dir: str | Path | None = None) -> dict[str, Any]:
 
     _auto_migrate_if_needed(brand_dir)
 
-    return _read_json(brand_dir / "visual.json")
+    visual = _read_json(brand_dir / "visual.json")
+
+    # Merge product visual_override — ทับทั้งก้อนฟิลด์ย่อยที่ระบุ
+    if product_id:
+        profile = load_product_profile(product_id)
+        override = profile.get("visual_override", {})
+        if override:
+            visual = {**visual, **override}
+
+    return visual
 
 
-def load_brand_context(brand_dir: str | Path | None = None) -> str:
+def load_brand_context(brand_dir: str | Path | None = None, *, product_id: str | None = None) -> str:
     """Backward compat — delegate ไป load_brand_rules.
 
     call sites เดิม (orchestrator.py, base_agent.py) ยังเรียกฟังก์ชันนี้
     หลัง migration เสร็จ จะเปลี่ยน call sites ไปใช้ load_brand_rules โดยตรง
     """
-    return load_brand_rules(brand_dir)
+    return load_brand_rules(brand_dir, product_id=product_id)
 
 
 def _resolve_brand_dir(brand_dir: str | Path | None) -> Path | None:
@@ -213,3 +261,63 @@ def _auto_migrate_if_needed(brand_dir: Path) -> None:
             migrate_brand(brand_dir)
         except Exception:
             pass  # migrate พัง → ไม่ crash loader, คืน empty (agent ยังทำงานได้)
+
+
+# ---------------------------------------------------------------------------
+# Product Profile — ตำแหน่งสินค้า (positioning) แยกจากแบรนด์
+# ---------------------------------------------------------------------------
+
+def load_product_profile(product_id: str) -> dict[str, Any]:
+    """อ่าน data/{product_id}/product_profile.json — คืน {} ถ้าไม่มี.
+
+    Public API สำหรับดึง product profile ดิบ (ก่อน merge กับแบรนด์).
+    ใช้เมื่อต้องการเห็น profile เฉพาะสินค้าโดยไม่รวมของแบรนด์
+    (เช่น orchestrator auto mode ส่ง price_tier/differentiators ให้ LLM เลือก).
+
+    เก็บเฉพาะสิ่งที่ต่างจากแบรนด์ (audience, competitors, differentiators,
+    use_cases, price_tier, tone_adjustment, visual_override).
+    กฎรวม: สินค้ามีฟิลด์ไหน → ใช้ของสินค้า; ไม่มี → ใช้ของแบรนด์
+
+    ค้นหาจาก cwd/data ก่อน (สำหรับ test) แล้ว fallback ไป project_root/data
+    """
+    if not product_id:
+        return {}
+    # ค้นจาก cwd ก่อน (test เปลี่ยน cwd ไป tmp dir) แล้ว fallback ไป project root
+    candidates = [
+        Path.cwd() / "data" / product_id / "product_profile.json",
+        Path(__file__).resolve().parent.parent / "data" / product_id / "product_profile.json",
+    ]
+    for path in candidates:
+        data = _read_json(path)
+        if data:
+            return data
+    return {}
+
+
+
+
+_POSITIONING_LIST_FIELDS = [
+    ("คู่แข่งหลัก", "competitors"),
+    ("จุดขายหลัก", "differentiators"),
+    ("Use cases", "use_cases"),
+]
+
+
+def _format_positioning(profile: dict[str, Any], product_id: str) -> str:
+    """แปลง product_profile → positioning section string สำหรับ reference.
+
+    รวม: competitors, differentiators, use_cases, price_tier (ไม่รวม audience/tone/visual
+    เพราะจัดการในจุดอื่น — audience ทับของแบรนด์, tone แป๊ะใน rules, visual merge ใน visual)
+    """
+    parts: list[str] = []
+    for label, key in _POSITIONING_LIST_FIELDS:
+        values = profile.get(key, [])
+        if values:
+            parts.append(f"{label}: " + ", ".join(values))
+    price_tier = profile.get("price_tier", "")
+    if price_tier:
+        parts.append(f"ระดับราคา: {price_tier}")
+    if not parts:
+        return ""
+    header = f"### Product Positioning ({product_id})"
+    return header + "\n\n" + "\n".join(parts)

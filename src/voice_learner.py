@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -77,7 +78,12 @@ def _run_llm_json(
 ) -> dict[str, Any]:
     """ส่ง prompt ให้ LLM พร้อม Structured Outputs → คืน parsed JSON dict.
 
-    ถ้า LLM คืน JSON ไม่ valid → คืน {} (ไม่ crash)
+    ถ้า LLM คืน JSON ไม่ valid → retry สูงสุด 3 ครั้ง
+    ถ้าทุกครั้งล้มเหลว → คืน {} (ไม่ crash)
+
+    Retry เพราะ LLM (โดยเฉพาะ Gemini Flash ผ่าน OpenRouter) บางครั้ง
+    คืน JSON ที่ถูกตัดกลางคันหรือไม่ respect schema — เป็น flaky model behavior
+    ไม่ใช่ logic bug ของเรา
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -87,22 +93,30 @@ def _run_llm_json(
         "type": "json_schema",
         "json_schema": {"name": schema_name, "strict": True, "schema": schema},
     }
-    try:
-        raw = llm.chat(
-            messages,
-            temperature=0.3,
-            max_tokens=2048,
-            stream=False,
-            response_format=response_format,
-            source=source,
-        )
-        clean = raw.strip()
-        if clean.startswith("```"):
-            clean = re.sub(r"^```(?:json)?\s*", "", clean)
-            clean = re.sub(r"\s*```$", "", clean)
-        return json.loads(clean)
-    except (json.JSONDecodeError, TypeError, Exception):
-        return {}
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            raw = llm.chat(
+                messages,
+                temperature=0.3,
+                max_tokens=4096,
+                stream=False,
+                response_format=response_format,
+                source=source,
+            )
+            clean = raw.strip()
+            if clean.startswith("```"):
+                clean = re.sub(r"^```(?:json)?\s*", "", clean)
+                clean = re.sub(r"\s*```$", "", clean)
+            return json.loads(clean)
+        except (json.JSONDecodeError, TypeError, Exception) as e:
+            last_error = e
+            # retry ครั้งต่อไป (LLM flaky — ลองใหม่อาจสำเร็จ)
+            continue
+    # ทุก attempt ล้มเหลว — log แล้วคืน {}
+    print(f"[voice_learner] _run_llm_json failed after 3 attempts ({source}): "
+          f"{type(last_error).__name__}: {last_error}", file=sys.stderr, flush=True)
+    return {}
 
 
 def _examples_to_text(examples: list[str]) -> str:
@@ -439,3 +453,86 @@ def extract_file_text(filepath: Path) -> str:
         return f"[error] {e}"
     except Exception as e:
         return f"[error] อ่านไฟล์ไม่ได้: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Product Positioning Analysis — อ่านสเปคสินค้า → สรุปตำแหน่งสินค้า
+# (ใช้ pattern เดียวกับ analyze_brand แต่รับสเปคสินค้าแทนตัวอย่างโพสต์)
+# ---------------------------------------------------------------------------
+
+_PRODUCT_PROFILE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "audience": {
+            "type": "object",
+            "properties": {
+                "primary": {
+                    "type": "object",
+                    "properties": {
+                        "age": {"type": "string"},
+                        "role": {"type": "string"},
+                    },
+                    "required": ["age", "role"],
+                    "additionalProperties": False,
+                },
+                "end_user": {
+                    "type": "object",
+                    "properties": {
+                        "age": {"type": "string"},
+                        "desc": {"type": "string"},
+                    },
+                    "required": ["age", "desc"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["primary", "end_user"],
+            "additionalProperties": False,
+        },
+        "competitors": {"type": "array", "items": {"type": "string"}},
+        "differentiators": {"type": "array", "items": {"type": "string"}},
+        "use_cases": {"type": "array", "items": {"type": "string"}},
+        "price_tier": {"type": "string"},
+        "tone_adjustment": {"type": "string"},
+        "visual_override": {"type": "object", "additionalProperties": True},
+    },
+    "additionalProperties": False,
+}
+
+
+def analyze_product_positioning(spec_text: str, llm: Any) -> dict[str, Any]:
+    """อ่านสเปคสินค้า → สรุปตำแหน่งสินค้า (product profile) สำหรับเซฟเป็น product_profile.json.
+
+    ใช้ pattern เดียวกับ analyze_brand แต่รับสเปคสินค้าแทนตัวอย่างโพสต์
+    คืน: {audience, competitors, differentiators, use_cases, price_tier, tone_adjustment, visual_override (optional)}
+    ฟิลด์ไหนไม่ต่างจากแบรนด์ หรือไม่มีข้อมูล ให้ข้ามไม่ต้องใส่
+    ถ้า spec_text ว่าง → คืน {} (ไม่เรียก LLM)
+    ถ้า LLM คืน JSON ไม่ valid → คืน {} (ไม่ crash)
+    """
+    if not spec_text or not spec_text.strip():
+        return {}
+
+    system_prompt = (
+        "คุณเป็นนักวิเคราะห์ตำแหน่งสินค้า (Product Positioning Analyst)\n"
+        "หน้าที่: อ่านสเปคสินค้าที่ให้มา แล้วสรุปตำแหน่งทางการตลาดของสินค้านี้\n\n"
+        "วิเคราะห์:\n"
+        "1. audience — กลุ่มเป้าหมายเฉพาะของสินค้านี้\n"
+        "   primary: {age: 'ช่วงอายุ', role: 'บทบาท เช่น ผู้ปกครองรายได้สูง'}\n"
+        "   end_user: {age: 'ช่วงอายุ', desc: 'ลักษณะ เช่น เด็กวัยรุ่น'}\n"
+        "2. competitors — คู่แข่งหลัก (ชื่อสินค้าจริงในตลาด)\n"
+        "3. differentiators — จุดขายหลักที่ทำให้สินค้านี้ต่างจากคู่แข่ง\n"
+        "4. use_cases — use case หลัก (เช่น 'ติดตามลูก', 'ฟิตเนส')\n"
+        "5. price_tier — ระดับราคา: 'entry' (ราคาเริ่มต้น), 'mid' (กลาง), หรือ 'flagship' (ระดับสูง)\n"
+        "6. tone_adjustment — ปรับโทนภายใน voice ของแบรนด์ (ไม่ใช่เสียงใหม่)\n"
+        "   เช่น 'พรีเมียม มั่นใจ' สำหรับสินค้าระดับสูง หรือ 'สนุก คึกคัก' สำหรับสินค้าเด็ก\n"
+        "7. visual_override — ปรับแต่ง visual ของสินค้า (image_style, keywords ฯลฯ) ถ้าต่างจากแบรนด์\n\n"
+        "สำคัญ: แต่ละ field ต้องสั้น — ไม่เกิน 1 วลี (10-20 คำต่อ field)\n"
+        "ถ้าฟิลด์ไหนไม่ต่างจากแบรนด์ หรือไม่มีข้อมูล ให้ข้ามไม่ต้องใส่ (เก็บเฉพาะสิ่งที่ต่าง)\n"
+        "ห้ามเขียนเป็นย่อหน้ายาว ให้เขียนแบบ bullet/keyword เท่านั้น\n\n"
+        "คืนเป็น JSON เท่านั้นตาม schema ที่กำหนด"
+    )
+    user_prompt = f"วิเคราะห์ตำแหน่งสินค้าจากสเปคต่อไปนี้:\n\n{spec_text}"
+
+    return _run_llm_json(
+        llm, system_prompt, user_prompt,
+        "product_profile", _PRODUCT_PROFILE_SCHEMA, "voice_learner.analyze_product_positioning",
+    )

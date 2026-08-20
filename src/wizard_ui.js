@@ -18,6 +18,9 @@
     else ensureFlowSteps();
     renderAgentBoxes();
     refreshProductFolders();
+    if (!productFolderCache.length && typeof window.loadFolderList === 'function') {
+      window.loadFolderList();
+    }
     setTimeout(retryStep1, 100);
     setTimeout(retryStep1, 700);
   }
@@ -304,10 +307,6 @@
     const sidebar = document.getElementById('sidebar-content');
     if (!sidebar) return;
     const cards = sidebar.querySelectorAll('[data-folder]');
-    if (!cards.length) {
-      if (typeof loadFolderList === 'function') loadFolderList();
-      return;
-    }
     productFolderCache = [];
     cards.forEach(c => {
       productFolderCache.push({
@@ -326,8 +325,7 @@
     if (!grid) return;
 
     if (!productFolderCache.length) {
-      grid.innerHTML = '<div style="grid-column:1/-1;color:#71717a;font-size:13px">กำลังโหลดสินค้า...</div>';
-      if (typeof loadFolderList === 'function') loadFolderList();
+      grid.innerHTML = '<div style="grid-column:1/-1;color:#71717a;font-size:13px">ยังไม่มีสินค้า</div>';
       return;
     }
 

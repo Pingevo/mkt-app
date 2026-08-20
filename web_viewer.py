@@ -212,6 +212,8 @@ def _scan_data_folders() -> list[dict[str, Any]]:
             for f in cache_dir.iterdir():
                 if f.is_file() and not f.name.startswith(".") and f.name != ".DS_Store":
                     deliverable_count += 1
+        # ตรวจว่ามี product_profile.json ไหม — สำหรับ sidebar indicator
+        has_product_profile = (item / "product_profile.json").exists()
         folders.append({
             "name": item.name,
             "path": item.name,
@@ -221,6 +223,7 @@ def _scan_data_folders() -> list[dict[str, Any]]:
             "status": status,        # จาก DB: empty/no_usable_data/processing/ready/stale
             "progress": progress,    # {step, total, message, eta_seconds} ถ้ากำลัง ingestion
             "thumbnail": thumbnail,
+            "has_product_profile": has_product_profile,
         })
     return folders
 
@@ -960,9 +963,9 @@ def api_folder_files(folder: str) -> JSONResponse:
     config = _load_config()
 
     files = []
-    # User files from data/ — ไม่มีไฟล์ระบบปน (DB อยู่ใน cache/)
+    # User files from data/ — ไฟล์ระบบไม่แสดง
     for f in sorted(product_dir.rglob("*")):
-        if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store":
+        if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store" or f.name == "product_profile.json":
             continue
         abs_path = str(f)
         db_entry = db_files.get(abs_path, {})
@@ -1334,6 +1337,66 @@ async def api_brand_migrate(request: Request) -> JSONResponse:
 
 
 # ============================================================
+# Product Profile — ตำแหน่งสินค้า (positioning) แยกจากแบรนด์
+# ============================================================
+
+@app.get("/api/product_profile/{folder}")
+def api_product_profile_get(folder: str) -> JSONResponse:
+    """อ่าน data/{folder}/product_profile.json — คืน {} ถ้าไม่มี."""
+    import json as _json
+    path = DATA_DIR / folder / "product_profile.json"
+    if path.exists():
+        try:
+            return JSONResponse(_json.loads(path.read_text(encoding="utf-8")))
+        except (_json.JSONDecodeError, OSError):
+            pass
+    return JSONResponse({})
+
+
+@app.post("/api/product_profile_save/{folder}")
+async def api_product_profile_save(folder: str, request: Request) -> JSONResponse:
+    """บันทึก product_profile.json — รับ dict จาก body."""
+    import json as _json
+    body = await request.json()
+    product_dir = DATA_DIR / folder
+    if not product_dir.exists():
+        return JSONResponse({"ok": False, "error": f"ไม่พบสินค้า {folder}"}, status_code=404)
+    path = product_dir / "product_profile.json"
+    path.write_text(_json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
+    return JSONResponse({"ok": True, "saved": str(path.relative_to(PROJECT_ROOT))})
+
+
+@app.post("/api/product_profile_suggest/{folder}")
+async def api_product_profile_suggest(folder: str) -> JSONResponse:
+    """AI อ่านสเปคสินค้า → สรุปตำแหน่งสินค้า (pre-fill ฟอร์ม).
+
+    ใช้ product_db.get_agent_context_text() ดึงสเปค → analyze_product_positioning() → คืน suggested dict.
+    """
+    from src.product_db import get_agent_context_text, is_ready
+    from src.voice_learner import analyze_product_positioning
+
+    if not is_ready(folder):
+        return JSONResponse({"ok": False, "error": f"สินค้า {folder} ยังไม่พร้อม (ต้อง ingest ก่อน)"})
+
+    spec_text = get_agent_context_text(folder)
+    if not spec_text.strip():
+        return JSONResponse({"ok": False, "error": "ไม่มีสเปคสินค้าให้วิเคราะห์"})
+
+    # สร้าง LLM client (ใช้ pattern เดียวกับ voice_learn)
+    try:
+        orch = Orchestrator(brand_dir="brand")
+        llm = orch.make_client()
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"สร้าง LLM client ไม่ได้: {e}"}, status_code=500)
+
+    suggested = analyze_product_positioning(spec_text, llm)
+    if not suggested:
+        return JSONResponse({"ok": False, "error": "AI วิเคราะห์ไม่สำเร็จ ลองกรอกเองหรือลองใหม่อีกครั้ง"})
+
+    return JSONResponse({"ok": True, "suggested": suggested})
+
+
+# ============================================================
 # Voice Learning — วิเคราะห์ตัวอย่างโพสต์ → voice profile
 # ============================================================
 
@@ -1374,7 +1437,7 @@ async def api_voice_learn(request: Request) -> JSONResponse:
     # สร้าง LLM client
     try:
         orch = Orchestrator(brand_dir="brand")
-        llm = orch._make_client()
+        llm = orch.make_client()
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"สร้าง LLM client ไม่ได้: {e}"}, status_code=500)
 
@@ -1597,7 +1660,7 @@ async def api_video_style_analyze(request: Request) -> JSONResponse:
 
     try:
         orch = Orchestrator(brand_dir="brand")
-        llm = orch._make_client()
+        llm = orch.make_client()
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"สร้าง LLM client ไม่ได้: {e}"}, status_code=500)
 
@@ -1947,7 +2010,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                     pass
 
                 if _current_llm is None:
-                    _current_llm = orch._make_client()
+                    _current_llm = orch.make_client()
                 llm = _current_llm
 
                 if _cancel_requested:
@@ -2325,7 +2388,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                 retry_llm = llm if llm is not None else None
                 if retry_llm is None:
                     try:
-                        retry_llm = orch._make_client()
+                        retry_llm = orch.make_client()
                     except Exception:
                         retry_llm = None
                 if auto_image:
@@ -2494,7 +2557,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                 except Exception:
                     pass
 
-                llm = orch._make_client()
+                llm = orch.make_client()
                 _active_llms.append(llm)
 
                 if mode == "combined" and len(folders) >= 2:
@@ -2671,7 +2734,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
             llm = None
             try:
                 orch = Orchestrator(brand_dir="brand")
-                llm = orch._make_client()
+                llm = orch.make_client()
                 try:
                     _active_llms.append(llm)
                 except NameError:
@@ -2988,7 +3051,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                 output_dir = OUTPUT_DIR / session_ts
                 output_dir.mkdir(parents=True, exist_ok=True)
 
-                llm = orch._make_client()
+                llm = orch.make_client()
                 _active_llms.append(llm)
 
                 def _status_cb(msg):
@@ -4011,6 +4074,7 @@ function startSidebarPolling() {
   }, 2000);
 }
 
+
 const AGENT_ORDER = ['product_spec', 'competitor_analysis', 'campaign_strategy', 'content_creator'];
 const AGENT_DEPENDENCIES = {
   product_spec: [],
@@ -4044,19 +4108,7 @@ function loadFolderList() {
     html += '<input type="text" class="sidebar-search" id="folder-search" placeholder="ค้นหาสินค้า..." oninput="filterFolders()">';
     html += '<button class="sidebar-add-btn" onclick="openUploadModal()">+ เพิ่ม</button>';
     html += '</div>';
-    const msBtnClass = multiSelectMode ? 'sidebar-ms-btn active' : 'sidebar-ms-btn';
-    html += '<div class="sidebar-toolbar-row"><button class="' + msBtnClass + '" style="flex:1" onclick="toggleMultiSelect()" title="เลือกหลายรายการเพื่อส่งไป agent พร้อมกัน">☑ เลือกหลายรายการ</button></div>';
     html += '</div>';
-    // Auto item — คลิกเลือกใน wizard
-    if (!multiSelectMode) {
-      html += '<div class="folder-item auto-item" data-name="__auto__" title="AI เลือกสินค้าเอง — กดเลือกใน wizard">';
-      html += '<span class="folder-icon" style="font-size:20px">⚡</span>';
-      html += '<div class="folder-info">';
-      html += '<div class="folder-name" style="color:#a5b4ff">Auto</div>';
-      html += '<div class="folder-meta"><span style="font-size:11px;color:#888">AI เลือกสินค้าเอง</span></div>';
-      html += '</div>';
-      html += '</div>';
-    }
     if (!folders.length) {
       html += '<div style="color:#555;font-size:12px;padding:12px">ยังไม่มีโฟลเดอร์ — กด + เพิ่ม เพื่อสร้าง</div>';
     } else {
@@ -4121,15 +4173,18 @@ function loadFolderList() {
         }
         html += '<div class="folder-name">' + escapeHtml(f.name) + '</div>';
         let metaExtra = '';
-        if (deliverableCount > 0) metaExtra = ' · ' + deliverableCount + ' เอกสาร';
-        if (status === 'stale') metaExtra += ' · คลิก⚙ เพื่อประมวลผลใหม่';
-        if (status === 'pending') metaExtra += ' · กด⚙ เพื่อประมวลผลข้อมูล';
-        if (status === 'no_usable_data') metaExtra += ' · ไฟล์ไม่รองรับ';
-        html += '<div class="folder-meta">' + statusBadge + ' <span style="font-size:11px;color:#888">' + rawCount + ' ไฟล์ข้อมูล' + metaExtra + '</span></div>';
+        if (status === 'stale') metaExtra = ' · คลิก⚙ เพื่อประมวลผลใหม่';
+        if (status === 'pending') metaExtra = ' · กด⚙ เพื่อประมวลผลข้อมูล';
+        if (status === 'no_usable_data') metaExtra = ' · ไฟล์ไม่รองรับ';
+        html += '<div class="folder-meta">' + statusBadge + ' <span style="font-size:11px;color:#888">' + metaExtra + '</span></div>';
         html += progressHtml;
         html += '</div>';
         if (!(multiSelectMode && canUseAgent)) {
-          html += '<span class="folder-manage-btn" onclick="openFolderManage(\'' + safePath + '\')" title="จัดการไฟล์">⚙</span>';
+          if (status === 'ready' || status === 'stale') {
+            html += '<span class="folder-manage-btn" onclick="openFolderManage(\'' + safePath + '\', this.parentElement.dataset.status)" title="จัดการไฟล์/สินค้า">⚙</span>';
+          } else {
+            html += '<span class="folder-manage-btn" style="opacity:0.3;cursor:not-allowed" title="รอประมวลผลข้อมูล/ตั้งค่าสินค้าเสร็จก่อน">⚙</span>';
+          }
         }
         html += '</div>';
         if (!(multiSelectMode && canUseAgent)) {
@@ -4298,8 +4353,8 @@ function toggleFolderFiles(folder, el) {
   });
 }
 
-function openFolderManage(folder) {
-  openUploadModalForFolder(folder);
+function openFolderManage(folder, status) {
+  openUploadModalForFolder(folder, status);
 }
 
 function deleteFile(folder, filepath) {
@@ -4349,62 +4404,93 @@ function loadSupportedFormats() {
 function renderSupportedFormats(data) {
   const formats = data.supported || data;
   const maxSizes = data.max_file_size_mb || {};
-  const icons = {text: '📄', image: '🖼️', video: '🎬', audio: '🔊'};
   const labels = {text: 'ข้อมูลดิบ', image: 'รูปภาพ', video: 'วิดีโอ', audio: 'เสียง'};
-  let html = '<div class="fmt-grid">';
+  let parts = ['กดเพิ่มได้หลายไฟล์'];
   for (const [type, exts] of Object.entries(formats)) {
-    const icon = icons[type] || '📁';
     const label = labels[type] || type;
     const maxMb = maxSizes[type];
-    html += '<div class="fmt-card">';
-    html += `<div class="fmt-card-head"><span class="fmt-card-icon">${icon}</span>${label}</div>`;
-    html += '<div class="fmt-card-exts">';
-    for (const ext of exts) {
-      html += `<span class="fmt-tag">${ext}</span>`;
-    }
-    html += '</div>';
-    if (maxMb) html += `<div class="fmt-card-max">สูงสุด ${maxMb} MB</div>`;
-    html += '</div>';
+    let t = `${label}: ${exts.join(' ')}`;
+    if (maxMb) t += ` (สูงสุด ${maxMb} MB)`;
+    parts.push(t);
   }
-  html += '</div>';
-  html += '<div class="fmt-note">⚠️ ไฟล์อื่นนอกจากนี้: ระบบจะข้ามและแจ้งให้ทราบ (ไม่ทำลาย)</div>';
-  document.getElementById('supported-formats-info').innerHTML = html;
+  parts.push('⚠️ ไฟล์อื่น: ข้ามและแจ้งให้ทราบ');
+  const tooltip = parts.join(' | ');
+  const tipEl = document.getElementById('upload-formats-tooltip');
+  if (tipEl) tipEl.title = tooltip;
+  document.getElementById('supported-formats-info').innerHTML = '';
+}
+
+function _makeProductNameFromFile(file) {
+  const base = (file.name || '').replace(/\.[^.]+$/, '').trim();
+  const clean = base.replace(/[^\u0E00-\u0E7A\w\s-]/g, '').replace(/\s+/g, ' ').trim();
+  return clean || 'สินค้า-' + Date.now();
 }
 
 function openUploadModal() {
   _uploadQueue = [];
   _editingFolder = null;
+  _ppFolder = '';
+  _productProfileOriginal = null;
+  _uploadModalOriginal = null;
+  console.log('[openUploadModal] start');
+  const ppSection = document.getElementById('pp-section');
+  if (ppSection) ppSection.style.display = 'none';
   const nameInput = document.getElementById('upload-product-name-modal');
-  nameInput.value = '';
-  nameInput.disabled = false;
-  document.getElementById('upload-name-label').textContent = 'ชื่อสินค้า';
+  if (nameInput) { nameInput.value = ''; nameInput.disabled = false; nameInput.style.display = 'none'; }
+  const nameLabel = document.getElementById('upload-name-label');
+  if (nameLabel) { nameLabel.textContent = ''; nameLabel.style.display = 'none'; }
   renderUploadQueueModal();
-  document.getElementById('upload-modal-status').textContent = '';
-  document.getElementById('upload-modal-title').textContent = 'เพิ่มสินค้าใหม่';
-  document.getElementById('existing-files-modal').innerHTML = '';
-  document.getElementById('upload-delete-product-btn').style.display = 'none';
-  document.getElementById('upload-submit-btn').textContent = 'อัปโหลด';
+  _uploadModalOriginal = _getUploadModalData();
+  const status = document.getElementById('upload-modal-status');
+  if (status) status.textContent = '';
+  const title = document.getElementById('upload-modal-title');
+  if (title) title.textContent = 'เพิ่มสินค้าใหม่';
+  const existing = document.getElementById('existing-files-modal');
+  if (existing) existing.innerHTML = '';
+  const delBtn = document.getElementById('upload-delete-product-btn');
+  if (delBtn) delBtn.style.display = 'none';
+  const submit = document.getElementById('upload-submit-btn');
+  if (submit) submit.textContent = 'อัปโหลด';
   loadSupportedFormats();
-  document.getElementById('upload-overlay').className = 'settings-modal-overlay visible';
+  const overlay = document.getElementById('upload-overlay');
+  if (overlay) {
+    overlay.classList.remove('visible');
+    overlay.classList.add('visible');
+    console.log('[openUploadModal] overlay visible', overlay);
+  } else {
+    console.error('[openUploadModal] overlay not found');
+  }
 }
 
-function openUploadModalForFolder(folder) {
+function openUploadModalForFolder(folder, status) {
   _uploadQueue = [];
   _editingFolder = folder;
+  _ppFolder = '';
+  _productProfileOriginal = null;
+  _uploadModalOriginal = null;
+  const section = document.getElementById('pp-section');
+  if (section) section.style.display = 'none';
   const nameInput = document.getElementById('upload-product-name-modal');
   nameInput.value = folder;
   nameInput.disabled = false;
-  document.getElementById('upload-name-label').textContent = 'ชื่อสินค้า (แก้ไข้ = เปลี่ยนชื่อ)';
+  nameInput.style.display = 'block';
+  const nameLabel = document.getElementById('upload-name-label');
+  nameLabel.textContent = 'ชื่อสินค้า';
+  nameLabel.style.display = 'block';
   renderUploadQueueModal();
   document.getElementById('upload-modal-status').textContent = '';
   // Title is fixed in manage mode — no fetch needed
   document.getElementById('upload-modal-title').textContent = 'จัดการสินค้า: ' + folder;
-  // Show existing files with delete buttons
+  // Show existing files with delete buttons + product profile section only when data is usable
   loadExistingFilesInModal(folder);
+  if (status === 'ready' || status === 'stale') {
+    loadProductProfileForManage(folder);
+  }
   // Show delete product button
   document.getElementById('upload-delete-product-btn').style.display = 'block';
-  document.getElementById('upload-submit-btn').textContent = 'เพิ่มไฟล์';
+  document.getElementById('upload-submit-btn').textContent = 'บันทึก';
   loadSupportedFormats();
+  _uploadModalOriginal = _getUploadModalData();
   document.getElementById('upload-overlay').className = 'settings-modal-overlay visible';
 }
 
@@ -4415,13 +4501,10 @@ function loadExistingFilesInModal(folder) {
       el.innerHTML = '<div style="font-size:12px;color:#555;padding:8px 0">ยังไม่มีไฟล์ — เพิ่มไฟล์ด้านบนแล้วกดอัปโหลด</div>';
       return;
     }
-    // ปุ่มประมวลผลข้อมูล (ingestion) + สถานะปัจจุบัน
-    let html = '<div style="margin-top:12px;padding:12px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px">';
-    html += '<div id="ingest-status-display" style="font-size:12px;color:#888;margin-bottom:8px">กำลังตรวจสถานะ...</div>';
-    html += '<button id="ingest-btn" class="settings-save" style="width:100%" onclick="startIngestion(\'' + folder.replace(/'/g,"\\'") + '\')">⚙ ประมวลผลข้อมูลสินค้า</button>';
-    html += '<div id="ingest-progress-bar" style="margin-top:8px;display:none"></div>';
-    html += '</div>';
-    html += '<label style="margin-top:12px;display:block">ไฟล์ที่มีอยู่</label>';
+    // สถานะ/ความคืบหน้าการประมวลผล (แสดงเฉพาะตอนกำลังทำงาน)
+    let html = '<div id="ingest-status-display" style="font-size:12px;color:#888;padding:8px 0;display:none">กำลังตรวจสถานะ...</div>';
+    html += '<div id="ingest-progress-bar" style="display:none;margin-top:8px"></div>';
+    html += '<label style="margin-top:10px;display:block;font-size:12px;color:#888">ไฟล์ที่มีอยู่</label>';
     const statusIcons = {
       'ingested':    {icon: '✅', color: '#4ade80', label: 'ใช้แล้ว'},
       'unsupported': {icon: '⚠️', color: '#fbbf24', label: 'ไม่รองรับ'},
@@ -4462,10 +4545,16 @@ function refreshIngestStatus(folder) {
       'stale':          {label: '⚠ ข้อมูลเก่า — แนะนำให้ประมวลผลใหม่', color: '#fb923c'},
     };
     const si = statusLabels[status] || statusLabels['empty'];
-    statusEl.innerHTML = '<span style="color:' + si.color + '">' + si.label + '</span>';
+    if (status === 'ready') {
+      statusEl.innerHTML = '';
+      statusEl.style.display = 'none';
+    } else {
+      statusEl.innerHTML = '<span style="color:' + si.color + '">' + si.label + '</span>';
+      statusEl.style.display = 'block';
+    }
     if (btn) {
       btn.disabled = (status === 'processing');
-      btn.textContent = status === 'ready' ? '🔄 ประมวลผลใหม่' : '⚙ ประมวลผลข้อมูลสินค้า';
+      btn.textContent = (status === 'ready' || status === 'stale') ? '🔄 ประมวลผลใหม่' : '🔄 ประมวลผล';
     }
     // โชว์ progress bar ถ้ากำลัง ingestion
     if (status === 'processing' && data.progress) {
@@ -4482,6 +4571,10 @@ function refreshIngestStatus(folder) {
 let _ingestPollTimer = null;
 
 function startIngestion(folder) {
+  if (_productProfileSavingFor === folder) { alert('กรุณารอให้บันทึกข้อมูลเสร็จก่อน'); return; }
+  if (_isProductProfileDirty() || _isUploadModalDirty()) {
+    if (!confirm('คุณมีการเปลี่ยนแปลงยังไม่บันทึก การประมวลผลใหม่อาจเขียนทับข้อมูลทีแก้ไว้ ต้องการดำเนินการต่อหรือไม่?')) return;
+  }
   const btn = document.getElementById('ingest-btn');
   if (btn) btn.disabled = true;
   fetch('/api/ingest/' + encodeURIComponent(folder), {
@@ -4506,6 +4599,9 @@ function startIngestion(folder) {
           _ingestPollTimer = null;
           loadExistingFilesInModal(folder);  // refresh รายการไฟล์
           loadFolderList();                  // refresh sidebar
+          if (d.status === 'ready' && _editingFolder === folder) {
+            loadProductProfileForManage(folder);
+          }
         }
       });
     }, 2000);
@@ -4530,8 +4626,12 @@ function deleteFileInModal(folder, filepath) {
 }
 
 function deleteProductInModal() {
-  const name = document.getElementById('upload-product-name-modal').value.trim();
+  if (_productProfileSavingFor === _editingFolder) { alert('กรุณารอให้บันทึกข้อมูลเสร็จก่อน'); return; }
+  const name = _editingFolder;
   if (!name) return;
+  if (_isProductProfileDirty() || _isUploadModalDirty()) {
+    if (!confirm('คุณมีการเปลี่ยนแปลงยังไม่บันทึก ต้องการลบสินค้าโดยไม่บันทึกหรือไม่?')) return;
+  }
   if (!confirm('ลบสินค้า ' + name + ' และไฟล์ทั้งหมดข้างใน ?')) return;
   fetch('/api/folder', {
     method: 'DELETE',
@@ -4539,14 +4639,25 @@ function deleteProductInModal() {
     body: JSON.stringify({ folder: name }),
   }).then(r => r.json()).then(data => {
     if (data.ok) {
-      closeUploadModal();
+      closeUploadModal(true);
       loadFolderList();
     }
   });
 }
 
-function closeUploadModal() {
+function closeUploadModal(force) {
+  if (!force && _productProfileSavingFor === _ppFolder) {
+    alert('กรุณารอให้บันทึกข้อมูลเสร็จก่อน');
+    return;
+  }
+  if (!force && (_isProductProfileDirty() || _isUploadModalDirty())) {
+    if (!confirm('คุณมีการเปลี่ยนแปลงทียังไม่บันทึก ต้องการปิดหน้าต่างหรือไม่?')) {
+      return;
+    }
+  }
   document.getElementById('upload-overlay').className = 'settings-modal-overlay';
+  _ppFolder = '';
+  _editingFolder = null;
 }
 
 function addFilesToQueueModal() {
@@ -4556,6 +4667,13 @@ function addFilesToQueueModal() {
   }
   input.value = '';
   renderUploadQueueModal();
+  // Prefill product name from the first file name when adding a new product
+  if (!_editingFolder && _uploadQueue.length) {
+    const nameInput = document.getElementById('upload-product-name-modal');
+    if (!nameInput.value) {
+      nameInput.value = _uploadQueue[0].name.replace(/\.[^.]+$/, '').replace(/[_-]/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+  }
 }
 
 function renderUploadQueueModal() {
@@ -4580,23 +4698,27 @@ function removeFromQueue(idx) {
 }
 
 function uploadFiles() {
-  const name = document.getElementById('upload-product-name-modal').value.trim();
+  if (_productProfileSavingFor === _ppFolder) { alert('กรุณารอให้บันทึกข้อมูลเสร็จก่อน'); return; }
   const status = document.getElementById('upload-modal-status');
-  if (!name) { status.className = 'upload-status err'; status.textContent = 'กรุณาตั้งชื่อสินค้า'; return; }
   const isEditing = _editingFolder !== null;
+  let name = document.getElementById('upload-product-name-modal').value.trim();
+  if (!isEditing) {
+    if (_uploadQueue.length === 0) { status.className = 'upload-status err'; status.textContent = 'กรุณาเลือกไฟล์สำหรับสินค้าใหม่'; return; }
+    name = _makeProductNameFromFile(_uploadQueue[0]);
+  } else if (!name) {
+    status.className = 'upload-status err'; status.textContent = 'กรุณาตั้งชื่อสินค้า'; return;
+  }
   const renamed = isEditing && _editingFolder !== name;
 
   // Step 1: rename first (if name changed) — do this alone, no upload mixed in
   const doUpload = () => {
     if (_uploadQueue.length === 0) {
-      status.className = 'upload-status ok';
-      status.textContent = renamed ? 'เปลี่ยนชื่อเป็น ' + name + ' แล้ว' : 'ไม่มีไฟล์ใหม่ให้เพิ่ม';
-      _uploadQueue = [];
-      renderUploadQueueModal();
-      loadFolderList();
+      // ไม่มีไฟล์ใหม่ใน queue → บันทึก product profile แล้วปิด modal
       _editingFolder = name;
-      if (isEditing) loadExistingFilesInModal(name);
-      setTimeout(closeUploadModal, 800);
+      _uploadModalOriginal = _getUploadModalData();
+      status.className = 'upload-status ok';
+      status.textContent = 'บันทึกเรียบร้อยแล้ว';
+      setTimeout(() => closeUploadModal(true), 800);
       return;
     }
     const formData = new FormData();
@@ -4610,12 +4732,13 @@ function uploadFiles() {
         status.className = 'upload-status ok';
         status.textContent = 'เพิ่ม ' + data.files.length + ' ไฟล์ เข้า ' + data.folder + ' — กำลังประมวลผลข้อมูลอัตโนมัติ...';
         _uploadQueue = [];
+        _editingFolder = data.folder;
+        _uploadModalOriginal = _getUploadModalData();
         renderUploadQueueModal();
         loadFolderList();
         startSidebarPolling();  // โชว์ progress ใน sidebar ทันที
-        _editingFolder = data.folder;
         if (isEditing) loadExistingFilesInModal(data.folder);
-        setTimeout(closeUploadModal, 1200);
+        setTimeout(() => closeUploadModal(true), 1200);
       } else {
         status.className = 'upload-status err';
         status.textContent = data.error || 'เกิดข้อผิดพลาด';
@@ -4626,26 +4749,35 @@ function uploadFiles() {
     });
   };
 
-  if (renamed) {
-    status.className = 'upload-status'; status.textContent = 'กำลังเปลี่ยนชื่อ...';
-    fetch('/api/rename_folder', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ old_name: _editingFolder, new_name: name }),
-    }).then(r => r.json()).then(data => {
-      if (data.ok) {
-        _editingFolder = name;
-        doUpload();
-      } else {
+  const proceed = () => {
+    if (renamed) {
+      status.className = 'upload-status'; status.textContent = 'กำลังเปลี่ยนชื่อ...';
+      fetch('/api/rename_folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ old_name: _editingFolder, new_name: name }),
+      }).then(r => r.json()).then(data => {
+        if (data.ok) {
+          _editingFolder = name;
+          doUpload();
+        } else {
+          status.className = 'upload-status err';
+          status.textContent = data.error || 'เปลี่ยนชื่อไม่สำเร็จ';
+        }
+      }).catch(e => {
         status.className = 'upload-status err';
-        status.textContent = data.error || 'เปลี่ยนชื่อไม่สำเร็จ';
-      }
-    }).catch(e => {
-      status.className = 'upload-status err';
-      status.textContent = 'เปลี่ยนชื่อไม่สำเร็จ: ' + e.message;
-    });
+        status.textContent = 'เปลี่ยนชื่อไม่สำเร็จ: ' + e.message;
+      });
+    } else {
+      doUpload();
+    }
+  };
+
+  // ถ้า product profile มีการเปลี่ยนแปลง ให้เซฟก่อน แล้วค่อยดำเนินการต่อ
+  if (_ppFolder && _isProductProfileDirty()) {
+    saveProductProfile().then(proceed).catch(() => {});
   } else {
-    doUpload();
+    proceed();
   }
 }
 
@@ -4746,20 +4878,95 @@ function _renderBrandForm(section, data) {
   return '';
 }
 
-function _field(label, id, value, placeholder) {
-  return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + '</label>' +
+function _field(label, id, value, placeholder, tip) {
+  const tipIcon = tip ? ' <span style="cursor:help;color:#7c8aff;font-size:12px" title="' + escapeHtml(tip) + '">ⓘ</span>' : '';
+  return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + tipIcon + '</label>' +
     '<input id="' + id + '" value="' + escapeHtml(String(value || '')) + '" placeholder="' + (placeholder || '') + '" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px"></div>';
 }
 
-function _textarea(label, id, value, placeholder) {
-  return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + '</label>' +
+function _textarea(label, id, value, placeholder, tip) {
+  const tipIcon = tip ? ' <span style="cursor:help;color:#7c8aff;font-size:12px" title="' + escapeHtml(tip) + '">ⓘ</span>' : '';
+  return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + tipIcon + '</label>' +
     '<textarea id="' + id + '" placeholder="' + (placeholder || '') + '" style="width:100%;min-height:80px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(String(value || '')) + '</textarea></div>';
 }
 
-function _listField(label, id, items) {
-  const text = (items || []).join(', ');
-  return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + ' <span style="color:#555">(คั่นด้วยจุลภาค)</span></label>' +
-    '<textarea id="' + id + '" style="width:100%;min-height:60px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(text) + '</textarea></div>';
+function _listField(label, id, items, placeholder, tip) {
+  const arr = Array.isArray(items) ? items : (items ? String(items).split(',').map(s => s.trim()).filter(Boolean) : []);
+  const text = arr.join(', ');
+  const tipIcon = tip ? ' <span style="cursor:help;color:#7c8aff;font-size:12px" title="' + escapeHtml(tip) + '">ⓘ</span>' : '';
+  const ph = placeholder ? ' placeholder="' + placeholder + '"' : '';
+  return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + tipIcon + '</label>' +
+    '<textarea id="' + id + '"' + ph + ' style="width:100%;min-height:60px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(text) + '</textarea></div>';
+}
+
+function _chipField(label, id, items, placeholder, tip) {
+  const arr = Array.isArray(items) ? items : (items ? String(items).split(',').map(s => s.trim()).filter(Boolean) : []);
+  const text = arr.join(', ');
+  const tipIcon = tip ? ' <span style="cursor:help;color:#7c8aff;font-size:12px" title="' + escapeHtml(tip) + '">ⓘ</span>' : '';
+  const chips = arr.map(x => _chipHtml(id, x)).join('');
+  const ph = placeholder ? ' placeholder="' + placeholder + '"' : '';
+  return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + tipIcon + '</label>' +
+    '<div id="' + id + '-chips" style="margin-bottom:6px">' + chips + '</div>' +
+    '<input type="text" id="' + id + '-add"' + ph + ' style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px" onkeydown="_chipKeydown(\'' + id + '\', event)" onblur="_addChip(\'' + id + '\', this.value); this.value=\'\';">' +
+    '<input type="hidden" id="' + id + '" value="' + escapeHtml(text) + '"></div>';
+}
+
+function _chipHtml(id, x) {
+  const v = String(x).replace(/"/g, '&quot;');
+  return '<span class="pp-chip" data-value="' + v + '" style="display:inline-block;background:#2a2d3a;color:#e0e0e0;border:1px solid #3a3d4a;border-radius:4px;padding:4px 8px;margin:0 4px 4px 0;font-size:12px">' + escapeHtml(x) + ' <span style="cursor:pointer;color:#f87171" onclick="_removeChip(\'' + id + '\', this)">×</span></span>';
+}
+
+function _chipKeydown(id, e) {
+  const input = e.target;
+  if (e.key === 'Enter' || e.key === ',') {
+    e.preventDefault();
+    _addChip(id, input.value);
+    input.value = '';
+  } else if (e.key === 'Backspace' && input.value === '') {
+    _removeLastChip(id);
+  }
+}
+
+function _addChip(id, raw) {
+  const val = (raw || '').trim();
+  if (!val) return;
+  const hidden = document.getElementById(id);
+  const existing = (hidden.value || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (existing.includes(val)) return;
+  existing.push(val);
+  hidden.value = existing.join(', ');
+  const chips = document.getElementById(id + '-chips');
+  if (chips) {
+    chips.insertAdjacentHTML('beforeend', _chipHtml(id, val));
+  }
+}
+
+function _removeChip(id, el) {
+  const chip = el.parentElement;
+  const val = chip.getAttribute('data-value');
+  chip.remove();
+  const hidden = document.getElementById(id);
+  const existing = (hidden.value || '').split(',').map(s => s.trim()).filter(Boolean).filter(v => v !== val);
+  hidden.value = existing.join(', ');
+}
+
+function _removeLastChip(id) {
+  const chips = document.getElementById(id + '-chips');
+  if (chips && chips.lastElementChild) chips.lastElementChild.remove();
+  const hidden = document.getElementById(id);
+  if (hidden) {
+    const existing = (hidden.value || '').split(',').map(s => s.trim()).filter(Boolean);
+    existing.pop();
+    hidden.value = existing.join(', ');
+  }
+}
+
+function _renderChips(id, arr) {
+  const items = Array.isArray(arr) ? arr : (arr ? String(arr).split(',').map(s => s.trim()).filter(Boolean) : []);
+  const hidden = document.getElementById(id);
+  const chips = document.getElementById(id + '-chips');
+  if (hidden) hidden.value = items.join(', ');
+  if (chips) chips.innerHTML = items.map(x => _chipHtml(id, x)).join('');
 }
 
 function _voiceForm(d) {
@@ -4786,10 +4993,23 @@ function _audienceForm(d) {
   h += '<div style="font-size:13px;color:#7c8aff;margin-bottom:8px">กลุ่มเป้าหมายหลัก</div>';
   h += _field('ช่วงอายุ', 'bf-age', p.age, '30-45 ปี');
   h += _field('บทบาท', 'bf-role', p.role, 'ผู้ปกครอง');
+  h += _field('เพศ', 'bf-gender', p['เพศ'] || p.gender, 'เช่น หญิง 70% / ชาย 30%');
   h += _field('อาชีพ', 'bf-occupation', p.อาชีพ || p.occupation, '');
   h += _field('รายได้', 'bf-income', p.รายได้ || p.income, '');
+  h += _field('ที่อยู่', 'bf-location', p['ที่อยู่'] || p.location, 'เช่น กรุงเทพฯ และปริมณฑล');
+  const eu = d.end_user || {};
+  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">ผู้ใช้ปลายทาง (End User)</div>';
+  h += _field('ช่วงอายุ', 'bf-eu-age', eu.age || eu.อายุ, 'เช่น 5-12 ปี');
+  h += _field('ลักษณะ', 'bf-eu-desc', eu.desc, 'เช่น เด็กวัยเรียน');
+  h += _listField('ไลฟ์สไตล์', 'bf-lifestyle', d.lifestyle);
+  const bb = d.buying_behavior || {};
+  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">พฤติกรรมการซื้อ</div>';
+  h += _textarea('ตัดสินใจซื้อจาก', 'bf-bb-decision', bb.decision_factors, 'เช่น ความปลอดภัย > คุณสมบัติ > ราคา');
+  h += _field('งบประมาณต่อครั้ง', 'bf-bb-budget', bb.budget_per_purchase, 'เช่น 2,000-5,000 บาท');
+  h += _field('ซื้อผ่าน', 'bf-bb-channels', bb.channels_purchase, 'เช่น ออนไลน์ / หน้าร้าน');
   h += _listField('ปัญหา/ความต้องการ (Pain Points)', 'bf-pain', d.pain_points);
-  h += _listField('ช่องทางที่ใช้บ่อย', 'bf-channels', d.channels);
+  h += _listField('ช่องทางที่ใช้บ่อย (Social/Shop)', 'bf-channels', d.channels);
+  h += _listField('ช่องทางค้นหาข้อมูล', 'bf-search-channels', d.search_channels);
   return h;
 }
 
@@ -4835,44 +5055,65 @@ function _visualForm(d) {
   return h;
 }
 
+function _formVal(id) {
+  return (document.getElementById(id) || {}).value || '';
+}
+function _formList(id) {
+  const v = _formVal(id);
+  return v ? v.split(',').map(x => x.trim()).filter(x => x) : [];
+}
+
 function _collectBrandForm(section) {
-  const val = (id) => (document.getElementById(id) || {}).value || '';
-  const list = (id) => { const v = val(id); return v ? v.split(',').map(x => x.trim()).filter(x => x) : []; };
   if (section === 'voice') {
-    const f = val('bf-formality');
+    const f = _formVal('bf-formality');
     return {
-      personality: val('bf-personality'),
-      language: val('bf-language'),
+      personality: _formVal('bf-personality'),
+      language: _formVal('bf-language'),
       formality_level: f ? parseInt(f) : null,
-      tone_description: val('bf-tone'),
-      banned_phrases: list('bf-banned'),
-      examples: list('bf-examples'),
+      tone_description: _formVal('bf-tone'),
+      banned_phrases: _formList('bf-banned'),
+      examples: _formList('bf-examples'),
     };
   } else if (section === 'terms') {
-    return { approved: list('bf-approved'), restricted: list('bf-restricted') };
+    return { approved: _formList('bf-approved'), restricted: _formList('bf-restricted') };
   } else if (section === 'profile') {
     return val('brand-profile-textarea');
   } else if (section === 'audience') {
     return {
-      primary: { age: val('bf-age'), role: val('bf-role'), อาชีพ: val('bf-occupation'), รายได้: val('bf-income') },
-      pain_points: list('bf-pain'),
-      channels: list('bf-channels'),
+      primary: {
+        age: _formVal('bf-age'),
+        role: _formVal('bf-role'),
+        'เพศ': _formVal('bf-gender'),
+        อาชีพ: _formVal('bf-occupation'),
+        รายได้: _formVal('bf-income'),
+        'ที่อยู่': _formVal('bf-location'),
+      },
+      end_user: { age: _formVal('bf-eu-age'), desc: _formVal('bf-eu-desc') },
+      lifestyle: _formList('bf-lifestyle'),
+      buying_behavior: {
+        decision_factors: _formVal('bf-bb-decision'),
+        budget_per_purchase: _formVal('bf-bb-budget'),
+        channels_purchase: _formVal('bf-bb-channels'),
+      },
+      pain_points: _formList('bf-pain'),
+      channels: _formList('bf-channels'),
+      search_channels: _formList('bf-search-channels'),
     };
   } else if (section === 'visual') {
     return {
-      colors: { primary: val('bf-color-primary'), secondary: val('bf-color-secondary'), accent: val('bf-color-accent'), background: val('bf-color-bg') },
-      image_style: { tone: val('bf-style-tone'), product_shot: val('bf-style-product') },
-      keywords: list('bf-keywords'),
-      avoid: list('bf-avoid'),
+      colors: { primary: _formVal('bf-color-primary'), secondary: _formVal('bf-color-secondary'), accent: _formVal('bf-color-accent'), background: _formVal('bf-color-bg') },
+      image_style: { tone: _formVal('bf-style-tone'), product_shot: _formVal('bf-style-product') },
+      keywords: _formList('bf-keywords'),
+      avoid: _formList('bf-avoid'),
       video_styles: window._videoStyles || [],
       video_style: {
-        style_summary: val('bf-vs-summary'),
-        pacing: val('bf-vs-pacing'),
-        transitions: list('bf-vs-transitions'),
-        color_grading: val('bf-vs-color'),
-        sound_design: val('bf-vs-sound'),
-        shot_duration: val('bf-vs-shot'),
-        visual_rhythm: val('bf-vs-rhythm'),
+        style_summary: _formVal('bf-vs-summary'),
+        pacing: _formVal('bf-vs-pacing'),
+        transitions: _formList('bf-vs-transitions'),
+        color_grading: _formVal('bf-vs-color'),
+        sound_design: _formVal('bf-vs-sound'),
+        shot_duration: _formVal('bf-vs-shot'),
+        visual_rhythm: _formVal('bf-vs-rhythm'),
       },
     };
   }
@@ -4907,6 +5148,219 @@ function saveBrandFileModal() {
       status.className = 'upload-status err';
       status.textContent = data.error || 'เกิดข้อผิดพลาด';
     }
+  });
+}
+
+// ============================================================
+// Product Profile Modal — ตั้งค่าสินค้าเฉพาะรุ่น
+// ============================================================
+
+let _ppFolder = '';
+let _productProfileSavingFor = null;
+let _productProfileOriginal = null;
+let _uploadModalOriginal = null;
+
+function _getProductProfileFormData() {
+  const get = id => { const el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; };
+  const getList = id => { const el = document.getElementById(id); return (el ? String(el.value || '') : '').split(',').map(s => s.trim()).filter(Boolean); };
+  return {
+    audience: {
+      primary: { age: get('pp-age'), role: get('pp-role') },
+      end_user: { age: get('pp-eu-age'), desc: get('pp-eu-desc') },
+    },
+    competitors: getList('pp-competitors'),
+    differentiators: getList('pp-differentiators'),
+    use_cases: getList('pp-use-cases'),
+    price_tier: get('pp-price-tier'),
+    tone_adjustment: get('pp-tone'),
+    visual_override: {
+      image_style: { tone: get('pp-visual-tone') },
+      keywords: getList('pp-visual-keywords'),
+    },
+  };
+}
+
+function _isProductProfileDirty() {
+  if (!_productProfileOriginal) return false;
+  return JSON.stringify(_getProductProfileFormData()) !== JSON.stringify(_productProfileOriginal);
+}
+
+function _getUploadModalData() {
+  const nameInput = document.getElementById('upload-product-name-modal');
+  const name = nameInput ? String(nameInput.value || '').trim() : '';
+  const queue = _uploadQueue.map(f => ({ name: f.name, size: f.size }));
+  return { productName: name, queue: queue };
+}
+
+function _isUploadModalDirty() {
+  if (!_uploadModalOriginal) return false;
+  return JSON.stringify(_getUploadModalData()) !== JSON.stringify(_uploadModalOriginal);
+}
+
+function loadProductProfileForManage(folder) {
+  _ppFolder = folder;
+  const section = document.getElementById('pp-section');
+  const body = document.getElementById('pp-modal-body');
+  const status = document.getElementById('pp-status');
+  if (section) section.style.display = 'block';
+  if (status) { status.className = 'upload-status'; status.textContent = ''; status.style.display = 'none'; }
+  // โหลด profile เดิมก่อน (ถ้ามี) — ingest สร้างให้แล้ว ไม่ต้อง suggest ตอนเปิด
+  fetch('/api/product_profile/' + encodeURIComponent(folder)).then(r => r.json()).then(data => {
+    _renderProductProfileInto(body, data || {});
+  }).catch(() => {
+    _renderProductProfileInto(body, {});
+  });
+}
+
+function _renderProductProfileInto(body, data) {
+  body.innerHTML = _renderProductProfileForm(data);
+  _productProfileOriginal = _getProductProfileFormData();
+}
+
+function _renderProductProfileForm(d) {
+  let h = '';
+  h += '<button id="pp-suggest-btn" onclick="suggestProductProfile()" title="วิเคราะห์สเปคสินค้าแล้วเติมค่าให้อัตโนมัติ (กดซ้ำได้ถ้าอยากให้เดาใหม่)" style="background:#7c8aff;border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:12px">🎓 ตั้งค่าด้วย AI</button>';
+  h += '<span id="pp-suggest-status" style="display:none;margin-left:8px;font-size:12px;vertical-align:middle"></span>';
+  // Audience
+  const aud = d.audience || {};
+  const prim = aud.primary || {};
+  const eu = aud.end_user || {};
+  h += '<div style="font-size:13px;color:#7c8aff;margin-bottom:8px">กลุ่มเป้าหมาย</div>';
+  h += _field('ช่วงอายุผู้ซื้อ', 'pp-age', prim.age, 'เช่น 28-45 ปี', 'ช่วงอายุของผู้ซื้อจริง มีผลต่อท่อนและข้อความของคอนเทนต์');
+  h += _field('บทบาทผู้ซื้อ', 'pp-role', prim.role, 'เช่น ผู้ปกครองยุคใหม่ที่ใส่ใจเทคโนโลยี', 'บทบาทหรือตัวตนของผู้ซื้อ เช่น พ่อแม่ผู้ปกครอง นักธุรกิจ');
+  h += _field('ช่วงอายุผู้ใช้ปลายทาง', 'pp-eu-age', eu.age, 'เช่น 5-12 ปี', 'ถ้าผู้ใช้งานจริงต่างจากผู้ซื้อ เช่น นาฬิกาเด็ก = ลูก แต่คนซื้อ = ผู้ปกครอง');
+  h += _field('ลักษณะผู้ใช้ปลายทาง', 'pp-eu-desc', eu.desc, 'เช่น เด็กวัยประถมที่ชอบเล่นกีฬา', 'ลักษณะนิสัย/พฤติกรรมของคนใช้งานจริง ช่วยให้ภาพ/วิดีโอตรงกลุ่ม');
+  // Positioning
+  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">ตำแหน่งสินค้า</div>';
+  h += _chipField('คู่แข่งหลัก', 'pp-competitors', d.competitors, 'พิมพ์แล้วกด Enter', 'รายชื่อคู่แข่งในตลาด ใช้เทียบจุดขายของเรา');
+  h += _chipField('จุดขายหลัก', 'pp-differentiators', d.differentiators, 'พิมพ์แล้วกด Enter', 'สิ่งที่ทำให้สินค้านี้ต่างจากคู่แข่ง เอาไปใช้เขียนคอนเทนต์');
+  h += _chipField('Use cases', 'pp-use-cases', d.use_cases, 'พิมพ์แล้วกด Enter', 'สถานการณ์ใช้งานจริง ช่วยให้คอนเทนต์สื่อตรง');
+  h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">ระดับราคา <span style="cursor:help;color:#7c8aff;font-size:12px" title="กำหนดระดับราคาเพื่อปรับโทนคอนเทนต์ให้เหมาะสม เช่น entry=คุ้มค่า mid=สมดุล flagship=พรีเมียม">ⓘ</span></label>' +
+    '<select id="pp-price-tier" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">' +
+    '<option value=""' + (d.price_tier === '' || !d.price_tier ? ' selected' : '') + '>— เลือก —</option>' +
+    '<option value="entry"' + (d.price_tier === 'entry' ? ' selected' : '') + '>entry (ราคาเริ่มต้น)</option>' +
+    '<option value="mid"' + (d.price_tier === 'mid' ? ' selected' : '') + '>mid (กลาง)</option>' +
+    '<option value="flagship"' + (d.price_tier === 'flagship' ? ' selected' : '') + '>flagship (ระดับสูง)</option>' +
+    '</select></div>';
+  h += _textarea('ปรับโทน', 'pp-tone', d.tone_adjustment, 'เช่น อบอุ่น วางใจได้ ให้ความรู้สึกปลอดภัย', 'ทิศทางโทนเฉพาะสินค้านี้ ไม่เปลี่ยน voice แบรนด์ทั้งหมด แค่ปรับน้ำหนัก เช่น มั่นใจ พรีเมียม สนุก คึกคัก');
+  // Visual override
+  const vo = d.visual_override || {};
+  const vis = vo.image_style || {};
+  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">ปรับภาพ <span style="cursor:help;color:#7c8aff;font-size:12px" title="ค่าพวกนี้จะทับแนวทางภาพของแบรนด์ถ้ากรอก">ⓘ</span></div>';
+  h += _textarea('โทนภาพ', 'pp-visual-tone', vis.tone, 'เช่น ดำ-ทอง พรีเมียม แสงนุ่ม', 'คำอธิบายภาพรวมสำหรับสร้างรูป/วิดีโอของสินค้านี้');
+  h += _chipField('Keywords ภาพ', 'pp-visual-keywords', vo.keywords, 'พิมพ์แล้วกด Enter', 'คำสำคัญสำหรับ AI สร้างภาพ');
+  return h;
+}
+
+function suggestProductProfile(autoSave) {
+  if (!_ppFolder) return;
+  const btn = document.getElementById('pp-suggest-btn');
+  const status = document.getElementById('pp-suggest-status');
+  if (btn) btn.disabled = true;
+  if (status && !autoSave) {
+    status.style.display = 'inline-block';
+    status.style.color = '#facc15';
+    status.textContent = 'AI กำลังอ่านสเปค...';
+  }
+  fetch('/api/product_profile_suggest/' + encodeURIComponent(_ppFolder), {
+    method: 'POST',
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      const suggested = data.suggested;
+      // pre-fill ฟอร์มเฉพาะฟิลด์ที่ AI ให้ค่า ไม่ทับค่าที่ผู้ใช้กรอกไว้แล้ว
+      const setVal = (id, v) => { const el = document.getElementById(id); if (el && v) el.value = v; };
+      const setList = (id, arr) => { if (!arr || !arr.length) return; if (document.getElementById(id + '-chips')) { _renderChips(id, arr); } else { const el = document.getElementById(id); if (el) el.value = arr.join(', '); } };
+      const prim = (suggested.audience && suggested.audience.primary) || {};
+      const eu = (suggested.audience && suggested.audience.end_user) || {};
+      setVal('pp-age', prim.age);
+      setVal('pp-role', prim.role);
+      setVal('pp-eu-age', eu.age);
+      setVal('pp-eu-desc', eu.desc);
+      setList('pp-competitors', suggested.competitors);
+      setList('pp-differentiators', suggested.differentiators);
+      setList('pp-use-cases', suggested.use_cases);
+      setVal('pp-price-tier', suggested.price_tier);
+      setVal('pp-tone', suggested.tone_adjustment);
+      if (status) {
+        status.style.display = 'inline-block';
+        status.style.color = '#4ade80';
+        status.textContent = '✅ AI วิเคราะห์สเปคแล้ว — กรุณากด "บันทึก" เพื่อบันทึก';
+      }
+      if (btn) btn.disabled = false;
+      // ไม่ auto-save — ผู้ใช้ต้องกดปุ่ม "บันทึก" เอง
+    } else {
+      if (status) {
+        status.style.display = 'inline-block';
+        status.style.color = '#f87171';
+        status.textContent = data.error || 'AI วิเคราะห์ไม่สำเร็จ';
+      }
+      if (btn) btn.disabled = false;
+    }
+  }).catch(e => {
+    if (status) {
+      status.style.display = 'inline-block';
+      status.style.color = '#f87171';
+      status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+    }
+    if (btn) btn.disabled = false;
+  });
+}
+
+function saveProductProfile() {
+  if (!_ppFolder) return Promise.resolve();
+  const folder = _ppFolder;
+  _productProfileSavingFor = folder;
+  const status = document.getElementById('pp-status');
+  const primAge = _formVal('pp-age'), primRole = _formVal('pp-role');
+  const euAge = _formVal('pp-eu-age'), euDesc = _formVal('pp-eu-desc');
+  const payload = {
+    competitors: _formList('pp-competitors'),
+    differentiators: _formList('pp-differentiators'),
+    use_cases: _formList('pp-use-cases'),
+    price_tier: _formVal('pp-price-tier'),
+    tone_adjustment: _formVal('pp-tone'),
+  };
+  // audience — ส่งเฉพาะถ้ามีค่า
+  const audience = {};
+  if (primAge || primRole) audience.primary = { age: primAge, role: primRole };
+  if (euAge || euDesc) audience.end_user = { age: euAge, desc: euDesc };
+  if (Object.keys(audience).length) payload.audience = audience;
+  // visual_override — ส่งเฉพาะถ้ามีค่า
+  const visTone = _formVal('pp-visual-tone'), visKw = _formList('pp-visual-keywords');
+  if (visTone || visKw.length) {
+    payload.visual_override = {};
+    if (visTone) payload.visual_override.image_style = { tone: visTone };
+    if (visKw.length) payload.visual_override.keywords = visKw;
+  }
+  status.style.display = 'none';
+  status.textContent = '';
+  return fetch('/api/product_profile_save/' + encodeURIComponent(folder), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(r => r.json()).then(data => {
+    const same = _ppFolder === folder;
+    if (data.ok) {
+      if (same) _productProfileOriginal = _getProductProfileFormData();
+      if (same) { status.style.display = 'none'; status.textContent = ''; }
+      loadFolderList();  // refresh sidebar indicator
+    } else {
+      if (same) {
+        status.style.display = 'block';
+        status.className = 'upload-status err';
+        status.textContent = data.error || 'เกิดข้อผิดพลาด';
+      }
+      throw new Error(data.error || 'เกิดข้อผิดพลาด');
+    }
+  }).catch(e => {
+    if (_ppFolder === folder) {
+      status.style.display = 'block';
+      status.className = 'upload-status err';
+      status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+    }
+    throw e;
+  }).finally(() => {
+    if (_productProfileSavingFor === folder) _productProfileSavingFor = null;
   });
 }
 
@@ -8084,18 +8538,26 @@ function loadCredits() {
 }
 </script>
 <div class="settings-modal-overlay" id="upload-overlay">
-  <div class="settings-modal">
-    <h3 id="upload-modal-title">เพิ่มสินค้าใหม่</h3>
+  <div class="settings-modal" style="width:720px;max-width:92vw">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h3 id="upload-modal-title" style="margin:0">เพิ่มสินค้าใหม่</h3>
+      <button onclick="closeUploadModal()" title="ปิด" style="background:none;border:none;color:#888;font-size:24px;cursor:pointer;line-height:1;padding:0 4px">&times;</button>
+    </div>
     <label id="upload-name-label">ชื่อสินค้า</label>
     <input type="text" id="upload-product-name-modal" placeholder="เช่น Lagenio K2">
-    <label>เลือกไฟล์ (กดเพิ่มได้หลายครั้ง)</label>
+    <label>เลือกไฟล์ <span id="upload-formats-tooltip" style="cursor:help;color:#7c8aff;font-size:12px" title="กำลังโหลด...">ⓘ</span></label>
     <input type="file" id="upload-files-modal" multiple onchange="addFilesToQueueModal()">
     <div id="upload-queue-modal" class="upload-queue"></div>
-    <div id="supported-formats-info" style="font-size:11px;color:#888;margin:8px 0;line-height:1.7;padding:10px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px"></div>
+    <div id="supported-formats-info" style="display:none"></div>
     <div id="existing-files-modal"></div>
+    <div id="pp-section" style="display:none;margin-top:16px;padding:12px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px">
+      <div style="font-size:13px;color:#7c8aff;margin-bottom:8px">🎯 ตำแหน่งสินค้า</div>
+      <p style="font-size:12px;color:#888;margin:0 0 12px 0">ตำแหน่งสินค้าเฉพาะรุ่น — ค่าเริ่มต้นจะมาจากการคาดเดาของ AI</p>
+      <div id="pp-modal-body"></div>
+      <div class="upload-status" id="pp-status"></div>
+    </div>
     <div class="upload-status" id="upload-modal-status"></div>
     <div class="settings-actions">
-      <button class="settings-cancel" onclick="closeUploadModal()">ยกเลิก</button>
       <button id="upload-delete-product-btn" class="settings-cancel" style="display:none;border-color:#f87171;color:#f87171" onclick="deleteProductInModal()">ลบสินค้า</button>
       <button id="upload-submit-btn" class="settings-save" onclick="uploadFiles()">อัปโหลด</button>
     </div>
@@ -8139,6 +8601,7 @@ function loadCredits() {
     </div>
   </div>
 </div>
+
 <div class="settings-modal-overlay" id="asset-overlay">
   <div class="settings-modal" style="width:720px;max-height:85vh;overflow-y:auto">
     <h3>🗂 วัตถุดิบแบรนด์</h3>

@@ -20,6 +20,7 @@ Seam ที่ทดสอบ:
   - extract_file_text: ไฟล์ไม่มี → คืน error message ไม่ crash
 """
 import sys
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -380,21 +381,25 @@ def test_analyze_brand_empty_examples():
 
 
 def test_analyze_brand_partial_failure():
-    """ถ้า terms วิเคราะห์พัง แต่ voice + audience ผ่าน → ยังคืน voice + audience (ไม่ crash)."""
+    """ถ้า terms วิเคราะห์พัง (retry 3 ครั้ง) แต่ voice + audience ผ่าน → ยังคืน voice + audience (ไม่ crash)."""
     from src.voice_learner import analyze_brand
 
     mock_llm = MagicMock()
+    voice_json = '{"personality": "เป็นมิตร", "tone_description": "อบอุ่น", "formality_level": 3, "language": "ไทย", "banned_phrases": [], "examples": []}'
+    audience_json = '{"primary": {"age": "30-45", "role": "ผู้ปกครอง"}, "pain_points": [], "channels": ["Facebook"]}'
     mock_llm.chat.side_effect = [
-        '{"personality": "เป็นมิตร", "tone_description": "อบอุ่น", "formality_level": 3, "language": "ไทย", "banned_phrases": [], "examples": []}',
-        'broken json {{{',  # terms พัง
-        '{"primary": {"age": "30-45", "role": "ผู้ปกครอง"}, "pain_points": [], "channels": ["Facebook"]}',
+        voice_json,           # voice ผ่าน
+        'broken json {{{',    # terms attempt 1 พัง
+        'broken json {{{',    # terms attempt 2 พัง
+        'broken json {{{',    # terms attempt 3 พัง → คืน {}
+        audience_json,        # audience ผ่าน
     ]
 
     result = analyze_brand(["ตัวอย่าง"], mock_llm)
 
     assert "voice" in result
     assert result["voice"]["personality"] == "เป็นมิตร"
-    # terms พัง → คืน {} ไม่ใช่ crash
+    # terms พังทุก attempt → คืน {} ไม่ใช่ crash
     assert result.get("terms") == {}
     assert "audience" in result
 
@@ -496,6 +501,84 @@ def test_analyze_video_style_invalid_json():
     assert result == {}
 
 
+# ---------------------------------------------------------------------------
+# analyze_product_positioning — อ่านสเปคสินค้า → สรุปตำแหน่งสินค้า
+# ---------------------------------------------------------------------------
+
+def test_analyze_product_positioning_returns_profile():
+    """ส่ง spec_text → LLM คืน product_profile dict ที่มี fields ครบ."""
+    from src.voice_learner import analyze_product_positioning
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = json.dumps({
+        "audience": {
+            "primary": {"age": "35-50", "role": "ผู้ปกครองรายได้สูง"},
+            "end_user": {"age": "10-15", "desc": "เด็กวัยรุ่น"},
+        },
+        "competitors": ["Apple Watch SE Kids", "Xiaomi Kids Watch Pro"],
+        "differentiators": ["กล้อง 5MP", "IP68", "GPS 2 แบบ"],
+        "use_cases": ["ติดตามลูก", "ฟิตเนส"],
+        "price_tier": "flagship",
+        "tone_adjustment": "พรีเมียม มั่นใจ",
+    })
+
+    spec_text = "สินค้า: Lagenio K9\nจุดเด่น: กล้อง 5MP, IP68, GPS\nราคา: 4,990 บาท"
+    result = analyze_product_positioning(spec_text, mock_llm)
+
+    assert isinstance(result, dict)
+    assert "audience" in result
+    assert "competitors" in result
+    assert "differentiators" in result
+    assert "use_cases" in result
+    assert "price_tier" in result
+    assert "tone_adjustment" in result
+    assert result["price_tier"] == "flagship"
+    assert "กล้อง 5MP" in result["differentiators"]
+
+
+def test_analyze_product_positioning_empty_spec():
+    """ส่ง spec_text ว่าง → คืน empty dict ไม่เรียก LLM."""
+    from src.voice_learner import analyze_product_positioning
+
+    mock_llm = MagicMock()
+    result = analyze_product_positioning("", mock_llm)
+
+    assert result == {}
+    mock_llm.chat.assert_not_called()
+
+
+def test_analyze_product_positioning_invalid_json():
+    """LLM คืน JSON ไม่ valid → คืน empty dict ไม่ crash."""
+    from src.voice_learner import analyze_product_positioning
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = 'not valid json {{{'
+
+    result = analyze_product_positioning("สเปคสินค้า", mock_llm)
+
+    assert result == {}
+
+
+def test_analyze_product_positioning_passes_spec_in_prompt():
+    """spec_text ต้องถูกส่งใน prompt ให้ LLM เห็น."""
+    from src.voice_learner import analyze_product_positioning
+
+    mock_llm = MagicMock()
+    mock_llm.chat.return_value = json.dumps({
+        "audience": {}, "competitors": [], "differentiators": [],
+        "use_cases": [], "price_tier": "", "tone_adjustment": "",
+    })
+
+    spec_text = "สินค้าพิเศษ: กล้อง 5MP"
+    analyze_product_positioning(spec_text, mock_llm)
+
+    # ตรวจว่า prompt ที่ส่งให้ LLM มี spec_text
+    call_args = mock_llm.chat.call_args
+    messages = call_args[0][0]
+    user_msg = next(m for m in messages if m["role"] == "user")
+    assert "กล้อง 5MP" in user_msg["content"], f"spec not in prompt: {user_msg}"
+
+
 if __name__ == "__main__":
     tests = [
         test_analyze_voice_returns_profile,
@@ -525,6 +608,10 @@ if __name__ == "__main__":
         test_analyze_video_style_from_file,
         test_analyze_video_style_no_input,
         test_analyze_video_style_invalid_json,
+        test_analyze_product_positioning_returns_profile,
+        test_analyze_product_positioning_empty_spec,
+        test_analyze_product_positioning_invalid_json,
+        test_analyze_product_positioning_passes_spec_in_prompt,
     ]
     passed = 0
     failed = 0
