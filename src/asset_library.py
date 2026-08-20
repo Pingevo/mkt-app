@@ -500,6 +500,7 @@ def ingest_asset(
     llm=None,
     user_note: str = "",
     *,
+    force: bool = False,
     tagger: Callable | None = None,
     embedder: Callable | None = None,
     config: dict | None = None,
@@ -541,7 +542,7 @@ def ingest_asset(
 
     # ถ้าไฟล์เดิม hash ไม่เปลี่ยน AND user_note ไม่เปลี่ยน → ข้าม (pattern เดียวกับ ingestion.py)
     existing = _find_by_path(db, abs_path)
-    if (existing and existing.get("hash") == file_hash
+    if (not force and existing and existing.get("hash") == file_hash
             and existing.get("status") == "ready"
             and (existing.get("user_note", "") or "") == user_note.strip()):
         return _strip_embedding(existing)

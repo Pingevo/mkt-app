@@ -1602,7 +1602,7 @@ def api_assets_file(asset_id: str):
 
 @app.post("/api/assets/reingest")
 async def api_assets_reingest(request: Request) -> JSONResponse:
-    """สแกน brand/assets/ ใหม่ — สำหรับปุ่ม 'สแกนใหม่' หรือกรณี user โยนไฟล์ตรงเข้าโฟลเดอร์."""
+    """สแกนไฟล์ asset หนึ่ง หรือทั้งหมดใหม่อีกครั้ง."""
     from src import asset_library
     body = {}
     try:
@@ -1610,11 +1610,25 @@ async def api_assets_reingest(request: Request) -> JSONResponse:
     except Exception:
         pass
     force = body.get("force", False)
+    asset_id = body.get("asset_id")
 
     def _run():
         llm = asset_library.make_llm()
         try:
-            asset_library.ingest_all(llm=llm, force=force)
+            if asset_id:
+                db = asset_library._load_db()
+                record = next((a for a in db.get("assets", []) if a.get("id") == asset_id), None)
+                if not record or not record.get("path"):
+                    print(f"[AssetLibrary] reingest single: asset not found {asset_id}", flush=True)
+                    return
+                asset_library.ingest_asset(
+                    record["path"],
+                    llm=llm,
+                    user_note=record.get("user_note", "") or "",
+                    force=True,
+                )
+            else:
+                asset_library.ingest_all(llm=llm, force=force)
         except Exception as e:
             print(f"[AssetLibrary] reingest error: {e}", flush=True)
         finally:
@@ -1623,7 +1637,7 @@ async def api_assets_reingest(request: Request) -> JSONResponse:
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
-    return JSONResponse({"ok": True, "message": "เริ่มสแกนใหม่แล้ว"})
+    return JSONResponse({"ok": True, "message": "เริ่มวิเคราะห์ใหม่แล้ว"})
 
 
 @app.get("/api/assets_config")
@@ -3999,29 +4013,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .flow-box-nav { display: flex; gap: 10px; margin-top: 20px; }
   .flow-box-nav .spacer { flex: 1; }
   /* custom tooltip: แสดงทันทีตอนชี้ ไม่รอ title attribute */
-  span[data-tooltip] { position: relative; cursor: help; }
-  span[data-tooltip]::after {
-    content: attr(data-tooltip);
-    position: absolute;
-    left: 50%;
-    bottom: 120%;
-    transform: translateX(-50%);
-    background: #1a1d27;
-    border: 1px solid #3a3d4a;
-    color: #e0e0e0;
-    padding: 6px 8px;
-    border-radius: 6px;
-    font-size: 12px;
-    white-space: pre-wrap;
-    width: auto;
-    max-width: 240px;
-    min-width: 120px;
-    opacity: 0;
-    visibility: hidden;
-    z-index: 1000;
-    pointer-events: none;
-  }
-  span[data-tooltip]:hover::after, span[data-tooltip]:focus::after { opacity: 1; visibility: visible; }
+  span[data-tooltip] { cursor: help; }
 </style>
 </head>
 <body>
@@ -4811,13 +4803,13 @@ function loadBrandFiles() {
     if (!data) { el.innerHTML = '<div style="color:#555;font-size:12px;padding:12px">ยังไม่มีข้อมูลแบรนด์</div>'; return; }
     _brandData = data;
     let html = '';
-    html += '<div class="brand-file-item" onclick="openVoiceLearnModal()" style="color:#7c8aff;font-weight:600">🎓 ฝึก AI จากตัวอย่าง (Brand Learning)</div>';
+    html += '<div class="brand-file-item" onclick="openVoiceLearnModal()" style="color:#7c8aff;font-weight:600">🎓 ตั้งค่าด้วย AI</div>';
     html += '<div style="border-top:1px solid #2a2d3a;margin:8px 0"></div>';
-    html += '<div class="brand-file-item" onclick="editBrandSection(\'voice\')" id="brand-section-voice">🎤 โทนเสียง (Voice)</div>';
-    html += '<div class="brand-file-item" onclick="editBrandSection(\'terms\')" id="brand-section-terms">📝 คำที่ใช้/ห้ามใช้ (Terms)</div>';
-    html += '<div class="brand-file-item" onclick="editBrandSection(\'profile\')">📋 ประวัติแบรนด์ (Profile)</div>';
-    html += '<div class="brand-file-item" onclick="editBrandSection(\'audience\')">👥 กลุ่มเป้าหมาย (Audience)</div>';
-    html += '<div class="brand-file-item" onclick="editBrandSection(\'visual\')">🎨 แนวทางภาพ (Visual)</div>';
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'voice\')" id="brand-section-voice">🎤 น้ำเสียงของแบรนด์</div>';
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'terms\')" id="brand-section-terms">📝 คำที่ใช้/ห้ามใช้</div>';
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'profile\')">📋 ประวัติแบรนด์</div>';
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'audience\')">👥 กลุ่มเป้าหมาย</div>';
+    html += '<div class="brand-file-item" onclick="editBrandSection(\'visual\')">🎨 แนวทางภาพ</div>';
     html += '<div style="border-top:1px solid #2a2d3a;margin:8px 0"></div>';
     html += '<div class="brand-file-item" onclick="openAssetLibraryModal()" title="โลโก้ รูปพรีเซนเตอร์ เพลง ฯลฯ ที่ใช้ซ้ำข้ามการรัน">🗂 วัตถุดิบแบรนด์</div>';
     el.innerHTML = html;
@@ -4828,15 +4820,22 @@ function loadBrandFiles() {
 
 let _brandData = {};
 let _brandSection = '';
+let _brandOriginal = '';
+
+function _isBrandFormDirty() {
+  const current = JSON.stringify(_collectBrandForm(_brandSection));
+  return current !== _brandOriginal;
+}
 
 function editBrandSection(section) {
   _brandSection = section;
   const overlay = document.getElementById('brand-overlay');
   const title = document.getElementById('brand-modal-title');
   const body = document.getElementById('brand-modal-body');
-  const labels = { voice: '🎤 โทนเสียง (Voice)', terms: '📝 คำที่ใช้/ห้ามใช้ (Terms)', profile: '📋 ประวัติแบรนด์ (Profile)', audience: '👥 กลุ่มเป้าหมาย (Audience)', visual: '🎨 แนวทางภาพ (Visual)' };
+  const labels = { voice: '🎤 น้ำเสียงของแบรนด์', terms: '📝 คำที่ใช้/ห้ามใช้', profile: '📋 ประวัติแบรนด์', audience: '👥 กลุ่มเป้าหมาย', visual: '🎨 แนวทางภาพ' };
   title.textContent = labels[section] || section;
   body.innerHTML = _renderBrandForm(section, _brandData[section] || {});
+  _brandOriginal = JSON.stringify(_collectBrandForm(section));
   document.getElementById('brand-save-status-modal').textContent = '';
   document.getElementById('brand-save-status-modal').className = 'upload-status';
   overlay.className = 'settings-modal-overlay visible';
@@ -4902,8 +4901,36 @@ function _renderBrandForm(section, data) {
   return '';
 }
 
+let _dataTipEl = null;
+
+function _showDataTip(el) {
+  if (!_dataTipEl) {
+    _dataTipEl = document.createElement('div');
+    _dataTipEl.style.cssText = 'position:fixed;z-index:9999;background:#1a1d27;border:1px solid #3a3d4a;color:#e0e0e0;padding:6px 8px;border-radius:6px;font-size:12px;max-width:240px;min-width:120px;white-space:pre-wrap;pointer-events:none';
+    document.body.appendChild(_dataTipEl);
+  }
+  _dataTipEl.textContent = el.getAttribute('data-tooltip');
+  _dataTipEl.style.display = 'block';
+  _dataTipEl.style.visibility = 'hidden';
+  const w = _dataTipEl.offsetWidth;
+  const h = _dataTipEl.offsetHeight;
+  const r = el.getBoundingClientRect();
+  let top = r.top - h - 8;
+  let left = r.left + r.width / 2 - w / 2;
+  if (left < 8) left = 8;
+  if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+  if (top < 8) top = r.bottom + 8;
+  _dataTipEl.style.top = top + 'px';
+  _dataTipEl.style.left = left + 'px';
+  _dataTipEl.style.visibility = 'visible';
+}
+
+function _hideDataTip() {
+  if (_dataTipEl) _dataTipEl.style.display = 'none';
+}
+
 function _tipIcon(tip) {
-  return tip ? ' <span tabindex="0" style="cursor:help;color:#7c8aff;font-size:12px" data-tooltip="' + escapeHtml(tip) + '">ⓘ</span>' : '';
+  return tip ? ' <span tabindex="0" onmouseenter="_showDataTip(this)" onmouseleave="_hideDataTip()" onfocus="_showDataTip(this)" onblur="_hideDataTip()" style="cursor:help;color:#7c8aff;font-size:12px" data-tooltip="' + escapeHtml(tip) + '">ⓘ</span>' : '';
 }
 
 function _field(label, id, value, placeholder, tip) {
@@ -4918,14 +4945,8 @@ function _textarea(label, id, value, placeholder, tip) {
     '<textarea id="' + id + '" placeholder="' + (placeholder || '') + '" style="width:100%;min-height:80px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(String(value || '')) + '</textarea></div>';
 }
 
-function _listField(label, id, items, placeholder, tip) {
-  const arr = Array.isArray(items) ? items : (items ? String(items).split(',').map(s => s.trim()).filter(Boolean) : []);
-  const text = arr.join(', ');
-  const tipIcon = _tipIcon(tip);
-  const ph = placeholder ? ' placeholder="' + placeholder + '"' : '';
-  return '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">' + label + tipIcon + '</label>' +
-    '<textarea id="' + id + '"' + ph + ' style="width:100%;min-height:60px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(text) + '</textarea></div>';
-}
+
+
 
 function _chipField(label, id, items, placeholder, tip) {
   const arr = Array.isArray(items) ? items : (items ? String(items).split(',').map(s => s.trim()).filter(Boolean) : []);
@@ -5018,19 +5039,19 @@ function _renderChips(id, arr) {
 
 function _voiceForm(d) {
   let h = '';
-  h += _textarea('บุคลิกของแบรนด์', 'bf-personality', d.personality, 'เช่น "เหมือนพ่อแม่ที่เข้าใจเทคโนโลยี"');
-  h += _field('ภาษาที่ใช้', 'bf-language', d.language, 'เช่น ไทยเป็นหลัก สำหรับตลาดไทย');
-  h += _field('ระดับความเป็นทางการ (1-5)', 'bf-formality', d.formality_level, '3');
-  h += _textarea('คำอธิบายโทนเสียง', 'bf-tone', d.tone_description, 'เช่น กลาง-เป็นทางการเล็กน้อย เป็นมิตร อบอุ่น');
-  h += _listField('คำ/วลีที่ห้ามใช้', 'bf-banned', d.banned_phrases);
-  h += _listField('ตัวอย่างโพสต์ที่ใช่', 'bf-examples', d.examples);
+  h += _textarea('บุคลิกของแบรนด์', 'bf-personality', d.personality, 'เช่น เหมือนพ่อแม่ที่เข้าใจเทคโนโลยี อธิบายง่าย ไม่ดุ', 'บุคลิกนี้กำหนดน้ำเสียงของข้อความที AI เขียน ทำให้คอนเทนต์เหมือนพูดโดยแบรนด์นี้');
+  h += _field('ภาษาที่ใช้', 'bf-language', d.language, 'เช่น ไทย 100% หรือ ไทยผสมศัพท์เทคนิคอังกฤษ', 'กำหนดภาษาที AI ใช้ตอบและเลือกคำศัพท์ มีผลต่อทุกคอนเทนต์ทีสร้าง');
+  h += _field('ระดับความเป็นทางการ (1-5)', 'bf-formality', d.formality_level, 'เช่น 3', 'ค่าความเป็นทางการ 1=สนุก/ไม่เป็นทางการ 5=ทางการมาก มีผลต่อคำและประโยคที AI เลือก');
+  h += _textarea('น้ำเสียงของแบรนด์', 'bf-tone', d.tone_description, 'เช่น อธิบายง่าย อบอุ่น ให้คำแนะนำมากกว่าขาย', 'หมายถึงลักษณะการพูด/ภาษาของแบรนด์ในเนื้อหา ไม่ใช่เสียงหรืออัดเสียงในวิดีโอ');
+  h += _chipField('คำ/วลีที่ห้ามใช้', 'bf-banned', d.banned_phrases, 'เช่น ถูก, แถม, ฟรี (กด Enter)', 'AI จะหลีกเลี่ยงคำ/วลีนี้ในทุกคอนเทนต์ ช่วยปกป้องภาพลักษณ์แบรนด์');
+  h += _chipField('ตัวอย่างโพสต์ที่ใช่', 'bf-examples', d.examples, 'เช่น วันนี้เรามีเคล็ดลับดีๆ มาฝาก (กด Enter)', 'ตัวอย่างประโยคที AI จะเลียนแบบสไตล์ ทำให้ข้อความออกมาคล้ายแบรนด์จริง');
   return h;
 }
 
 function _termsForm(d) {
   let h = '';
-  h += _listField('คำที่อนุมัติ (Do Say)', 'bf-approved', d.approved);
-  h += _listField('คำต้องห้าม (Don\'t Say)', 'bf-restricted', d.restricted);
+  h += _chipField('คำที่อนุมัติ', 'bf-approved', d.approved, 'เช่น ปลอดภัย, วางใจได้, คุ้มค่า (กด Enter)', 'คำเหล่านี้ AI จะหยิบมาใช้บ่อยในเนื้อหา เสริมภาพลักษณ์ทีต้องการ');
+  h += _chipField('คำต้องห้าม', 'bf-restricted', d.restricted, 'เช่น ถูกทีสุด, ดีทีสุด, รับประกัน (กด Enter)', 'AI จะหลีกเลี่ยงคำเหล่านี้ในทุกคอนเทนต์ ลดความเสี่ยงทางกฎหมายและภาพลักษณ์');
   return h;
 }
 
@@ -5038,25 +5059,25 @@ function _audienceForm(d) {
   let h = '';
   const p = d.primary || {};
   h += '<div style="font-size:13px;color:#7c8aff;margin-bottom:8px">กลุ่มเป้าหมายหลัก</div>';
-  h += _field('ช่วงอายุ', 'bf-age', p.age, '30-45 ปี');
-  h += _field('บทบาท', 'bf-role', p.role, 'ผู้ปกครอง');
-  h += _field('เพศ', 'bf-gender', p['เพศ'] || p.gender, 'เช่น หญิง 70% / ชาย 30%');
-  h += _field('อาชีพ', 'bf-occupation', p.อาชีพ || p.occupation, '');
-  h += _field('รายได้', 'bf-income', p.รายได้ || p.income, '');
-  h += _field('ที่อยู่', 'bf-location', p['ที่อยู่'] || p.location, 'เช่น กรุงเทพฯ และปริมณฑล');
+  h += _field('ช่วงอายุ', 'bf-age', p.age, 'เช่น 30-45 ปี', 'ช่วงอายุผู้ซื้อหลัก มีผลต่อภาษา มุมมอง และช่องทางที AI เลือกใช้');
+  h += _field('บทบาท', 'bf-role', p.role, 'เช่น ผู้ปกครองยุคใหม่ที่ใส่ใจเทคโนโลยี', 'บทบาทช่วย AI รู้ว่าคุยกับใคร มีผลต่อลำดับภาษาและจุดขายทีเน้น');
+  h += _field('เพศ', 'bf-gender', p['เพศ'] || p.gender, 'เช่น หญิง 70% / ชาย 30%', 'สัดส่วนเพศช่วย AI ปรับมุมมองและตัวอย่างในคอนเทนต์');
+  h += _field('อาชีพ', 'bf-occupation', p.อาชีพ || p.occupation, 'เช่น คนทำงานออฟฟิศ, ฟรีแลนซ์', 'อาชีพช่วย AI เลือกสถานการณ์และประโยคทีตรงกับชีวิตผู้ซื้อ');
+  h += _field('รายได้', 'bf-income', p.รายได้ || p.income, 'เช่น 30,000-60,000 บาท/เดือน', 'รายได้ช่วย AI กำหนดระดับราคาและคำพูดเกี่ยวกับมูลค่า');
+  h += _field('ที่อยู่', 'bf-location', p['ที่อยู่'] || p.location, 'เช่น กรุงเทพฯ และปริมณฑล', 'ทีตั้งมีผลต่อบริบท ภาษาท้องถิ่น และช่องทางที AI แนะนำ');
   const eu = d.end_user || {};
-  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">ผู้ใช้ปลายทาง (End User)</div>';
-  h += _field('ช่วงอายุ', 'bf-eu-age', eu.age || eu.อายุ, 'เช่น 5-12 ปี');
-  h += _field('ลักษณะ', 'bf-eu-desc', eu.desc, 'เช่น เด็กวัยเรียน');
-  h += _listField('ไลฟ์สไตล์', 'bf-lifestyle', d.lifestyle);
+  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">ผู้ใช้ปลายทาง</div>';
+  h += _field('ช่วงอายุ', 'bf-eu-age', eu.age || eu.อายุ, 'เช่น 5-12 ปี', 'ถ้าผู้ใช้งานจริงต่างจากผู้ซื้อ ระบุช่วงอายุช่วยให้คอนเทนต์/ภาพตรงกับคนใช้งาน');
+  h += _field('ลักษณะ', 'bf-eu-desc', eu.desc, 'เช่น เด็กวัยประถมที่ชอบเล่นกีฬา', 'ลักษณะของผู้ใช้ปลายทาง ช่วย AI สร้างเนื้อหาและภาพทีตรงกับคนที่จริงใช้สินค้า');
+  h += _chipField('ไลฟ์สไตล์', 'bf-lifestyle', d.lifestyle, 'เช่น รักสุขภาพ, ชอบเที่ยวกับครอบครัว (กด Enter)', 'ไลฟ์สไตล์ช่วย AI หามุมมองและสถานการณ์ทีลูกค้าใช้ชีวิตจริง');
   const bb = d.buying_behavior || {};
   h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">พฤติกรรมการซื้อ</div>';
-  h += _textarea('ตัดสินใจซื้อจาก', 'bf-bb-decision', bb.decision_factors, 'เช่น ความปลอดภัย > คุณสมบัติ > ราคา');
-  h += _field('งบประมาณต่อครั้ง', 'bf-bb-budget', bb.budget_per_purchase, 'เช่น 2,000-5,000 บาท');
-  h += _field('ซื้อผ่าน', 'bf-bb-channels', bb.channels_purchase, 'เช่น ออนไลน์ / หน้าร้าน');
-  h += _listField('ปัญหา/ความต้องการ (Pain Points)', 'bf-pain', d.pain_points);
-  h += _listField('ช่องทางที่ใช้บ่อย (Social/Shop)', 'bf-channels', d.channels);
-  h += _listField('ช่องทางค้นหาข้อมูล', 'bf-search-channels', d.search_channels);
+  h += _textarea('ตัดสินใจซื้อจาก', 'bf-bb-decision', bb.decision_factors, 'เช่น ความปลอดภัย > คุณสมบัติ > ราคา', 'ลำดับความสำคัญนี้ช่วย AI เขียนข้อความโน้มน้าวใจตามสิ่งที่ลูกค้าห่วงใยจริง');
+  h += _field('งบประมาณต่อครั้ง', 'bf-bb-budget', bb.budget_per_purchase, 'เช่น 2,000-5,000 บาท', 'งบประมาณช่วย AI วางตำแหน่งราคาและเลือกคำพูดทีเหมาะสม');
+  h += _field('ซื้อผ่าน', 'bf-bb-channels', bb.channels_purchase, 'เช่น ออนไลน์ / หน้าร้าน', 'ช่องทางซื้อมีผลต่อรูปแบบคอนเทนต์และ Call-to-Action ที AI แนะนำ');
+  h += _chipField('ปัญหา/ความต้องการ', 'bf-pain', d.pain_points, 'เช่น กลัวลูกหลงทาง, กังวลเรื่องแบตเตอรี่ (กด Enter)', 'AI จะยกปัญหานี้ขึ้นมาก่อนแล้วเสนอวิธีแก้ ทำให้คอนเทนต์เกี่ยวข้อง');
+  h += _chipField('ช่องทางที่ใช้บ่อย', 'bf-channels', d.channels, 'เช่น Facebook, TikTok, Shopee (กด Enter)', 'บอกช่องทางหลักเพื่อให้ AI ปรับรูปแบบและ CTA ให้เหมาะกับแพลตฟอร์มนั้น');
+  h += _chipField('ช่องทางค้นหาข้อมูล', 'bf-search-channels', d.search_channels, 'เช่น Google, YouTube, Pantip (กด Enter)', 'ช่องทางค้นหาช่วย AI วางเนื้อหาให้ตอบคำถามทีลูกค้าค้นหา');
   return h;
 }
 
@@ -5064,20 +5085,21 @@ function _visualForm(d) {
   let h = '';
   const c = d.colors || {};
   h += '<div style="font-size:13px;color:#7c8aff;margin-bottom:8px">สีของแบรนด์</div>';
-  h += _field('Primary', 'bf-color-primary', c.primary, '#1a73e8');
-  h += _field('Secondary', 'bf-color-secondary', c.secondary, '#34a853');
-  h += _field('Accent', 'bf-color-accent', c.accent, '#fbbc04');
-  h += _field('พื้นหลัง', 'bf-color-bg', c.background, '#ffffff');
+  h += _field('สีหลัก', 'bf-color-primary', c.primary, 'เช่น #1a73e8', 'สีหลักใช้เป็นสีชูโรงในรูป/วิดีโอ มมีผลต่ออารมณ์และการจดจำแบรนด์');
+  h += _field('สีรอง', 'bf-color-secondary', c.secondary, 'เช่น #34a853', 'สีรองสนับสนุนสีหลักในองค์ประกอบภาพ ช่วยให้ภาพดูสมดุล');
+  h += _field('สีเน้น', 'bf-color-accent', c.accent, 'เช่น #fbbc04', 'สีเน้นดึงจุดสำคัญ เช่น ปุ่มเรียกร้องให้ทำรายการ หรือไอคอน ในรูป/วิดีโอ');
+  h += _field('พื้นหลัง', 'bf-color-bg', c.background, 'เช่น #ffffff', 'สีพื้นหลังหลักสำหรับภาพสินค้าและการจัดวางภาพ');
   const s = d.image_style || {};
   h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">สไตล์ภาพ</div>';
-  h += _textarea('โทนภาพ', 'bf-style-tone', s.tone, 'อบอุ่น สดใส');
-  h += _textarea('Product shot', 'bf-style-product', s.product_shot, 'สะอาด พื้นขาว');
-  h += _listField('Keywords สำหรับ AI Image Prompt', 'bf-keywords', d.keywords);
-  h += _listField('หลีกเลี่ยง (Avoid)', 'bf-avoid', d.avoid);
+  h += _textarea('โทนภาพ', 'bf-style-tone', s.tone, 'เช่น อบอุ่น สดใส แสงธรรมชาติ', 'โทนภาพบอก AI ว่าจะสร้างรูป/วิดีโอด้วยอารมณ์แบบใด');
+  h += _textarea('ภาพสินค้า', 'bf-style-product', s.product_shot, 'เช่น สะอาด พื้นขาว แสงนุ่ม สินค้าชูเด่น', 'สไตล์ภาพสินค้ากำหนดฉากและองค์ประกอบหลักเวลา AI สร้างรูปสินค้า');
+  h += _chipField('คำสำคัญสำหรับสร้างรูป', 'bf-keywords', d.keywords, 'เช่น เรียบง่าย ไลฟ์สไตล์ แสงนุ่ม (กด Enter)', 'คำเหล่านี้ต่อท้ายคำสั่งสร้างรูปทุกรอบ กำหนดสไตล์ภาพรวม');
+  h += _chipField('หลีกเลี่ยง', 'bf-avoid', d.avoid, 'เช่น พื้นหลังรก แสงนีออน ลายการ์ตูน (กด Enter)', 'AI จะหลีกเลี่ยงองค์ประกอบเหล่านี้เวลาเขียนคำสั่งสร้างรูป/วิดีโอ');
   // Video style section (Style Reverse-Engineering) — รองรับหลายวิดีโอคู่แข่ง
   const vsList = d.video_styles || [];
   const vsActive = d.video_style || {};
   h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">สไตล์วิดีโอ (จากการวิเคราะห์คู่แข่ง)</div>';
+  h += _field('URL วิดีโอคู่แข่ง', 'video-style-url-input', '', 'เช่น https://youtu.be/... หรือ https://example.com/video.mp4', 'วาง YouTube URL หรือลิงก์วิดีโอโดยตรง แล้วกด วิเคราะห์');
   h += '<button onclick="analyzeVideoStyle()" style="background:#7c8aff;border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:8px">🎬 วิเคราะห์วิดีโอคู่แข่ง</button>';
   h += '<div id="video-style-result" style="display:none;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:12px;margin-bottom:8px;font-size:12px;color:#e0e0e0"></div>';
   // แสดงรายการวิดีโอที่วิเคราะห์แล้ว
@@ -5092,13 +5114,13 @@ function _visualForm(d) {
     });
     h += '</div>';
   }
-  h += _field('สรุปสไตล์ (ที่ใช้)', 'bf-vs-summary', vsActive.style_summary, 'เช่น Fast-paced TikTok style with warm tones');
-  h += _field('จังหวะ (Pacing)', 'bf-vs-pacing', vsActive.pacing, 'เช่น เร็ว, ปานกลาง, ช้า');
-  h += _listField('Transitions', 'bf-vs-transitions', vsActive.transitions);
-  h += _field('โทนสี (Color Grading)', 'bf-vs-color', vsActive.color_grading, 'เช่น warm tones, high contrast');
-  h += _field('ดีไซน์เสียง (Sound Design)', 'bf-vs-sound', vsActive.sound_design, 'เช่น upbeat music, voiceover');
-  h += _field('ระยะเวลาต่อ Shot', 'bf-vs-shot', vsActive.shot_duration, 'เช่น 2-3 sec');
-  h += _field('จังหวะภาพ (Visual Rhythm)', 'bf-vs-rhythm', vsActive.visual_rhythm, 'เช่น energetic, calm');
+  h += _field('สรุปสไตล์วิดีโอ', 'bf-vs-summary', vsActive.style_summary, 'เช่น ตัดเร็ว TikTok โทนสีอุ่น', 'สรุปสไตล์วิดีโอบอก AI จังหวะและโทนทีต้องการในทุกคลิป');
+  h += _field('จังหวะวิดีโอ', 'bf-vs-pacing', vsActive.pacing, 'เช่น เร็ว, ปานกลาง, ช้า', 'จังหวะตัดต่อมีผลต่อความยาวของแต่ละฉากและความรู้สึกตอนชม');
+  h += _chipField('การตัดเปลี่ยน', 'bf-vs-transitions', vsActive.transitions, 'เช่น ตัดกระชับ เฟด ปัดหน้าจอ (กด Enter)', 'รูปแบบการตัดเปลี่ยนฉากที AI จะแนะนำในคำสั่งสร้างวิดีโอ');
+  h += _field('โทนสี', 'bf-vs-color', vsActive.color_grading, 'เช่น โทนอุ่น คอนทราสต์สูง', 'โทนสีวิดีโอส่งผลต่ออารมณ์และความสวยงามของคลิปที AI สร้าง');
+  h += _field('เสียงประกอบวิดีโอ', 'bf-vs-sound', vsActive.sound_design, 'เช่น เพลงจังหวะเร็ว พากย์เสียง', 'เสียงประกอบช่วย AI กำหนดอารมณ์และรูปแบบเสียงในวิดีโอ');
+  h += _field('ความยาวแต่ละฉาก', 'bf-vs-shot', vsActive.shot_duration, 'เช่น 2-3 วินาที', 'ความยาวของแต่ละฉากมีผลต่อจังหวะและความเข้าใจง่ายของคลิป');
+  h += _field('จังหวะภาพ', 'bf-vs-rhythm', vsActive.visual_rhythm, 'เช่น พลังงานเต็มที่, เงียบสงบ', 'จังหวะภาพกำหนดความรู้สึกรวมของวิดีโอ ทำให้คลิปสื่ออารมณ์ตามต้องการ');
   return h;
 }
 
@@ -5124,7 +5146,7 @@ function _collectBrandForm(section) {
   } else if (section === 'terms') {
     return { approved: _formList('bf-approved'), restricted: _formList('bf-restricted') };
   } else if (section === 'profile') {
-    return val('brand-profile-textarea');
+    return _formVal('brand-profile-textarea');
   } else if (section === 'audience') {
     return {
       primary: {
@@ -5167,7 +5189,10 @@ function _collectBrandForm(section) {
   return null;
 }
 
-function closeBrandModal() {
+function closeBrandModal(force) {
+  if (!force && _isBrandFormDirty()) {
+    if (!confirm('คุณมีการเปลี่ยนแปลงทียังไม่บันทึก ต้องการปิดหน้าต่างหรือไม่?')) return;
+  }
   document.getElementById('brand-overlay').className = 'settings-modal-overlay';
 }
 
@@ -5188,7 +5213,7 @@ function saveBrandFileModal() {
       _brandData[_brandSection] = collected;
       status.className = 'upload-status ok';
       status.textContent = 'บันทึกแล้ว ✓';
-      setTimeout(closeBrandModal, 800);
+      setTimeout(() => closeBrandModal(true), 800);
       // Refresh conflict icons — brand rules changed, agents may now conflict
       loadConflictIcons();
     } else {
@@ -5418,9 +5443,37 @@ function saveProductProfile() {
 let _assetConfig = { taxonomy: { subject: [], style: [] } };
 let _assetsPolling = null;
 let _assetRenderToken = 0;   // กัน race condition — fetch เก่าที่เสร็จทีหลังจะข้าม
+let _assetEditing = null;
+let _assetOriginal = '';
+
+function _collectAssetForm() {
+  if (!_assetEditing) return '';
+  return JSON.stringify({
+    subject: document.getElementById('asset-subject').value,
+    style: document.getElementById('asset-style').value,
+    tags: (document.getElementById('asset-tags').value || '').split(',').map(t => t.trim()).filter(Boolean),
+    description: document.getElementById('asset-description').value,
+    user_note: document.getElementById('asset-user-note').value,
+  });
+}
+
+function _isAssetFormDirty() {
+  return _collectAssetForm() !== _assetOriginal;
+}
+
+function backToAssetsList() {
+  if (_isAssetFormDirty()) {
+    if (!confirm('คุณมีการเปลี่ยนแปลงยังไม่บันทึก ต้องการกลับหรือไม่?')) return;
+  }
+  _assetEditing = null;
+  _assetOriginal = '';
+  loadAssetsList();
+}
 
 function openAssetLibraryModal() {
   // โหลด config (taxonomy) ก่อน แล้วโหลด asset list
+  _assetEditing = null;
+  _assetOriginal = '';
   fetch('/api/assets_config').then(r => r.json()).then(cfg => {
     _assetConfig = cfg;
     const overlay = document.getElementById('asset-overlay');
@@ -5429,8 +5482,13 @@ function openAssetLibraryModal() {
   });
 }
 
-function closeAssetModal() {
+function closeAssetModal(force) {
+  if (!force && _isAssetFormDirty()) {
+    if (!confirm('คุณมีการเปลี่ยนแปลงยังไม่บันทึก ต้องการปิดหน้าต่างหรือไม่?')) return;
+  }
   document.getElementById('asset-overlay').className = 'settings-modal-overlay';
+  _assetEditing = null;
+  _assetOriginal = '';
   if (_assetsPolling) { clearInterval(_assetsPolling); _assetsPolling = null; }
 }
 
@@ -5445,7 +5503,6 @@ function loadAssetsList() {
     // ปุ่มอัปโหลด
     html += '<div style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
     html += '<label style="background:#7c8aff;color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600">+ อัปโหลดไฟล์<input type="file" multiple style="display:none" onchange="uploadAssets(this.files)"></label>';
-    html += '<button onclick="reingestAssets()" style="background:#2a2d3a;color:#e0e0e0;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid #3a3d4a">สแกนใหม่</button>';
     html += '<span id="asset-upload-status" class="upload-status" style="font-size:12px"></span>';
     html += '</div>';
 
@@ -5527,21 +5584,22 @@ function uploadAssets(files) {
     });
 }
 
-function reingestAssets() {
-  fetch('/api/assets/reingest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force: false }) })
+function reingestSingleAsset(id) {
+  const status = document.getElementById('asset-save-status');
+  if (status) { status.className = 'upload-status'; status.textContent = 'กำลังวิเคราะห์ด้วย AI...'; }
+  fetch('/api/assets/reingest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ asset_id: id, force: false }) })
     .then(r => r.json())
     .then(data => {
-      const status = document.getElementById('asset-upload-status');
       if (data.ok) {
-        status.className = 'upload-status ok';
-        status.textContent = 'กำลังสแกนใหม่...';
         if (_assetsPolling) clearInterval(_assetsPolling);
         let attempts = 0;
         _assetsPolling = setInterval(() => {
-          loadAssetsList();
+          editAsset(id);
           attempts++;
-          if (attempts > 20) { clearInterval(_assetsPolling); _assetsPolling = null; }
+          if (attempts > 8) { clearInterval(_assetsPolling); _assetsPolling = null; }
         }, 3000);
+      } else {
+        if (status) { status.className = 'upload-status err'; status.textContent = data.error || 'วิเคราะห์ไม่สำเร็จ'; }
       }
     });
 }
@@ -5555,8 +5613,9 @@ function editAsset(id) {
     const body = document.getElementById('asset-modal-body');
     const subjects = (_assetConfig.taxonomy && _assetConfig.taxonomy.subject) || ['other'];
     const styles = (_assetConfig.taxonomy && _assetConfig.taxonomy.style) || ['other'];
+    _assetEditing = a.id;
 
-    let h = '<div style="margin-bottom:12px"><button onclick="loadAssetsList()" style="background:#2a2d3a;color:#e0e0e0;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;border:1px solid #3a3d4a">← กลับ</button></div>';
+    let h = '<div style="margin-bottom:12px"><button onclick="backToAssetsList()" style="background:#2a2d3a;color:#e0e0e0;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;border:1px solid #3a3d4a">← กลับ</button></div>';
 
     // preview
     if (a.type === 'image') {
@@ -5567,32 +5626,34 @@ function editAsset(id) {
     h += '<div style="font-size:11px;color:#555;margin-bottom:12px">ID: ' + escapeHtml(a.id) + ' · hash: ' + escapeHtml((a.hash || '').substring(0, 12)) + '...</div>';
 
     // subject dropdown
-    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px" title="แยกไฟล์ตามเนื้อหา เช่น คน สินค้า โลโก้">ประเภทเนื้อหา</label><select id="asset-subject" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">';
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">ประเภทเนื้อหา' + _tipIcon('แยกไฟล์ตามเนื้อหา เช่น คน สินค้า โลโก้ ช่วย AI ค้นหาได้ถูก') + '</label><select id="asset-subject" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">';
     for (const s of subjects) h += '<option value="' + s + '"' + (a.subject === s ? ' selected' : '') + '>' + _subjectTh(s) + '</option>';
     h += '</select></div>';
 
     // style dropdown
-    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px" title="รูปแบบของภาพ เช่น ถ่ายภาพ ภาพประกอบ 3 มิติ">สไตล์ภาพ</label><select id="asset-style" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">';
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">สไตล์ภาพ' + _tipIcon('รูปแบบของภาพ เช่น ถ่ายภาพ ภาพประกอบ 3 มิติ ช่วย AI กรอง/เลือกไฟล์') + '</label><select id="asset-style" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">';
     for (const s of styles) h += '<option value="' + s + '"' + (a.style === s ? ' selected' : '') + '>' + _styleTh(s) + '</option>';
     h += '</select></div>';
 
     // tags
-    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px" title="คำสำคัญที่ช่วยให้ AI ค้นหาไฟล์นี้เจอ">แท็ก <span style="color:#555">(คั่นด้วยจุลภาค)</span></label><textarea id="asset-tags" style="width:100%;min-height:50px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml((a.tags || []).join(', ')) + '</textarea></div>';
+    h += _chipField('แท็ก', 'asset-tags', a.tags || [], 'เช่น โลโก้ ผู้หญิง สีน้ำเงิน (กด Enter)', 'คำสำคัญช่วยให้ AI ค้นหาไฟล์นี้เวลาสร้างคอนเทนต์');
 
     // description
-    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px" title="AI บรรยายไฟล์นี้ให้ตอนอัปโหลด แก้ไข้ได้">คำบรรยาย <span style="color:#555">(AI สร้าง — แก้ได้)</span></label><textarea id="asset-description" style="width:100%;min-height:80px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical">' + escapeHtml(a.description || '') + '</textarea></div>';
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">คำบรรยาย' + _tipIcon('AI บรรยายไฟล์นี้ตอนอัปโหลด แก้ไข้ได้เพื่อให้ค้นหาแม่นขึ้น') + '</label><textarea id="asset-description" style="width:100%;min-height:80px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical" placeholder="เช่น หญิงสาวสวมเสื้อสีครีมกำลังคุยโทรศัพท์มือถือ ดูสมาร์ตวอตช์ภายในบ้านอบอุ่น">' + escapeHtml(a.description || '') + '</textarea></div>';
 
     // user_note
-    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">หมายเหตุของคุณ</label><textarea id="asset-user-note" style="width:100%;min-height:50px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical" placeholder="เช่น โลโก้หลักใช้ทุกแพลตฟอร์ม">' + escapeHtml(a.user_note || '') + '</textarea></div>';
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">หมายเหตุของคุณ' + _tipIcon('โน้ตเพิ่มเติมทีรวมเข้าคำบรรยาย เช่น โลโก้หลักใช้ทุกแพลตฟอร์ม') + '</label><textarea id="asset-user-note" style="width:100%;min-height:50px;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;resize:vertical" placeholder="เช่น โลโก้หลักใช้ทุกแพลตฟอร์ม">' + escapeHtml(a.user_note || '') + '</textarea></div>';
 
     // ปุ่ม
-    h += '<div style="display:flex;gap:8px;align-items:center">';
+    h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
     h += '<button onclick="saveAsset(\'' + a.id + '\')" style="background:#7c8aff;color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600">บันทึก</button>';
+    h += '<button onclick="reingestSingleAsset(\'' + a.id + '\')" data-tooltip="ให้ AI วิเคราะห์และติดแท็กไฟล์นี้ใหม่" onmouseenter="_showDataTip(this)" onmouseleave="_hideDataTip()" style="background:#2a2d3a;color:#e0e0e0;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid #3a3d4a">🔄 AI วิเคราะห์ใหม่</button>';
     h += '<button onclick="deleteAsset(\'' + a.id + '\',\'' + escapeHtml(a.file).replace(/'/g, "\\'") + '\')" style="background:#f44336;color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px">ลบ</button>';
     h += '<span id="asset-save-status" class="upload-status" style="font-size:12px"></span>';
     h += '</div>';
 
     body.innerHTML = h;
+    _assetOriginal = _collectAssetForm();
   });
 }
 
@@ -5612,6 +5673,8 @@ function saveAsset(id) {
     if (data.id) {
       status.className = 'upload-status ok';
       status.textContent = 'บันทึกแล้ว ✓';
+      _assetEditing = null;
+      _assetOriginal = '';
       setTimeout(() => loadAssetsList(), 800);
     } else {
       status.className = 'upload-status err';
@@ -5622,6 +5685,8 @@ function saveAsset(id) {
 
 function deleteAsset(id, filename) {
   if (!confirm('ลบ ' + filename + ' ?')) return;
+  _assetEditing = null;
+  _assetOriginal = '';
   fetch('/api/assets/' + id + '/delete', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ remove_file: true }),
   }).then(r => r.json()).then(data => {
@@ -5639,10 +5704,11 @@ function analyzeVideoStyle() {
     const existing = (_brandData.visual && _brandData.visual.video_styles) || [];
     window._videoStyles = [...existing];
   }
-  const url = prompt('ใส่ YouTube URL ของวิดีโอคู่แข่ง หรือเว้นว่างเพื่อ upload ไฟล์:');
-  if (url === null) return;
-  if (url.trim()) {
-    _doAnalyzeVideoStyle({video_url: url.trim()});
+  const urlInput = document.getElementById('video-style-url-input');
+  const url = (urlInput && urlInput.value.trim()) || '';
+  if (url) {
+    _doAnalyzeVideoStyle({video_url: url});
+    urlInput.value = '';
   } else {
     // upload file
     const input = document.createElement('input');
@@ -5849,7 +5915,7 @@ function _renderReviewResult(data, platform, alreadyApplied) {
 }
 
 // ============================================================
-// Voice Learning modal — upload ตัวอย่าง → AI วิเคราะห์โทนเสียง
+// Voice Learning modal — upload ตัวอย่าง → AI วิเคราะห์ Brand Voice
 // ============================================================
 let _voiceLearnFiles = [];
 let _voiceLearnUrls = [];
@@ -5863,7 +5929,8 @@ function openVoiceLearnModal() {
   _voiceLearnAbort = null;
   const overlay = document.getElementById('voice-learn-overlay');
   document.getElementById('voice-learn-text-input').value = '';
-  document.getElementById('voice-learn-url-input').value = '';
+  document.getElementById('voice-learn-url-add').value = '';
+  _hideChipInput('voice-learn-url');
   document.getElementById('voice-learn-file-list').innerHTML = '';
   renderVoiceLearnTextCards();
   renderVoiceLearnUrlChips();
@@ -5921,6 +5988,7 @@ function handleVoiceLearnUrlKeydown(input, event) {
     if (input.value.trim()) {
       addVoiceLearnUrl(input.value);
       input.value = '';
+      _hideChipInput('voice-learn-url');
     }
   // กด comma → เพิ่มเป็น chip (ละเว้น comma ออก)
   } else if (event.key === ',') {
@@ -5928,11 +5996,14 @@ function handleVoiceLearnUrlKeydown(input, event) {
     if (input.value.trim()) {
       addVoiceLearnUrl(input.value);
       input.value = '';
+      _hideChipInput('voice-learn-url');
     }
   // Backspace ตอนช่องว่าง → ลบ chip สุดท้าย
   } else if (event.key === 'Backspace' && input.value === '' && _voiceLearnUrls.length) {
     _voiceLearnUrls.pop();
     renderVoiceLearnUrlChips();
+  } else if (event.key === 'Escape') {
+    _hideChipInput('voice-learn-url');
   }
 }
 
@@ -5945,6 +6016,7 @@ function handleVoiceLearnUrlPaste(input, event) {
     const urls = text.split(/[\n,]+/).map(s => s.trim()).filter(s => s);
     for (const u of urls) addVoiceLearnUrl(u);
     input.value = '';
+    _hideChipInput('voice-learn-url');
   } else {
     // URL เดียว → ใส่ใน input ให้ user ตรวจก่อนกด Enter
     input.value = text.trim();
@@ -8639,30 +8711,32 @@ function loadCredits() {
 </div>
 <div class="settings-modal-overlay" id="brand-overlay">
   <div class="settings-modal" style="width:600px;max-height:85vh;overflow-y:auto">
-    <h3 id="brand-modal-title">✎ แก้ไข</h3>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h3 id="brand-modal-title" style="margin:0">✎ แก้ไข</h3>
+      <button onclick="closeBrandModal()" title="ปิด" style="background:none;border:none;color:#888;font-size:24px;cursor:pointer;line-height:1;padding:0 4px">&times;</button>
+    </div>
     <div id="brand-modal-body"></div>
     <div class="upload-status" id="brand-save-status-modal"></div>
     <div class="settings-actions">
-      <button class="settings-cancel" onclick="closeBrandModal()">ยกเลิก</button>
-      <button class="settings-save" onclick="saveBrandFileModal()">บันทึก</button>
+      <button class="settings-save" style="flex:1" onclick="saveBrandFileModal()">บันทึก</button>
     </div>
   </div>
 </div>
 
 <div class="settings-modal-overlay" id="asset-overlay">
   <div class="settings-modal" style="width:720px;max-height:85vh;overflow-y:auto">
-    <h3>🗂 วัตถุดิบแบรนด์</h3>
-    <p style="font-size:12px;color:#888;margin:0 0 14px 0">อัปโหลดไฟล์ที่ใช้ซ้ำข้ามการรัน (โลโก้ รูปพรีเซนเตอร์ เพลง) — AI บรรยายและติดแท็กอัตโนมัติ แก้ไขรายละเอียดได้ทุกไฟล์</p>
-    <div id="asset-modal-body"></div>
-    <div class="settings-actions">
-      <button class="settings-cancel" onclick="closeAssetModal()">ปิด</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h3 style="margin:0">🗂 วัตถุดิบแบรนด์</h3>
+      <button onclick="closeAssetModal()" title="ปิด" style="background:none;border:none;color:#888;font-size:24px;cursor:pointer;line-height:1;padding:0 4px">&times;</button>
     </div>
+    <p style="font-size:12px;color:#888;margin:0 0 14px 0">ไฟล์ทีใช้ซ้ำในการสร้างคอนเทนต์ทุกรอบ เช่น โลโก้ รูปคน รูปสินค้า เสียง หรือเพลง อัปโหลดแล้วแก้แท็ก/คำบรรยายเองได้</p>
+    <div id="asset-modal-body"></div>
   </div>
 </div>
 <div class="settings-modal-overlay" id="voice-learn-overlay">
   <div class="settings-modal" style="width:600px;max-height:85vh;overflow-y:auto">
-    <h3>🎓 Brand Learning — ฝึก AI จากตัวอย่าง</h3>
-    <p style="font-size:12px;color:#888;margin:0 0 14px 0">ใส่ตัวอย่างโพสต์ที่สะท้อนแบรนด์ AI จะวิเคราะห์และสร้าง <b>3 ส่วนพร้อมกัน</b>: Voice (โทนเสียง) + Terms (คำที่ใช้/ห้ามใช้) + Audience (กลุ่มเป้าหมาย) — ส่วน Profile และ Visual ต้องกรอกเอง</p>
+    <h3>🎓 ตั้งค่าด้วย AI</h3>
+    <p style="font-size:12px;color:#888;margin:0 0 14px 0">ใส่ตัวอย่างโพสต์ที่สะท้อนแบรนด์ AI จะวิเคราะห์และสร้าง <b>3 ส่วนพร้อมกัน</b>: น้ำเสียงของแบรนด์ + คำที่ใช้/ห้ามใช้ + กลุ่มเป้าหมาย — ส่วน ประวัติแบรนด์ และ แนวทางภาพ ต้องกรอกเอง</p>
     <div style="margin-bottom:14px">
       <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">📝 ตัวอย่างโพสต์ (พิมพ์แล้วกด Enter เพื่อเพิ่มเป็น card แยก)</label>
       <div id="voice-learn-text-cards" style="margin-bottom:8px"></div>
@@ -8675,10 +8749,9 @@ function loadCredits() {
     </div>
     <div style="margin-bottom:14px">
       <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">🔗 URL (กด Enter หรือ paste หลายอันพร้อมกันได้)</label>
-      <div style="width:100%;min-height:44px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:8px;display:flex;flex-wrap:wrap;align-items:center;gap:2px;cursor:text" onclick="document.getElementById('voice-learn-url-input').focus()">
-        <div id="voice-learn-url-chips" style="display:flex;flex-wrap:wrap;align-items:center"></div>
-        <input id="voice-learn-url-input" type="text" placeholder="วาง URL ที่นี่..." style="flex:1;min-width:120px;background:none;border:none;outline:none;color:#e0e0e0;font-size:13px;padding:4px" onkeydown="handleVoiceLearnUrlKeydown(this, event)" onpaste="handleVoiceLearnUrlPaste(this, event)">
-      </div>
+      <div id="voice-learn-url-chips" style="margin-bottom:6px"></div>
+      <button type="button" id="voice-learn-url-add-btn" onclick="_showChipInput('voice-learn-url')" style="display:inline-block;background:#1a1d27;border:1px dashed #3a3d4a;color:#7c8aff;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;margin-top:4px">+ เพิ่ม URL</button>
+      <input type="text" id="voice-learn-url-add" placeholder="วาง URL ที่นี่..." style="display:none;width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px" onkeydown="handleVoiceLearnUrlKeydown(this, event)" onpaste="handleVoiceLearnUrlPaste(this, event)" onblur="addVoiceLearnUrl(this.value); this.value=''; _hideChipInput('voice-learn-url');">
     </div>
     <div class="upload-status" id="voice-learn-status"></div>
     <div id="voice-learn-result"></div>
