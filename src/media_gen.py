@@ -473,7 +473,10 @@ def generate_image(
                          http_status=e.response.status_code, attempt=attempt, units={"images_generated": n},
                          error_message=str(e))
         _err_len = int(_system_cfg().get("error_preview_length", 200))
-        return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:_err_len]}", "model": model, "prompt": prompt, "warnings": warnings}
+        et, ec = _parse_error_response(e.response.text)
+        return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:_err_len]}",
+                "error_type": et, "error_code": ec, "http_status": e.response.status_code,
+                "model": model, "prompt": prompt, "warnings": warnings}
     except Exception as e:
         _log_media_usage("image", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
                          attempt=attempt, units={"images_generated": n}, error_message=str(e))
@@ -674,7 +677,10 @@ def generate_video(
                          request_id=job_id, attempt=attempt, units=units,
                          http_status=e.response.status_code, error_message=str(e))
         _err_len = int(_system_cfg().get("error_preview_length", 200))
-        return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:_err_len]}", "model": model, "prompt": prompt, "warnings": warnings}
+        et, ec = _parse_error_response(e.response.text)
+        return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:_err_len]}",
+                "error_type": et, "error_code": ec, "http_status": e.response.status_code,
+                "model": model, "prompt": prompt, "warnings": warnings}
     except Exception as e:
         _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
                          request_id=job_id, attempt=attempt, units=units, error_message=str(e))
@@ -730,23 +736,101 @@ def _log_media_usage(
 
 
 # ---------------------------------------------------------------------------
-# Retry-on-rejection — ถ้า media gen ถูก reject ให้ LLM แก้ prompt แล้วลองใหม่
+# Retry-on-rejection — parse structured error_type จาก OpenRouter แทน keyword matching
+# OpenRouter คืน error_type ใน error.metadata.error_type (หรือ nested ใน message)
+# ดู: https://openrouter.ai/docs/api/reference/errors-and-debugging
 # ---------------------------------------------------------------------------
 
-# คำสำคัญใน error ที่บอกว่าเป็น rejection ที่แก้ได้ด้วยการเขียน prompt ใหม่
-_REJECT_KEYWORDS = [
-    "copyright", "trademark", "intellectual property", "ip policy",
-    "safety", "content policy", "content filter", "blocked",
-    "prohibited", "violation", "inappropriate", "nsfw",
-    "celebrity", "public figure", "real person",
-    "brand", "logo",
-]
+# error_type ที่ OpenRouter ใช้ — ครอบคลุม error ทุกประเภด ไม่ต้องเดาจาก keyword
+_CONTENT_POLICY_TYPES = {
+    "content_policy_violation",
+    "image_content_policy_violation",
+}
+_TRANSIENT_TYPES = {
+    "rate_limit_exceeded",
+    "server_error",
+    "timeout",
+    "provider_overloaded",
+    "provider_unavailable",
+}
 
 
-def _is_rejectable_error(error: str) -> bool:
-    """เช็คว่า error นี้แก้ได้ด้วยการเขียน prompt ใหม่ไหม."""
-    err_lower = (error or "").lower()
-    return any(kw in err_lower for kw in _REJECT_KEYWORDS)
+def _parse_error_response(response_text: str) -> tuple[str | None, str | None]:
+    """Parse error_type และ error_code จาก OpenRouter error response.
+
+    OpenRouter format: {"error": {"code": 400, "message": "...", "metadata": {"error_type": "..."}}}
+    บางครั้ง provider error ซ้อนอยู่ใน message เป็น stringified JSON.
+
+    คืน: (error_type, error_code) — ทั้งคู่อาจเป็น None ถ้า parse ไม่ได้
+    """
+    try:
+        outer = json.loads(response_text)
+    except (json.JSONDecodeError, TypeError):
+        return None, None
+
+    err = outer.get("error") if isinstance(outer, dict) else None
+    if not isinstance(err, dict):
+        return None, None
+
+    # 1) error_type จาก metadata (OpenRouter canonical)
+    metadata = err.get("metadata") or {}
+    if isinstance(metadata, dict):
+        et = metadata.get("error_type")
+        if et:
+            return str(et), None
+
+    # 2) error_type ระดับบนสุด (Responses API format)
+    et = outer.get("error_type")
+    if et:
+        return str(et), None
+
+    # 3) provider error ซ้อนใน message — ลอง parse JSON ที่ฝังอยู่
+    message = err.get("message", "")
+    json_start = message.find("{")
+    if json_start >= 0:
+        try:
+            inner = json.loads(message[json_start:])
+            inner_err = inner.get("error") if isinstance(inner, dict) else None
+            if isinstance(inner_err, dict):
+                inner_code = inner_err.get("code")
+                if inner_code:
+                    return None, str(inner_code)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return None, None
+
+
+def _classify_media_error(
+    error_type: str | None,
+    error_code: str | None,
+    http_status: int | None,
+) -> str:
+    """จำแนกประเภท error เพื่อเลือก retry strategy.
+
+    คืน: 'content_policy' | 'transient' | 'other'
+    - content_policy: โดน content filter (flaky — retry กับ provider เดิมมีโอกาสผ่าน)
+    - transient: rate limit / server error (retry กับ backoff)
+    - other: ไม่ retry
+    """
+    et = (error_type or "").lower()
+    ec = (error_code or "").lower()
+
+    # content policy — จาก OpenRouter error_type
+    if et in _CONTENT_POLICY_TYPES:
+        return "content_policy"
+    # content policy — จาก provider error code (เช่น InputImageSensitiveContentDetected.PrivacyInformation)
+    if "sensitivecontent" in ec or "privacy" in ec or "policyviolation" in ec or "contentpolicy" in ec:
+        return "content_policy"
+    # transient — จาก error_type
+    if et in _TRANSIENT_TYPES:
+        return "transient"
+    # transient — จาก HTTP status
+    if http_status and http_status >= 500:
+        return "transient"
+    if http_status == 429:
+        return "transient"
+    return "other"
 
 
 def _rewrite_prompt_with_llm(
@@ -813,9 +897,15 @@ def generate_image_with_retry(
     input_references: list[dict] | list[str] | None = None,
     visual: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """สร้างรูป — ถ้าถูก reject ให้ LLM แก้ prompt แล้วลองใหม่ ไม่จำกัดจำนวนครั้ง.
+    """สร้างรูป — retry strategy ตามประเภท error (parse error_type ไม่ใช่ keyword).
 
-    หยุดเฉพาะเมื่อ: สำเร็จ / ไม่ใช่ reject error / LLM แก้ prompt ไม่ได้
+    content_policy: retry กับ provider เดิม (flaky — โอกาสผ่าน)
+      - retry 1-2: ส่ง request เดิม (รอ content filter คลาย)
+      - retry 3: แก้ prompt ด้วย LLM (กรณีลิขสิทธิ์ เช่น "Super Girl")
+      - ครบ 3 ครั้งแล้วไม่ผ่าน → error ให้ user กดทีหลัง
+    transient (rate limit / server error): retry กับ backoff
+    other: ไม่ retry คืน error เลย
+
     on_retry: callback(old_prompt, new_prompt, error) สำหรับโชว์สถานะ
     input_references: รูปสินค้าจริงสำหรับ image-to-image (path หรือ dict)
     visual: dict จาก brand/visual.json — แป๊ะ keywords/colors/tone ต่อท้าย prompt
@@ -824,6 +914,8 @@ def generate_image_with_retry(
     cfg = _load_media_config()
     mcfg = _media_cfg()
     retry_model = cfg.get("media_retry_model", mcfg.get("media_retry_model", "anthropic/claude-sonnet-4"))
+    max_retries = int(cfg.get("max_content_policy_retries", 3))
+    retry_delay = float(cfg.get("content_policy_retry_delay_seconds", 2.0))
 
     current_prompt = prompt
     attempt = 0
@@ -844,33 +936,77 @@ def generate_image_with_retry(
             return result
 
         error = result.get("error", "")
+        error_type = result.get("error_type")
+        error_code = result.get("error_code")
+        http_status = result.get("http_status")
+        category = _classify_media_error(error_type, error_code, http_status)
 
-        # ถ้าไม่ใช่ rejection ที่แก้ได้ หรือไม่มี LLM → คืน error เลย
-        if not _is_rejectable_error(error) or llm is None:
+        # other → ไม่ retry
+        if category == "other":
             result["retry_history"] = retry_history
             return result
 
-        # ลองแก้ prompt
-        new_prompt = _rewrite_prompt_with_llm(
-            current_prompt, error, "image", llm, retry_model,
-        )
-        if not new_prompt:
+        # ครบจำนวน retry แล้ว → คืน error ให้ user กดทีหลัง
+        if attempt >= max_retries:
             result["retry_history"] = retry_history
-            return result  # LLM แก้ไม่ได้ → คืน error เดิม
+            result["retry_count"] = attempt
+            result["original_prompt"] = prompt
+            return result
 
-        # เก็บประวัติก่อนเปลี่ยน
-        retry_history.append({
-            "attempt": attempt + 1,
-            "old_prompt": current_prompt,
-            "new_prompt": new_prompt,
-            "error": error,
-        })
-
-        if on_retry:
-            on_retry(current_prompt, new_prompt, error)
-
-        current_prompt = new_prompt
         attempt += 1
+
+        # transient → retry กับ backoff (ไม่แก้ prompt)
+        if category == "transient":
+            time.sleep(retry_delay * attempt)
+            retry_history.append({
+                "attempt": attempt,
+                "old_prompt": current_prompt,
+                "new_prompt": current_prompt,
+                "error": error,
+                "strategy": "transient_retry",
+            })
+            if on_retry:
+                on_retry(current_prompt, current_prompt, error)
+            continue
+
+        # content_policy → retry 1-2 ส่งเดิม, retry สุดท้ายแก้ prompt
+        if attempt < max_retries:
+            # retry แรกๆ — ส่ง request เดิม (content filter เป็น flaky)
+            time.sleep(retry_delay)
+            retry_history.append({
+                "attempt": attempt,
+                "old_prompt": current_prompt,
+                "new_prompt": current_prompt,
+                "error": error,
+                "strategy": "flaky_retry",
+            })
+            if on_retry:
+                on_retry(current_prompt, current_prompt, error)
+            continue
+
+        # retry สุดท้าย — ลองแก้ prompt ด้วย LLM (กรณีลิขสิทธิ์)
+        if llm is not None:
+            new_prompt = _rewrite_prompt_with_llm(
+                current_prompt, error, "image", llm, retry_model,
+            )
+            if new_prompt:
+                retry_history.append({
+                    "attempt": attempt,
+                    "old_prompt": current_prompt,
+                    "new_prompt": new_prompt,
+                    "error": error,
+                    "strategy": "prompt_rewrite",
+                })
+                if on_retry:
+                    on_retry(current_prompt, new_prompt, error)
+                current_prompt = new_prompt
+                continue
+
+        # LLM แก้ไม่ได้ หรือไม่มี LLM → คืน error
+        result["retry_history"] = retry_history
+        result["retry_count"] = attempt - 1
+        result["original_prompt"] = prompt
+        return result
 
 
 def generate_video_with_retry(
@@ -890,10 +1026,17 @@ def generate_video_with_retry(
     frame_images: list[dict] | list[str] | None = None,
     visual: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """สร้างวิดีโอ — ถ้าถูก reject ให้ LLM แก้ prompt แล้วลองใหม่ ไม่จำกัดจำนวนครั้ง.
+    """สร้างวิดีโอ — retry strategy ตามประเภท error (parse error_type ไม่ใช่ keyword).
 
-    หยุดเฉพาะเมื่อ: สำเร็จ / ไม่ใช่ reject error / LLM แก้ prompt ไม่ได้
+    content_policy: retry กับ provider เดิม (flaky — โอกาสผ่าน)
+      - retry 1-2: ส่ง request เดิม (รอ content filter คลาย)
+      - retry 3: แก้ prompt ด้วย LLM (กรณีลิขสิทธิ์)
+      - ครบ 3 ครั้งแล้วไม่ผ่าน → error ให้ user กดทีหลัง
+    transient (rate limit / server error): retry กับ backoff
+    other: ไม่ retry คืน error เลย
+
     on_retry: callback(old_prompt, new_prompt, error) สำหรับโชว์สถานะ
+    on_status: callback(status_str) สำหรับโชว์ progress
     input_references: รูปสินค้าจริงสำหรับ reference-to-video
     frame_images: รูปสินค้าจริงสำหรับ image-to-video (first/last frame)
     visual: dict จาก brand/visual.json — แป๊ะ keywords/colors/tone ต่อท้าย prompt
@@ -902,6 +1045,8 @@ def generate_video_with_retry(
     cfg = _load_media_config()
     mcfg = _media_cfg()
     retry_model = cfg.get("media_retry_model", mcfg.get("media_retry_model", "anthropic/claude-sonnet-4"))
+    max_retries = int(cfg.get("max_content_policy_retries", 3))
+    retry_delay = float(cfg.get("content_policy_retry_delay_seconds", 2.0))
 
     current_prompt = prompt
     attempt = 0
@@ -925,36 +1070,83 @@ def generate_video_with_retry(
             return result
 
         error = result.get("error", "")
+        error_type = result.get("error_type")
+        error_code = result.get("error_code")
+        http_status = result.get("http_status")
+        category = _classify_media_error(error_type, error_code, http_status)
 
-        # ถ้าไม่ใช่ rejection ที่แก้ได้ หรือไม่มี LLM → คืน error เลย
-        if not _is_rejectable_error(error) or llm is None:
+        # other → ไม่ retry
+        if category == "other":
             result["retry_history"] = retry_history
             return result
 
-        # ลองแก้ prompt
-        new_prompt = _rewrite_prompt_with_llm(
-            current_prompt, error, "video", llm, retry_model,
-        )
-        if not new_prompt:
+        # ครบจำนวน retry แล้ว → คืน error ให้ user กดทีหลัง
+        if attempt >= max_retries:
             result["retry_history"] = retry_history
-            return result  # LLM แก้ไม่ได้ → คืน error เดิม
+            result["retry_count"] = attempt
+            result["original_prompt"] = prompt
+            return result
 
-        # เก็บประวัติก่อนเปลี่ยน
-        retry_history.append({
-            "attempt": attempt + 1,
-            "old_prompt": current_prompt,
-            "new_prompt": new_prompt,
-            "error": error,
-        })
-
-        if on_retry:
-            on_retry(current_prompt, new_prompt, error)
-
-        if on_status:
-            on_status(f"retry {attempt+1}: แก้ prompt แล้วลองใหม่")
-
-        current_prompt = new_prompt
         attempt += 1
+
+        # transient → retry กับ backoff (ไม่แก้ prompt)
+        if category == "transient":
+            time.sleep(retry_delay * attempt)
+            retry_history.append({
+                "attempt": attempt,
+                "old_prompt": current_prompt,
+                "new_prompt": current_prompt,
+                "error": error,
+                "strategy": "transient_retry",
+            })
+            if on_retry:
+                on_retry(current_prompt, current_prompt, error)
+            if on_status:
+                on_status(f"retry {attempt}: server busy รอแล้วลองใหม่")
+            continue
+
+        # content_policy → retry 1-2 ส่งเดิม, retry สุดท้ายแก้ prompt
+        if attempt < max_retries:
+            # retry แรกๆ — ส่ง request เดิม (content filter เป็น flaky)
+            time.sleep(retry_delay)
+            retry_history.append({
+                "attempt": attempt,
+                "old_prompt": current_prompt,
+                "new_prompt": current_prompt,
+                "error": error,
+                "strategy": "flaky_retry",
+            })
+            if on_retry:
+                on_retry(current_prompt, current_prompt, error)
+            if on_status:
+                on_status(f"retry {attempt}: content filter รอแล้วลองใหม่")
+            continue
+
+        # retry สุดท้าย — ลองแก้ prompt ด้วย LLM (กรณีลิขสิทธิ์)
+        if llm is not None:
+            new_prompt = _rewrite_prompt_with_llm(
+                current_prompt, error, "video", llm, retry_model,
+            )
+            if new_prompt:
+                retry_history.append({
+                    "attempt": attempt,
+                    "old_prompt": current_prompt,
+                    "new_prompt": new_prompt,
+                    "error": error,
+                    "strategy": "prompt_rewrite",
+                })
+                if on_retry:
+                    on_retry(current_prompt, new_prompt, error)
+                if on_status:
+                    on_status(f"retry {attempt}: แก้ prompt แล้วลองใหม่")
+                current_prompt = new_prompt
+                continue
+
+        # LLM แก้ไม่ได้ หรือไม่มี LLM → คืน error
+        result["retry_history"] = retry_history
+        result["retry_count"] = attempt - 1
+        result["original_prompt"] = prompt
+        return result
 
 
 # ---------------------------------------------------------------------------
