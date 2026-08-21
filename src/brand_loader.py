@@ -268,7 +268,7 @@ def _auto_migrate_if_needed(brand_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def load_product_profile(product_id: str) -> dict[str, Any]:
-    """อ่าน data/{product_id}/product_profile.json — คืน {} ถ้าไม่มี.
+    """อ่าน cache/{product_id}/product_profile.json — คืน {} ถ้าไม่มี.
 
     Public API สำหรับดึง product profile ดิบ (ก่อน merge กับแบรนด์).
     ใช้เมื่อต้องการเห็น profile เฉพาะสินค้าโดยไม่รวมของแบรนด์
@@ -278,12 +278,15 @@ def load_product_profile(product_id: str) -> dict[str, Any]:
     use_cases, price_tier, tone_adjustment, visual_override).
     กฎรวม: สินค้ามีฟิลด์ไหน → ใช้ของสินค้า; ไม่มี → ใช้ของแบรนด์
 
-    ค้นหาจาก cwd/data ก่อน (สำหรับ test) แล้ว fallback ไป project_root/data
+    ค้นหาจาก cwd/cache ก่อน (สำหรับ test) แล้ว fallback ไป project_root/cache
+    รวมถึง data/ เดิมเพื่อ backward compat
     """
     if not product_id:
         return {}
-    # ค้นจาก cwd ก่อน (test เปลี่ยน cwd ไป tmp dir) แล้ว fallback ไป project root
+    # ค้นจาก cwd/cache ก่อน แล้ว fallback ไป project root/cache และ data/
     candidates = [
+        Path.cwd() / "cache" / product_id / "product_profile.json",
+        Path(__file__).resolve().parent.parent / "cache" / product_id / "product_profile.json",
         Path.cwd() / "data" / product_id / "product_profile.json",
         Path(__file__).resolve().parent.parent / "data" / product_id / "product_profile.json",
     ]

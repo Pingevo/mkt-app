@@ -289,7 +289,7 @@ def _make_brand_with_audience(brand_dir: Path, age: str = "30-45", role: str = "
 
 
 def _make_product_profile(product_dir: Path, profile: dict):
-    """Helper — สร้าง data/{product}/product_profile.json."""
+    """Helper — สร้าง cache/{product}/product_profile.json."""
     product_dir.mkdir(parents=True, exist_ok=True)
     (product_dir / "product_profile.json").write_text(
         json.dumps(profile, ensure_ascii=False), encoding="utf-8")
@@ -305,7 +305,7 @@ def test_load_brand_reference_with_product_profile_overrides_audience():
         brand_dir.mkdir()
         _make_brand_with_audience(brand_dir, age="30-45", role="ผู้ปกครอง")
         # product_profile ทับ audience
-        _make_product_profile(tmp / "data" / "K9", {
+        _make_product_profile(tmp / "cache" / "K9", {
             "audience": {
                 "primary": {"age": "35-50", "role": "ผู้ปกครองรายได้สูง"},
                 "end_user": {"age": "10-15"},
@@ -359,7 +359,7 @@ def test_load_brand_reference_with_product_profile_adds_positioning():
         brand_dir = tmp / "brand"
         brand_dir.mkdir()
         _make_brand_with_audience(brand_dir)
-        _make_product_profile(tmp / "data" / "K9", {
+        _make_product_profile(tmp / "cache" / "K9", {
             "competitors": ["Apple Watch SE Kids"],
             "differentiators": ["กล้อง 5MP", "IP68"],
             "use_cases": ["ติดตามลูก"],
@@ -392,7 +392,7 @@ def test_load_brand_rules_with_product_tone_adjustment():
             "personality": "เหมือนพ่อแม่",
             "tone_description": "อบอุ่น",
         }, ensure_ascii=False), encoding="utf-8")
-        _make_product_profile(tmp / "data" / "K9", {
+        _make_product_profile(tmp / "cache" / "K9", {
             "tone_adjustment": "พรีเมียม มั่นใจ จริงจังกว่า",
         })
 
@@ -421,7 +421,7 @@ def test_load_brand_visual_with_product_visual_override():
             "keywords": ["warm", "family"],
             "image_style": {"tone": "อบอุ่น", "product_shot": "สะอาด"},
         }, ensure_ascii=False), encoding="utf-8")
-        _make_product_profile(tmp / "data" / "K9", {
+        _make_product_profile(tmp / "cache" / "K9", {
             "visual_override": {
                 "image_style": {"tone": "ดำ-ทอง พรีเมียม"},
                 "keywords": ["premium", "elegant"],

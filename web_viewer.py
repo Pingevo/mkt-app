@@ -27,7 +27,7 @@ from src.orchestrator import Orchestrator
 from src.data_loader import detect_data_files
 from src.file_loader import load_file
 from src.config_loader import get_env
-from src.brand_loader import load_brand_visual
+from src.brand_loader import load_brand_visual, load_product_profile
 from src import media_gen
 from src import product_db
 from src import content_history
@@ -164,6 +164,11 @@ def _sse(event_type: str, text: str, **extra) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _skip_data_dir_file(f: Path) -> bool:
+    """สกิปไฟล์ระบบ/ซ่อนในโฟลเดอร์ data/{product}/ — ไม่นับเป็น raw file ของ user."""
+    return not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store" or f.name == "product_profile.json"
+
+
 def _scan_data_folders() -> list[dict[str, Any]]:
     """List product folders in data/ with summary info.
 
@@ -186,7 +191,7 @@ def _scan_data_folders() -> list[dict[str, Any]]:
         raw_count = 0
         thumbnail = None
         for f in item.rglob("*"):
-            if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store":
+            if _skip_data_dir_file(f):
                 continue
             raw_count += 1
             if thumbnail is None and f.suffix.lower() in image_exts:
@@ -199,7 +204,7 @@ def _scan_data_folders() -> list[dict[str, Any]]:
             cfg = _load_config()
             has_usable = False
             for f in item.rglob("*"):
-                if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store":
+                if _skip_data_dir_file(f):
                     continue
                 if _classify_file(f.name, cfg) is not None:
                     has_usable = True
@@ -215,7 +220,7 @@ def _scan_data_folders() -> list[dict[str, Any]]:
                 if f.is_file() and not f.name.startswith(".") and f.name != ".DS_Store":
                     deliverable_count += 1
         # ตรวจว่ามี product_profile.json ไหม — สำหรับ sidebar indicator
-        has_product_profile = (item / "product_profile.json").exists()
+        has_product_profile = (CACHE_DIR / item.name / "product_profile.json").exists()
         folders.append({
             "name": item.name,
             "path": item.name,
@@ -1045,7 +1050,7 @@ def api_folder_files(folder: str) -> JSONResponse:
     files = []
     # User files from data/ — ไฟล์ระบบไม่แสดง
     for f in sorted(product_dir.rglob("*")):
-        if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store" or f.name == "product_profile.json":
+        if _skip_data_dir_file(f):
             continue
         abs_path = str(f)
         db_entry = db_files.get(abs_path, {})
@@ -1067,23 +1072,6 @@ def api_folder_files(folder: str) -> JSONResponse:
             "size": f.stat().st_size,
             "error": db_entry.get("error"),
         })
-    # Deliverables from cache/ (เอกสารสเปคจาก product_spec agent — สำหรับ user)
-    # กรอง product.json ออก — เป็น DB ของระบบ ไม่ใช่ deliverable ที่ user ต้องเห็น
-    cache_dir = CACHE_DIR / folder
-    if cache_dir.exists() and cache_dir.is_dir():
-        for f in sorted(cache_dir.iterdir()):
-            if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store":
-                continue
-            if f.name == "product.json":
-                continue  # DB ของระบบ — ไม่โชว์ให้ user
-            files.append({
-                "name": f.name,
-                "path": "cache/" + f.name,
-                "type": "deliverable",     # ไม่ใช่ raw data — เป็นเอกสารที่ user สั่งทำ
-                "status": "deliverable",
-                "is_ready": True,          # backward compatible
-                "size": f.stat().st_size,
-            })
     return JSONResponse(files)
 
 
@@ -1437,26 +1425,18 @@ async def api_brand_migrate(request: Request) -> JSONResponse:
 
 @app.get("/api/product_profile/{folder}")
 def api_product_profile_get(folder: str) -> JSONResponse:
-    """อ่าน data/{folder}/product_profile.json — คืน {} ถ้าไม่มี."""
-    import json as _json
-    path = DATA_DIR / folder / "product_profile.json"
-    if path.exists():
-        try:
-            return JSONResponse(_json.loads(path.read_text(encoding="utf-8")))
-        except (_json.JSONDecodeError, OSError):
-            pass
-    return JSONResponse({})
+    """อ่าน product_profile.json จาก cache/ โดยใช้ brand_loader (fallback ไป data/ เดิมอัตโนมัติ)."""
+    return JSONResponse(load_product_profile(folder))
 
 
 @app.post("/api/product_profile_save/{folder}")
 async def api_product_profile_save(folder: str, request: Request) -> JSONResponse:
-    """บันทึก product_profile.json — รับ dict จาก body."""
+    """บันทึก product_profile.json ลง cache/ — รับ dict จาก body."""
     import json as _json
     body = await request.json()
-    product_dir = DATA_DIR / folder
-    if not product_dir.exists():
-        return JSONResponse({"ok": False, "error": f"ไม่พบสินค้า {folder}"}, status_code=404)
-    path = product_dir / "product_profile.json"
+    profile_dir = CACHE_DIR / folder
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    path = profile_dir / "product_profile.json"
     path.write_text(_json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
     return JSONResponse({"ok": True, "saved": str(path.relative_to(PROJECT_ROOT))})
 
@@ -2332,18 +2312,6 @@ def _read_folder(folder: str) -> tuple[list[str], list[str], dict[str, str]]:
     return raw_contents, image_paths, ready_contents
 
 
-def _read_deliverable(folder: str, name_keyword: str) -> str:
-    """อ่าน deliverable จาก cache/{folder}/ ที่ชื่อมี keyword นี้ — คืน "" ถ้าไม่มี."""
-    cache_dir = CACHE_DIR / folder
-    if not cache_dir.exists():
-        return ""
-    for f in sorted(cache_dir.iterdir()):
-        if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store":
-            continue
-        if name_keyword in f.name.lower():
-            return f.read_text(encoding="utf-8")
-    return ""
-
 
 def _check_injection(text: str) -> str | None:
     """ตรวจ prompt injection ในข้อความ — คืน error message ถ้าพบ หรือ None ถ้าปลอดภัย."""
@@ -2407,14 +2375,6 @@ def _make_run_id() -> str:
     return f"{datetime.now().strftime('%H%M%S_%f')}_{uuid.uuid4().hex}"
 
 
-def _write_to_cache(folder: str, name: str, content: str) -> Path:
-    """เขียน deliverable ลง cache/{folder}/{name}.md เพื่อ downstream agent อ่านต่อ."""
-    cache_dir = CACHE_DIR / folder
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / f"{name}.md"
-    path.write_text(content, encoding="utf-8")
-    return path
-
 
 def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                       image_paths: list[str], ready_contents: dict[str, str],
@@ -2458,40 +2418,31 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
         orch.results["competitor_analysis"] = result
         if save_output:
             saved = orch.save_result("competitor_analysis", str(output_dir))
-            _write_to_cache(folder, "competitor_analysis", result)
             return [(result, str(saved.get("competitor_analysis", "")))]
         return [(result, None)]
 
     elif agent_key == "campaign_strategy":
         # ใช้ competitor_analysis จากผลลัพธ์ก่อนหน้าใน flow ถ้ามี
-        # fallback: อ่านจาก cache/ (legacy) ถ้าไม่มีใน context แต่ user เลือก use_competitor
         if "competitor_analysis" in context:
             analysis_text = context["competitor_analysis"]
-        elif context.get("use_competitor"):
-            analysis_text = _read_deliverable(folder, "competitor")
         else:
             analysis_text = ""
         result = orch.run_campaign_strategy("", analysis_text, llm=llm, quick_brief=quick_brief)
         orch.results["campaign_strategy"] = result
         if save_output:
             saved = orch.save_result("campaign_strategy", str(output_dir))
-            _write_to_cache(folder, "campaign_strategy", result)
             return [(result, str(saved.get("campaign_strategy", "")))]
         return [(result, None)]
 
     elif agent_key == "content_creator":
       with _content_creator_lock:
-        # ใช้ผลลัพธ์ก่อนหน้าใน flow ถ้ามี หรืออ่านจาก cache/ (legacy)
+        # ใช้ผลลัพธ์ก่อนหน้าใน flow ถ้ามี
         if "competitor_analysis" in context:
             analysis_text = context["competitor_analysis"]
-        elif context.get("use_competitor"):
-            analysis_text = _read_deliverable(folder, "competitor")
         else:
             analysis_text = ""
         if "campaign_strategy" in context:
             campaign_text = context["campaign_strategy"]
-        elif context.get("use_campaign"):
-            campaign_text = _read_deliverable(folder, "campaign")
         else:
             campaign_text = ""
 
@@ -4420,10 +4371,10 @@ function loadFolderList() {
         html += progressHtml;
         html += '</div>';
         if (!(multiSelectMode && canUseAgent)) {
-          if (status === 'ready' || status === 'stale') {
-            html += '<span class="folder-manage-btn" onclick="openFolderManage(\'' + safePath + '\', this.parentElement.dataset.status)" title="จัดการไฟล์/สินค้า">⚙</span>';
+          if (isProcessing) {
+            html += '<span class="folder-manage-btn" style="opacity:0.3;cursor:not-allowed" title="กำลังประมวลผลข้อมูล — รอให้เสร็จก่อน">⚙</span>';
           } else {
-            html += '<span class="folder-manage-btn" style="opacity:0.3;cursor:not-allowed" title="รอประมวลผลข้อมูล/ตั้งค่าสินค้าเสร็จก่อน">⚙</span>';
+            html += '<span class="folder-manage-btn" onclick="openFolderManage(\'' + safePath + '\', this.parentElement.dataset.status)" title="จัดการไฟล์/สินค้า">⚙</span>';
           }
         }
         html += '</div>';
@@ -4625,6 +4576,7 @@ function deleteFolder(folder) {
 }
 
 let _uploadQueue = [];
+let _filesToDelete = [];  // ไฟล์ที่ทำเครื่องหมายจะลบใน modal — ลบจริงตอนกด "บันทึก"
 let _editingFolder = null;
 let _supportedFormats = null;
 
@@ -4668,6 +4620,7 @@ function _makeProductNameFromFile(file) {
 
 function openUploadModal() {
   _uploadQueue = [];
+  _filesToDelete = [];
   _editingFolder = null;
   _ppFolder = '';
   _productProfileOriginal = null;
@@ -4704,6 +4657,7 @@ function openUploadModal() {
 
 function openUploadModalForFolder(folder, status) {
   _uploadQueue = [];
+  _filesToDelete = [];
   _editingFolder = folder;
   _ppFolder = '';
   _productProfileOriginal = null;
@@ -4721,11 +4675,10 @@ function openUploadModalForFolder(folder, status) {
   document.getElementById('upload-modal-status').textContent = '';
   // Title is fixed in manage mode — no fetch needed
   document.getElementById('upload-modal-title').textContent = 'จัดการสินค้า: ' + folder;
-  // Show existing files with delete buttons + product profile section only when data is usable
+  // Show existing files with delete buttons + product profile section
   loadExistingFilesInModal(folder);
-  if (status === 'ready' || status === 'stale') {
-    loadProductProfileForManage(folder);
-  }
+  // โหลด product profile เสมอเมื่อเป็นโหมดจัดการ — ถ้ายังไม่เคย ingest จะได้ form ว่าง
+  loadProductProfileForManage(folder);
   // Show delete product button
   document.getElementById('upload-delete-product-btn').style.display = 'block';
   document.getElementById('upload-submit-btn').textContent = 'บันทึก';
@@ -4737,8 +4690,21 @@ function openUploadModalForFolder(folder, status) {
 function loadExistingFilesInModal(folder) {
   const el = document.getElementById('existing-files-modal');
   fetch('/api/folder_files/' + encodeURIComponent(folder)).then(r => r.json()).then(files => {
-    if (!files.length) {
-      el.innerHTML = '<div style="font-size:12px;color:#555;padding:8px 0">ยังไม่มีไฟล์ — เพิ่มไฟล์ด้านบนแล้วกดอัปโหลด</div>';
+    // กรองไฟล์ที่ทำเครื่องหมายจะลบออกก่อนแสดง
+    const visibleFiles = files.filter(f => !_filesToDelete.some(p => p === f.path));
+    if (!visibleFiles.length && _uploadQueue.length === 0) {
+      // ไม่มีไฟล์ใน disk และไม่มีไฟล์ในคิว → แจ้งเตือน
+      const isEmptyProduct = _editingFolder === folder;
+      const msg = isEmptyProduct
+        ? '⚠ ไม่พบไฟล์ข้อมูลสินค้า'
+        : 'ยังไม่มีไฟล์ — เพิ่มไฟล์ด้านบนแล้วกดอัปโหลด';
+      const color = isEmptyProduct ? '#fbbf24' : '#555';
+      el.innerHTML = '<div style="font-size:12px;color:' + color + ';padding:8px 0">' + msg + '</div>';
+      return;
+    }
+    if (!visibleFiles.length && _uploadQueue.length > 0) {
+      // มีไฟล์ในคิวแต่ยังไม่อัปโหลด → ไม่โชว์ warning
+      el.innerHTML = '';
       return;
     }
     // สถานะ/ความคืบหน้าการประมวลผล (แสดงเฉพาะตอนกำลังทำงาน)
@@ -4752,15 +4718,22 @@ function loadExistingFilesInModal(folder) {
       'pending':     {icon: '⏳', color: '#888',    label: 'รอประมวลผล'},
       'deliverable': {icon: '📋', color: '#7dd3fc', label: 'เอกสาร'},
     };
-    for (const f of files) {
+    for (const f of visibleFiles) {
       const si = statusIcons[f.status] || statusIcons['pending'];
       const safePath = f.path.replace(/'/g, "\\'");
       const typeLabel = f.type ? ' <span style="font-size:10px;color:#666">(' + f.type + ')</span>' : '';
       const errorInfo = f.error ? ' <span style="font-size:10px;color:#f87171">' + escapeHtml(f.error) + '</span>' : '';
-      html += '<div class="upload-queue-item">';
+      const isMarkedDelete = _filesToDelete.some(p => p === f.path);
+      const rowStyle = isMarkedDelete ? 'opacity:0.4;text-decoration:line-through' : '';
+      html += '<div class="upload-queue-item" style="' + rowStyle + '">';
       html += '<span>' + si.icon + '</span><span class="upload-queue-name">' + escapeHtml(f.name) + typeLabel + '</span>';
       html += '<span style="font-size:10px;color:' + si.color + '">' + si.label + '</span>' + errorInfo;
-      html += '<span class="upload-queue-del" onclick="deleteFileInModal(\'' + folder.replace(/'/g,"\\'") + '\',\'' + safePath + '\')">×</span>';
+      if (isMarkedDelete) {
+        html += '<span style="font-size:10px;color:#f87171">จะลบ</span>';
+        html += '<span class="upload-queue-del" style="color:#4ade80" onclick="undoDeleteFileInModal(\'' + safePath + '\')" title="ยกเลิกการลบ">↩</span>';
+      } else {
+        html += '<span class="upload-queue-del" onclick="deleteFileInModal(\'' + folder.replace(/'/g,"\\'") + '\',\'' + safePath + '\')">×</span>';
+      }
       html += '</div>';
     }
     el.innerHTML = html;
@@ -4852,17 +4825,16 @@ function startIngestion(folder) {
 }
 
 function deleteFileInModal(folder, filepath) {
-  if (!confirm('ลบไฟล์ ' + filepath + ' ?')) return;
-  fetch('/api/folder_file/' + encodeURIComponent(folder), {
-    method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ folder: folder, filepath: filepath }),
-  }).then(r => r.json()).then(data => {
-    if (data.ok) {
-      loadExistingFilesInModal(folder);
-      loadFolderList();
-    }
-  });
+  // ไม่ลบจริง — แค่ทำเครื่องหมาย ลบจริงตอนกด "บันทึก"
+  if (!_filesToDelete.some(p => p === filepath)) {
+    _filesToDelete.push(filepath);
+  }
+  loadExistingFilesInModal(folder);
+}
+
+function undoDeleteFileInModal(filepath) {
+  _filesToDelete = _filesToDelete.filter(p => p !== filepath);
+  if (_editingFolder) loadExistingFilesInModal(_editingFolder);
 }
 
 function deleteProductInModal() {
@@ -4907,6 +4879,8 @@ function addFilesToQueueModal() {
   }
   input.value = '';
   renderUploadQueueModal();
+  // refresh existing files section เพื่อซ่อน warning "ไม่พบไฟล์" ถ้ามีไฟล์ในคิวแล้ว
+  if (_editingFolder) loadExistingFilesInModal(_editingFolder);
   // Prefill product name from the first file name when adding a new product
   if (!_editingFolder && _uploadQueue.length) {
     const nameInput = document.getElementById('upload-product-name-modal');
@@ -4935,6 +4909,7 @@ function renderUploadQueueModal() {
 function removeFromQueue(idx) {
   _uploadQueue.splice(idx, 1);
   renderUploadQueueModal();
+  if (_editingFolder) loadExistingFilesInModal(_editingFolder);
 }
 
 function uploadFiles() {
@@ -4951,15 +4926,52 @@ function uploadFiles() {
   const renamed = isEditing && _editingFolder !== name;
 
   // Step 1: rename first (if name changed) — do this alone, no upload mixed in
+  const doDeleteMarked = () => {
+    if (_filesToDelete.length === 0) { doUpload(); return; }
+    status.className = 'upload-status'; status.textContent = 'กำลังลบไฟล์ที่ทำเครื่องหมาย...';
+    const deleteNext = (i) => {
+      if (i >= _filesToDelete.length) {
+        _filesToDelete = [];
+        doUpload();
+        return;
+      }
+      fetch('/api/folder_file/' + encodeURIComponent(name), {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder: name, filepath: _filesToDelete[i] }),
+      }).then(r => r.json()).then(() => deleteNext(i + 1)).catch(() => deleteNext(i + 1));
+    };
+    deleteNext(0);
+  };
+
   const doUpload = () => {
     if (_uploadQueue.length === 0) {
-      // ไม่มีไฟล์ใหม่ใน queue → บันทึก product profile แล้วปิด modal
-      _editingFolder = name;
-      _uploadModalOriginal = _getUploadModalData();
-      status.className = 'upload-status ok';
-      status.textContent = 'บันทึกเรียบร้อยแล้ว';
-      loadFolderList();
-      setTimeout(() => closeUploadModal(true), 800);
+      // ไม่มีไฟล์ใหม่ใน queue
+      if (_filesToDelete.length > 0) {
+        // มีแค่การลบ → trigger re-ingest เพื่ออัปเดต cache
+        status.className = 'upload-status'; status.textContent = 'กำลังอัปเดตข้อมูล...';
+        fetch('/api/ingest/' + encodeURIComponent(name), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json()).then(() => {
+          _filesToDelete = [];
+          _editingFolder = name;
+          _uploadModalOriginal = _getUploadModalData();
+          status.className = 'upload-status ok';
+          status.textContent = 'บันทึกเรียบร้อยแล้ว';
+          loadFolderList();
+          startSidebarPolling();
+          setTimeout(() => closeUploadModal(true), 1200);
+        }).catch(e => {
+          status.className = 'upload-status err';
+          status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+        });
+      } else {
+        // ไม่มีลบ ไม่มีอัปโหลด → บันทึก product profile แล้วปิด modal
+        _editingFolder = name;
+        _uploadModalOriginal = _getUploadModalData();
+        status.className = 'upload-status ok';
+        status.textContent = 'บันทึกเรียบร้อยแล้ว';
+        loadFolderList();
+        setTimeout(() => closeUploadModal(true), 800);
+      }
       return;
     }
     const formData = new FormData();
@@ -5000,7 +5012,7 @@ function uploadFiles() {
       }).then(r => r.json()).then(data => {
         if (data.ok) {
           _editingFolder = name;
-          doUpload();
+          doDeleteMarked();
         } else {
           status.className = 'upload-status err';
           status.textContent = data.error || 'เปลี่ยนชื่อไม่สำเร็จ';
@@ -5010,7 +5022,7 @@ function uploadFiles() {
         status.textContent = 'เปลี่ยนชื่อไม่สำเร็จ: ' + e.message;
       });
     } else {
-      doUpload();
+      doDeleteMarked();
     }
   };
 
@@ -5486,7 +5498,7 @@ function _getUploadModalData() {
   const nameInput = document.getElementById('upload-product-name-modal');
   const name = nameInput ? String(nameInput.value || '').trim() : '';
   const queue = _uploadQueue.map(f => ({ name: f.name, size: f.size }));
-  return { productName: name, queue: queue };
+  return { productName: name, queue: queue, filesToDelete: _filesToDelete.slice() };
 }
 
 function _isUploadModalDirty() {

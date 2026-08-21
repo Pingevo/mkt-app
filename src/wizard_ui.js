@@ -285,7 +285,7 @@
       autoCount: 2,
       products: [],
       quickBrief: '',
-      agents: normalizeAgents(['content_creator']),
+      agents: [],
       options: {
         platform: ['facebook', 'tiktok'],
         count: 1,

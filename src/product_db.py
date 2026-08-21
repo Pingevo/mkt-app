@@ -4,11 +4,11 @@
 แยกออกจาก product_spec agent (ที่ทำ deliverable ให้ user)
 
 โครงสร้างไฟล์:
-  data/{product_id}/                — raw files ที่ user upload + product_profile.json
+  data/{product_id}/                — raw files ที่ user upload เท่านั้น
   cache/{product_id}/product.json   — DB ของระบบ (status, raw_text, image_descriptions, ฯลฯ)
-  cache/{product_id}/               — deliverables ของ product_spec agent (เอกสารสเปค)
+  cache/{product_id}/product_profile.json — ข้อมูลตำแหน่งสินค้าจากระบบหรือ user
 
-data/ มีไฟล์ user + product_profile.json (ระบบสร้าง/ผู้ใช้แก้ไข) — ไฟล์ระบบอื่นๆ อยู่ใน cache/
+data/ มีแค่ไฟล์ดิบจาก user — ไฟล์ระบบทั้งหมดอยู่ใน cache/
 อนาคต: เปลี่ยนเป็น MongoDB ได้โดยแก้แค่ไฟล์นี้
 """
 
@@ -76,7 +76,8 @@ def _empty_record(product_id: str) -> dict[str, Any]:
         "ingest_progress": None,      # {step, total, message, eta_seconds}
         "files": [],                  # [{name, path, type, status, hash, size, ingested_at, error}]
         "fields": {},                 # deprecated — ไม่ใช้แล้ว (วิธีสากล: agent ดึง raw text เอง)
-        "raw_text": "",               # text ที่ parse ได้จาก text files (รวมกัน)
+        "raw_text": "",               # computed from text_extracts (backward compat: สินค้าเดิมอาจเก็บตรงนี้)
+        "text_extracts": [],          # [{file, text}] — text รายไฟล์ (เหมือน video_transcripts)
         "image_descriptions": [],     # [{file, description}] — LLM บรรยายรูป
         "video_transcripts": [],      # [{file, transcript}] — จาก frames
         "audio_transcripts": [],      # [{file, transcript}] — จาก whisper

@@ -307,7 +307,7 @@ def _generate_product_profile(product_id: str, llm=None) -> None:
     try:
         suggested = analyze_product_positioning(spec_text, client)
         if suggested:
-            profile_dir = _project_root() / "data" / product_id
+            profile_dir = _project_root() / "cache" / product_id
             profile_dir.mkdir(parents=True, exist_ok=True)
             profile_path = profile_dir / "product_profile.json"
             # สร้างเฉพาะครั้งแรก — ไม่ทับของ user ทีแก้ไว้ใน modal
@@ -440,10 +440,25 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
     all_extracted: list[dict[str, Any]] = []
     errors: list[str] = []
 
-    # เคลียร์ image_descriptions เดิมก่อน re-ingest (กัน duplicate)
+    # เคลียร์ entries ของไฟล์ที่จะ re-ingest + ไฟล์ที่ถูกลบจาก disk
+    # - to_ingest_names: ไฟล์ที่จะ re-ingest (hash เปลี่ยนหรือไฟล์ใหม่) → ลบ entry เดิมก่อนเพิ่มใหม่
+    # - all_file_names: ไฟล์ทั้งหมดที่อยู่ใน disk ตอนนี้ → เก็บไว้
+    # - ไฟล์ที่ไม่อยู่ใน all_file_names = ถูกลบ → ลบ entry ออก
+    to_ingest_names = {f["name"] for f in to_ingest}
+    all_file_names = {f["name"] for f in files}  # ไฟล์ทั้งหมดใน disk (usable + unsupported)
     record = product_db.load(product_id)
-    record["image_descriptions"] = []
-    record["raw_text"] = ""
+    # ลบ entries ของไฟล์ที่ re-ingest (จะเพิ่มใหม่ในลูป) และไฟล์ที่ถูกลบ (ไม่อยู่ใน disk แล้ว)
+    deleted_names = {d.get("file") for d in record.get("text_extracts", []) + record.get("image_descriptions", []) + record.get("video_transcripts", []) + record.get("audio_transcripts", [])} - all_file_names
+    remove_names = to_ingest_names | deleted_names
+
+    def _filter_by_file(entries):
+        """เก็บเฉพาะ entries ที่ชื่อไฟล์ไม่อยู่ใน remove_names."""
+        return [d for d in entries if d.get("file") not in remove_names]
+
+    record["image_descriptions"] = _filter_by_file(record.get("image_descriptions", []))
+    record["text_extracts"] = _filter_by_file(record.get("text_extracts", []))
+    record["video_transcripts"] = _filter_by_file(record.get("video_transcripts", []))
+    record["audio_transcripts"] = _filter_by_file(record.get("audio_transcripts", []))
     product_db.save(product_id, record)
 
     for f in to_ingest:
@@ -523,10 +538,12 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
                     "transcript": extracted_text,
                 })
             elif ftype == "text":
-                # text รวมเก็บใน raw_text
-                record = product_db.load(product_id)
-                record["raw_text"] = (record.get("raw_text", "") + "\n\n" + extracted_text).strip()
-                product_db.save(product_id, record)
+                # text เก็บเป็นรายไฟล์ใน text_extracts (เหมือน video_transcripts)
+                # raw_text จะถูก rebuild จาก text_extracts ทั้งหมดหลังลูป
+                product_db.append_extracted(product_id, "text_extracts", {
+                    "file": f["name"],
+                    "text": extracted_text,
+                })
 
                 # รูปที่ดึงจาก document (xlsx/docx) → เก็บ path ใน image_descriptions
                 global _extracted_images
@@ -563,6 +580,12 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
 
     # 4. สร้าง metadata summary (LLM สรุปสั้นๆ ครั้งเดียว — สำหรับ automate discovery)
     _generate_metadata_summary(product_id, llm)
+
+    # 4.5 Rebuild raw_text จาก text_extracts ทั้งหมด (รวมของเดิมที่ไม่ได้ re-ingest)
+    record = product_db.load(product_id)
+    text_parts = [t.get("text", "") for t in record.get("text_extracts", []) if t.get("text")]
+    record["raw_text"] = "\n\n".join(text_parts).strip()
+    product_db.save(product_id, record)
 
     # 5. ตั้งสถานะ — ถ้าไม่มีไฟล์ ingested สักไฟล์ → no_usable_data ไม่ใช่ ready
     record = product_db.load(product_id)
