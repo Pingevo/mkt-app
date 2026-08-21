@@ -3925,6 +3925,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .result-modal-body { color: #ccc; font-size: 14px; line-height: 1.6; }
   .result-modal-body a { color: #7c8aff; text-decoration: none; }
   .result-modal-body a:hover { text-decoration: underline; }
+  /* Image lightbox — คลิกที่รูปในผลลัพธ์เพื่อดูภาพใหญ่ขึ้น */
+  .img-lightbox-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 11000; display: none; align-items: center; justify-content: center; padding: 24px; }
+  .img-lightbox-overlay.visible { display: flex; }
+  .img-lightbox-overlay img { max-width: 95vw; max-height: 92vh; object-fit: contain; border-radius: 8px; }
+  .img-lightbox-close { position: fixed; top: 16px; right: 20px; background: none; border: 1px solid #2a2d3a; color: #ccc; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 14px; }
+  .img-lightbox-close:hover { border-color: #7c8aff; color: #7c8aff; }
+  .result-modal-body img { cursor: zoom-in; }
   .media-viewer { background: #1c1e2a; border: 1px solid #2a2d3a; border-radius: 12px; max-width: 90vw; max-height: 90vh; overflow: auto; padding: 16px; }
   .media-viewer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; color: #e0e0e0; }
   .media-viewer-header button { background: none; border: none; color: #888; font-size: 18px; cursor: pointer; }
@@ -5856,7 +5863,7 @@ function editAsset(id) {
 
     // preview
     if (a.type === 'image') {
-      h += '<img src="/api/assets/file/' + a.id + '" style="width:100%;max-height:300px;object-fit:contain;border-radius:8px;background:#0f1117;margin-bottom:12px">';
+      h += '<img src="/api/assets/file/' + a.id + '" onclick="openImageLightbox(this.src)" style="width:100%;max-height:300px;object-fit:contain;border-radius:8px;background:#0f1117;margin-bottom:12px;cursor:zoom-in">';
     }
 
     h += '<div style="font-size:13px;color:#888;margin-bottom:4px">ไฟล์: ' + escapeHtml(a.file) + ' · ' + escapeHtml(_typeTh(a.type)) + '</div>';
@@ -9486,6 +9493,42 @@ function loadCredits() {
     <div class="result-modal-body" id="result-modal-body"></div>
   </div>
 </div>
+<div class="img-lightbox-overlay" id="img-lightbox-overlay" onclick="closeImageLightbox(event)">
+  <button class="img-lightbox-close" onclick="event.stopPropagation(); closeImageLightbox()">✕ ปิด</button>
+  <img src="" alt="">
+</div>
+<script>
+// Image lightbox — คลิกที่รูปในผลลัพธ์/asset detail เพื่อดูภาพใหญ่ขึ้น
+function openImageLightbox(url) {
+  const ov = document.getElementById('img-lightbox-overlay');
+  if (!ov) return;
+  ov.querySelector('img').src = url;
+  ov.classList.add('visible');
+}
+function closeImageLightbox(event) {
+  if (event && event.target && event.target.tagName === 'IMG') return;  // คลิกที่รูปไม่ปิด
+  document.getElementById('img-lightbox-overlay').classList.remove('visible');
+}
+// event delegation บน result-modal-body โดยตรง (result-modal มี stopPropagation กัน bubble ถึง document)
+// รูปใน result modal ทุกภาพ (platform preview, ไฟล์เดี่ยว) คลิกได้เลย
+function _attachImgLightbox(el) {
+  if (!el || el._lightboxBound) return;
+  el._lightboxBound = true;
+  el.addEventListener('click', function(e) {
+    const img = e.target.closest('img');
+    if (!img || !img.src) return;
+    e.stopPropagation();
+    openImageLightbox(img.src);
+  });
+}
+_attachImgLightbox(document.getElementById('result-modal-body'));
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    const ov = document.getElementById('img-lightbox-overlay');
+    if (ov && ov.classList.contains('visible')) ov.classList.remove('visible');
+  }
+});
+</script>
 <script src="/wizard_ui.js"></script>
 <div class="settings-modal-overlay" id="schedule-overlay">
   <div class="settings-modal" style="width:520px">
