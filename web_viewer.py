@@ -2812,11 +2812,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
     """
     body = await request.json()
     flows = body.get("flows", [])
-    quick_brief = body.get("quick_brief", "")
-
-    guard_err = _validate_quick_brief(quick_brief)
-    if guard_err:
-        return guard_err
+    global_quick_brief = body.get("quick_brief", "")
 
     if not flows:
         return JSONResponse({"error": "missing flows"})
@@ -2825,6 +2821,10 @@ async def api_run_flows(request: Request) -> StreamingResponse:
     for flow in flows:
         if not flow.get("folders") or not flow.get("agents"):
             return JSONResponse({"error": "แต่ละ flow ต้องมีสินค้าและ agent"})
+        flow_quick = flow.get("quick_brief", global_quick_brief)
+        guard_err = _validate_quick_brief(flow_quick)
+        if guard_err:
+            return guard_err
 
     global _cancel_requested
     _cancel_requested = False
@@ -2838,6 +2838,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
         def _flow_worker(flow_idx: int, flow: dict, output_dir: Path):
             from src.flow_runner import run_flow_steps, build_context_for_agent
             plan_idx = flow.get("index", flow_idx)
+            flow_quick_brief = flow.get("quick_brief", global_quick_brief)
 
             # ผูก LLM call ทั้งหมดใน thread นี้เข้ากับ flow_id
             flow_id = f"flow_{uuid.uuid4().hex[:8]}"
@@ -2900,7 +2901,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                         results = _run_single_agent(
                             agent_key, product, all_raw, all_images,
                             all_ready, orch, llm, output_dir,
-                            save_output=True, quick_brief=quick_brief,
+                            save_output=True, quick_brief=flow_quick_brief,
                             context=context, content_count=content_count,
                             auto_image=auto_image, auto_video=auto_video,
                             platforms=platforms, media_type=media_type,
@@ -4151,7 +4152,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
 
     <div class="flow-wizard" id="flow-wizard">
-      <div class="wizard-brief-box">
+      <div class="wizard-brief-box" style="display:none;">
         <label class="opt-label">คำสั่งเพิ่มเติม (ถ้าขัดแย้งกับค่าเริ่มต้น ให้ทำตามคำสั่งนี้แทน)</label>
         <textarea id="quick-brief-input" class="brief-box" placeholder="เช่น 'เน้นจุดขายกันน้ำ'" style="width:100%; background:#1c2030; border:1px solid #252a3a; border-radius:10px; padding:12px 16px; color:#e4e4e7; font-size:14px; resize:vertical; min-height:80px;"></textarea>
         <div id="quick-brief-conflict-banner" style="display:none;margin-top:8px"></div>
@@ -9084,7 +9085,7 @@ async function saveScheduleJob() {
     schedule_type: repeat ? 'recurring' : 'one_time',
     schedule: schedule,
     flow: flow,
-    quick_brief: (document.getElementById('quick-brief-input') || {}).value || ''
+    quick_brief: flow.quick_brief || ''
   };
   const res = await fetch('/api/schedule/save', {
     method: 'POST',

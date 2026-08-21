@@ -144,9 +144,9 @@
     }
 
     // Nav
-    html += '<div class="wizard-nav flow-box-nav">';
+    html += '<div class="wizard-nav flow-box-nav" style="align-items:center">';
     html += '<button class="btn btn-secondary" id="flow-back-' + idx + '" data-flow-idx="' + idx + '" onclick="wizardPrevStep(this.dataset.flowIdx)">← กลับ</button>';
-    html += '<div class="spacer"></div>';
+    html += '<input type="text" id="flow-quick-brief-' + idx + '" data-flow-idx="' + idx + '" value="' + escapeHtml(flow.quickBrief || '') + '" ' + (_isFlowActive(idx) ? 'disabled ' : '') + 'oninput="onWizardQuickBrief(parseInt(this.dataset.flowIdx))" placeholder="คำสั่งเพิ่มเติมสำหรับ flow นี้..." style="flex:1;min-width:0;background:#161922;border:1px solid #252a3a;border-radius:6px;padding:6px 10px;color:#e4e4e7;font-size:13px;margin:0 8px;">';
     html += '<button class="btn btn-secondary" id="flow-schedule-' + idx + '" data-flow-idx="' + idx + '" onclick="openScheduleModal(this.dataset.flowIdx)">📅 ตั้งเวลา</button>';
     html += '<button class="btn btn-primary" id="flow-next-' + idx + '" data-flow-idx="' + idx + '" onclick="wizardNextStep(this.dataset.flowIdx)">ถัดไป →</button>';
     html += '</div>';
@@ -284,6 +284,7 @@
       autoCombined: false,
       autoCount: 2,
       products: [],
+      quickBrief: '',
       agents: normalizeAgents(['content_creator']),
       options: {
         platform: ['facebook', 'tiktok'],
@@ -676,6 +677,19 @@
     renderStep3(idx);
   };
 
+  window.onWizardQuickBrief = function (idx) {
+    idx = parseInt(idx);
+    const flow = getCurrentFlow(idx);
+    if (!flow) return;
+    const el = document.getElementById('flow-quick-brief-' + idx);
+    if (el) flow.quickBrief = el.value;
+  };
+
+  window.setQuickBriefDisabled = function (idx, disabled) {
+    const el = document.getElementById('flow-quick-brief-' + idx);
+    if (el) el.disabled = disabled;
+  };
+
   // --- Step 4: Review ---
   function renderStep4(idx) {
     const el = document.getElementById('flow-review-content-' + idx);
@@ -737,6 +751,7 @@
       auto_combined: f.autoCombined,
       auto_count: f.autoCount,
       content_count: f.options.count * f.options.platform.length,
+      quick_brief: f.quickBrief || '',
       platforms: f.options.platform,
       media_type: f.options.media_type,
       media_when: f.options.media_when,
@@ -830,12 +845,14 @@
     abortController = new AbortController();
     showFlowRuns();
 
-    const quickBrief = (document.getElementById('quick-brief-input') || {}).value || '';
+    for (let i = 0; i < flows.length; i++) {
+      setQuickBriefDisabled(i, true);
+    }
 
     if (autoCount > 0) {
       await runAutoFlow(flows[0], 0);
     } else {
-      const payload = { quick_brief: quickBrief, flows: buildFlowsForBackend() };
+      const payload = { flows: buildFlowsForBackend() };
       await runAllFlows(payload);
     }
 
@@ -880,14 +897,14 @@
 
     abortController = new AbortController();
     showFlowRuns(idx);
+    setQuickBriefDisabled(idx, true);
 
     try {
-      const quickBrief = (document.getElementById('quick-brief-input') || {}).value || '';
       if (flow.isAuto) {
         await runAutoFlow(flow, idx);
       } else {
         const all = buildFlowsForBackend();
-        const payload = { quick_brief: quickBrief, flows: [all[idx]] };
+        const payload = { flows: [all[idx]] };
         await runAllFlows(payload);
       }
     } catch (e) {
@@ -903,6 +920,7 @@
         if (backBtn) backBtn.style.display = 'none';
         if (removeBtn) removeBtn.style.display = 'inline-block';
       }
+      setQuickBriefDisabled(idx, flow.finished);
       loadCredits();
     }
   };
@@ -943,13 +961,12 @@
   }
 
   async function runAutoFlow(flow, idx) {
-    const quickBrief = (document.getElementById('quick-brief-input') || {}).value || '';
     try {
       const res = await fetch('/api/run_auto', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          quick_brief: quickBrief,
+          quick_brief: flow.quickBrief || '',
           agents: flow.agents,
           platforms: flow.options.platform,
           media_type: flow.options.media_type,
@@ -1004,6 +1021,7 @@
       if (nextBtn) { nextBtn.classList.remove('running'); nextBtn.style.display = 'none'; }
       if (backBtn) backBtn.style.display = 'none';
       if (removeBtn) removeBtn.style.display = 'inline-block';
+      setQuickBriefDisabled(planIdx, true);
     }
 
     if (flow.isAuto) {
@@ -1150,6 +1168,11 @@
       else { el.textContent = '✓ ยืนยัน'; el.disabled = false; el.style.display = 'inline-block'; }
     });
     document.querySelectorAll('[id^="flow-remove-"]').forEach(el => { el.style.display = 'inline-block'; });
+    document.querySelectorAll('[id^="flow-quick-brief-"]').forEach(el => {
+      const idx = parseInt(el.id.replace('flow-quick-brief-', ''));
+      const f = flows[idx];
+      el.disabled = !!(f && f.finished);
+    });
     const globalConfirm = document.getElementById('global-confirm');
     const clearBtn = document.getElementById('global-clear');
     const hintEl = document.getElementById('brief-hint');

@@ -138,3 +138,93 @@ def test_regular_flow_multi_platform_one_file_with_script_review(_client, tmp_pa
     # --- ตรวจว่า script review ถูกเรียก ---
     assert len(script_review_called) > 0, (
         "BUG: script review ไม่ถูกเรียกใน regular flow")
+
+
+def test_run_flows_per_flow_quick_brief(_client, tmp_path, monkeypatch):
+    """แต่ละ flow ต้องใช้ quick_brief ของตัวเอง ไม่ใช้ค่ารวม."""
+    import web_viewer
+
+    product_dir = tmp_path / "data" / "K2"
+    product_dir.mkdir(parents=True)
+    (product_dir / "info.txt").write_text("product info", encoding="utf-8")
+
+    monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web_viewer, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
+
+    def _content_json_brief(platform="Facebook"):
+        return json.dumps({
+            "posts": [{
+                "platform": platform,
+                "concept": "c",
+                "title": "t",
+                "caption": "cap",
+                "script": "",
+                "hashtags": "#t",
+                "image_prompts": [],
+                "video_prompts": [],
+            }],
+        }, ensure_ascii=False)
+
+    briefs = []
+
+    def _run_cc(*args, **kw):
+        briefs.append(kw.get("quick_brief", ""))
+        return _content_json_brief()
+
+    fake_orch = MagicMock()
+    fake_orch._make_client.return_value = MagicMock()
+    fake_orch._make_client.return_value.close = MagicMock()
+    fake_orch.run_content_creator.side_effect = _run_cc
+    fake_orch.save_result.return_value = {"content_creator": str(tmp_path / "out.md")}
+    monkeypatch.setattr(web_viewer, "Orchestrator", lambda **kw: fake_orch)
+
+    monkeypatch.setattr(web_viewer.content_history, "record_entry", lambda *a, **k: None)
+    monkeypatch.setattr(web_viewer.content_history, "format_product_history_for_prompt",
+                        lambda *a, **k: "")
+    monkeypatch.setattr(web_viewer.content_history, "update_last_entry_output_file",
+                        lambda *a, **k: None)
+
+    resp = _client.post("/api/run_flows", json={
+        "quick_brief": "global",
+        "flows": [
+            {
+                "index": 0,
+                "folders": ["K2"],
+                "agents": ["content_creator"],
+                "is_auto": False,
+                "content_count": 1,
+                "platforms": ["facebook"],
+                "media_type": "image",
+                "media_when": "ask",
+                "auto_image": False,
+                "auto_video": False,
+                "quick_brief": "flow1",
+            },
+            {
+                "index": 1,
+                "folders": ["K2"],
+                "agents": ["content_creator"],
+                "is_auto": False,
+                "content_count": 1,
+                "platforms": ["facebook"],
+                "media_type": "image",
+                "media_when": "ask",
+                "auto_image": False,
+                "auto_video": False,
+                "quick_brief": "flow2",
+            },
+        ],
+    })
+    assert resp.status_code == 200, resp.text
+
+    for line in resp.iter_lines():
+        if line and line.startswith("data: "):
+            data = json.loads(line[6:])
+            if data.get("type") == "error":
+                pytest.fail(f"flow error: {data.get('message')}")
+
+    first_lines = {b.split("\n")[0] for b in briefs}
+    assert first_lines == {"flow1", "flow2"}, (
+        f"quick_brief ต่อ flow ไม่ถูกต้อง: {briefs}")
