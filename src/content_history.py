@@ -39,9 +39,9 @@ from typing import Any
 _history_lock = threading.RLock()
 
 try:
-    from .ai_usage import log_ai_usage, log_local_usage, make_entry
+    from .ai_usage import record_ai_usage, make_entry
 except ImportError:
-    from ai_usage import log_ai_usage, log_local_usage, make_entry  # type: ignore
+    from ai_usage import record_ai_usage, make_entry  # type: ignore
 
 # Default config — ใช้ตอนที่ไม่มี config ส่งเข้ามา (backward compat)
 _DEFAULTS = {
@@ -302,17 +302,22 @@ def _log_embedding(
     *,
     duration_ms: int,
     status: str = "success",
+    http_status: int | None = None,
     error_message: str | None = None,
+    request_id: str | None = None,
 ) -> None:
-    """ยิง log ไป AI Usage Hub + เซฟ local สำหรับ embeddings — fire-and-forget."""
+    """บันทึก embeddings usage — fire-and-forget."""
     entry = make_entry(
         provider="openrouter",
         model=model,
         operation="embeddings.create",
         source="content_history.generate_embedding",
+        request_id=request_id,
         duration_ms=duration_ms,
         status=status,
+        http_status=http_status,
         error_message=error_message,
+        raw_usage=usage,
     )
     if usage:
         cost = usage.get("cost") or usage.get("total_cost")
@@ -320,9 +325,7 @@ def _log_embedding(
             entry["cost_usd"] = float(cost)
         if usage.get("prompt_tokens") is not None:
             entry["prompt_tokens"] = usage.get("prompt_tokens")
-        entry["raw_usage"] = usage
-    log_ai_usage(entry)
-    log_local_usage(entry)
+    record_ai_usage(entry)
 
 
 # ============================================================
@@ -361,10 +364,22 @@ def _generate_embedding(text: str, config: dict[str, Any]) -> list[float] | None
             resp.raise_for_status()
             data = resp.json()
             # log usage (Hub + local)
-            _log_embedding(model, data.get("usage"), duration_ms=int((time.time() - t0) * 1000))
+            _log_embedding(model, data.get("usage"), request_id=data.get("id"),
+                           duration_ms=int((time.time() - t0) * 1000))
             return data["data"][0]["embedding"]
     except Exception as e:
-        _log_embedding(model, None, duration_ms=int((time.time() - t0) * 1000), status="error", error_message=str(e))
+        http_status: int | None = None
+        request_id: str | None = None
+        if isinstance(e, httpx.HTTPStatusError):
+            http_status = e.response.status_code
+            try:
+                request_id = e.response.json().get("id")
+            except Exception:
+                pass
+        status = "timeout" if isinstance(e, httpx.TimeoutException) else "error"
+        _log_embedding(model, None, request_id=request_id,
+                       duration_ms=int((time.time() - t0) * 1000), status=status,
+                       http_status=http_status, error_message=str(e))
         # Graceful degradation — ถ้า embedding API ไม่ได้ ก็ไม่เก็บ embedding
         return None
 

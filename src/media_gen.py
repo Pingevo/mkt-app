@@ -20,9 +20,9 @@ import httpx
 import yaml
 
 try:
-    from .ai_usage import log_ai_usage, log_local_usage, make_entry
+    from .ai_usage import record_ai_usage, make_entry
 except ImportError:
-    from ai_usage import log_ai_usage, log_local_usage, make_entry  # type: ignore
+    from ai_usage import record_ai_usage, make_entry  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +356,7 @@ def generate_image(
     timeout: float | None = None,
     input_references: list[dict] | list[str] | None = None,
     visual: dict[str, Any] | None = None,
+    attempt: int = 1,
 ) -> dict[str, Any]:
     """สร้างรูปจาก prompt — เซฟลง output_path แล้วคืน metadata.
 
@@ -430,7 +431,13 @@ def generate_image(
             data = resp.json()
 
         # log usage ไป AI Usage Hub
-        _log_media_usage("image", model, data.get("usage"), duration_ms=int((time.time() - t0) * 1000))
+        _log_media_usage(
+            "image", model, data.get("usage"),
+            request_id=data.get("id"),
+            duration_ms=int((time.time() - t0) * 1000),
+            attempt=attempt,
+            units={"images_generated": n},
+        )
 
         images = data.get("data", [])
         if not images:
@@ -462,11 +469,14 @@ def generate_image(
             "warnings": warnings,
         }
     except httpx.HTTPStatusError as e:
-        _log_media_usage("image", model, None, duration_ms=int((time.time() - t0) * 1000), status="error", error_message=str(e))
+        _log_media_usage("image", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
+                         http_status=e.response.status_code, attempt=attempt, units={"images_generated": n},
+                         error_message=str(e))
         _err_len = int(_system_cfg().get("error_preview_length", 200))
         return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:_err_len]}", "model": model, "prompt": prompt, "warnings": warnings}
     except Exception as e:
-        _log_media_usage("image", model, None, duration_ms=int((time.time() - t0) * 1000), status="error", error_message=str(e))
+        _log_media_usage("image", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
+                         attempt=attempt, units={"images_generated": n}, error_message=str(e))
         return {"ok": False, "error": str(e), "model": model, "prompt": prompt, "warnings": warnings}
 
 
@@ -488,6 +498,7 @@ def generate_video(
     input_references: list[dict] | list[str] | None = None,
     frame_images: list[dict] | list[str] | None = None,
     visual: dict[str, Any] | None = None,
+    attempt: int = 1,
 ) -> dict[str, Any]:
     """สร้างวิดีโอจาก prompt — async รอจนเสร็จ — เซฟลง output_path.
 
@@ -579,6 +590,9 @@ def generate_video(
         "Content-Type": "application/json",
     }
 
+    units = {"videos_generated": 1, "duration_seconds": duration, "resolution": resolution, "aspect_ratio": aspect_ratio}
+    job_id: str | None = None
+
     t0 = time.time()
     try:
         if on_status:
@@ -595,7 +609,8 @@ def generate_video(
         job_id = result.get("id")
         polling_url = result.get("polling_url")
         if not job_id or not polling_url:
-            _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error", error_message="no job_id")
+            _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
+                             request_id=job_id, attempt=attempt, units=units, error_message="no job_id")
             return {"ok": False, "error": f"API ไม่คืน job_id: {result}", "model": model, "prompt": prompt}
 
         # Poll จนเสร็จ
@@ -615,10 +630,15 @@ def generate_video(
                 if status == "completed":
                     urls = status_data.get("unsigned_urls") or status_data.get("urls") or []
                     if not urls:
-                        _log_media_usage("video", model, status_data.get("usage"), duration_ms=int((time.time() - t0) * 1000), status="error", error_message="completed but no url")
+                        _log_media_usage("video", model, status_data.get("usage"),
+                                         duration_ms=int((time.time() - t0) * 1000), status="error",
+                                         request_id=job_id, attempt=attempt, units=units,
+                                         error_message="completed but no url")
                         return {"ok": False, "error": "completed แต่ไม่มี url", "model": model, "prompt": prompt, "warnings": warnings}
                     # log usage จาก poll response
-                    _log_media_usage("video", model, status_data.get("usage"), duration_ms=int((time.time() - t0) * 1000))
+                    _log_media_usage("video", model, status_data.get("usage"),
+                                     duration_ms=int((time.time() - t0) * 1000),
+                                     request_id=job_id, attempt=attempt, units=units)
                     # download — ส่ง Authorization header เหมือนโค้ดที่ใช้งานได้ใน my-agent-app
                     if on_status:
                         on_status("downloading")
@@ -639,17 +659,25 @@ def generate_video(
                     }
                 elif status == "failed":
                     err = status_data.get("error", "unknown")
-                    _log_media_usage("video", model, status_data.get("usage"), duration_ms=int((time.time() - t0) * 1000), status="error", error_message=str(err))
+                    _log_media_usage("video", model, status_data.get("usage"),
+                                     duration_ms=int((time.time() - t0) * 1000), status="error",
+                                     request_id=job_id, attempt=attempt, units=units,
+                                     error_message=str(err))
                     return {"ok": False, "error": f"video gen failed: {err}", "model": model, "prompt": prompt, "warnings": warnings}
 
-        _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="timeout", error_message=f"timeout after {max_wait}s")
+        _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="timeout",
+                         request_id=job_id, attempt=attempt, units=units,
+                         error_message=f"timeout after {max_wait}s")
         return {"ok": False, "error": f"timeout after {max_wait}s", "model": model, "prompt": prompt, "warnings": warnings}
     except httpx.HTTPStatusError as e:
-        _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error", error_message=str(e))
+        _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
+                         request_id=job_id, attempt=attempt, units=units,
+                         http_status=e.response.status_code, error_message=str(e))
         _err_len = int(_system_cfg().get("error_preview_length", 200))
         return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:_err_len]}", "model": model, "prompt": prompt, "warnings": warnings}
     except Exception as e:
-        _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error", error_message=str(e))
+        _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
+                         request_id=job_id, attempt=attempt, units=units, error_message=str(e))
         return {"ok": False, "error": str(e), "model": model, "prompt": prompt, "warnings": warnings}
 
 
@@ -663,34 +691,42 @@ def _log_media_usage(
     usage: dict[str, Any] | None,
     *,
     duration_ms: int,
+    attempt: int = 1,
     status: str = "success",
+    http_status: int | None = None,
     error_message: str | None = None,
+    request_id: str | None = None,
+    units: dict[str, Any] | None = None,
 ) -> None:
-    """ยิง log ไป AI Usage Hub + เซฟ local สำหรับ image/video gen — fire-and-forget."""
+    """บันทึก image/video generation usage — fire-and-forget."""
     operation = "images.generate" if media_type == "image" else "videos.generate"
+    cost_usd: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    if usage:
+        cost = usage.get("cost") or usage.get("total_cost")
+        if cost is not None:
+            cost_usd = float(cost)
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
     entry = make_entry(
         provider="openrouter",
         model=model,
         operation=operation,
         source=f"media_gen.generate_{media_type}",
+        request_id=request_id,
         duration_ms=duration_ms,
+        attempt=attempt,
         status=status,
+        http_status=http_status,
         error_message=error_message,
+        cost_usd=cost_usd,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        raw_usage=usage,
+        units=units,
     )
-    if usage:
-        # OpenRouter images/videos response อาจมี cost ใน usage หรือ top-level
-        cost = usage.get("cost") or usage.get("total_cost")
-        if cost is not None:
-            entry["cost_usd"] = float(cost)
-        if usage.get("prompt_tokens") is not None:
-            entry["prompt_tokens"] = usage.get("prompt_tokens")
-        if usage.get("completion_tokens") is not None:
-            entry["completion_tokens"] = usage.get("completion_tokens")
-        entry["raw_usage"] = usage
-    # 1. ยิงไป Hub (ถ้ามี token)
-    log_ai_usage(entry)
-    # 2. เซฟ local (เสมอ — ไม่ต้องมี token)
-    log_local_usage(entry)
+    record_ai_usage(entry)
 
 
 # ---------------------------------------------------------------------------
@@ -798,6 +834,7 @@ def generate_image_with_retry(
             current_prompt, output_path,
             model=model, aspect_ratio=aspect_ratio, timeout=timeout,
             input_references=input_references, visual=visual,
+            attempt=attempt + 1,
         )
         if result.get("ok"):
             if attempt > 0:
@@ -878,6 +915,7 @@ def generate_video_with_retry(
             max_wait=max_wait, on_status=on_status,
             input_references=input_references, frame_images=frame_images,
             visual=visual,
+            attempt=attempt + 1,
         )
         if result.get("ok"):
             if attempt > 0:

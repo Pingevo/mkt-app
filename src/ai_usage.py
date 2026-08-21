@@ -1,6 +1,6 @@
 """AI Usage Hub — fire-and-forget logging ไปยัง central hub (digital.in.th).
 
-ทุกครั้งที่เรียก AI/scraping provider จริง ให้เรียก ``log_ai_usage()`` หลังได้ response
+ทุกครั้งที่เรียก AI/scraping provider จริง ให้เรียก ``record_ai_usage()`` หลังได้ response
 กลับมา (รวม error path) — ฟังก์ชันนี้ไม่มีวัน throw ออกมาทำลาย flow หลัก
 
 อ่านเอกสารเต็ม: AI_USAGE_HUB_DEVELOPER_API.md
@@ -26,12 +26,53 @@ except ImportError:
     # กรณี import ตรงจาก src/ โดยไม่ผ่าน package
     from config_loader import get_env  # type: ignore
 
+try:
+    from .flow_context import get_usage_context
+except ImportError:
+    from flow_context import get_usage_context  # type: ignore
+
 
 _DEFAULT_URL = "https://digital.in.th"
+_HUB_ENDPOINT = get_env("AI_USAGE_HUB_ENDPOINT", "/internal/ai-usage/logs")
 
 # Local usage log — เก็บทุก AI call ลงไฟล์เพื่อ track ค่าใช้จ่าย (ไม่ต้องมี Hub token)
 # shared constant — cost_summary.py import จากที่นี่แทนการประกาศซ้ำ
 USAGE_LOG_PATH = Path(__file__).resolve().parent.parent / "logs" / "llm_usage.jsonl"
+
+
+def _default_actor() -> str:
+    """คืน actor default ถ้าไม่มี context ตั้งไว้ — อ่านจาก env หรือ fallback."""
+    return get_env("AI_USAGE_HUB_USER", "mktapp")
+
+
+def _merge_context(entry: dict[str, Any]) -> dict[str, Any]:
+    """Merge thread-local usage context เข้า entry ถ้า caller ยังไม่ได้ระบุเอง."""
+    entry = dict(entry)
+    ctx = get_usage_context()
+
+    if "user" not in entry:
+        user = ctx.get("user") or _default_actor()
+        if user:
+            entry["user"] = user
+
+    if "reference" not in entry:
+        reference = ctx.get("reference") or ctx.get("flow_id")
+        if reference:
+            entry["reference"] = reference
+
+    # merge metadata: context เป็นฐาน, caller override ทับ และแนบ flow_id ไว้ correlation
+    ctx_metadata = ctx.get("metadata", {}) or {}
+    flow_id = ctx.get("flow_id", "")
+    if flow_id:
+        ctx_metadata = {**ctx_metadata, "flow_id": ctx_metadata.get("flow_id") or flow_id}
+    if ctx_metadata:
+        existing = entry.get("metadata", {}) or {}
+        if isinstance(existing, dict):
+            merged = {**ctx_metadata, **existing}
+            if merged:
+                entry["metadata"] = merged
+
+    return entry
 
 
 def log_local_usage(entry: dict[str, Any]) -> None:
@@ -85,35 +126,6 @@ def _build_payload(entry: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def log_ai_usage(entry: dict[str, Any]) -> None:
-    """ยิง log 1 event ไป AI Usage Hub — fire-and-forget.
-
-    ไม่มีวัน throw ออกมา — ถ้ายิงไม่สำเร็จ แค่ปล่อยผ่าน
-    ถ้ายังไม่ตั้งค่า ``AI_USAGE_HUB_TOKEN`` จะข้ามเงียบๆ (return เลย)
-
-    field บังคับใน entry: ``provider``
-    field แนะนำ: model, operation, source, user, reference,
-                 prompt_tokens, completion_tokens, cost_usd,
-                 duration_ms, status, error_message
-    """
-    url, token = _read_hub_credentials()
-    if not url or not token:
-        return  # ยังไม่ตั้งค่า — ข้ามเงียบๆ
-
-    if not entry.get("provider"):
-        return  # ไม่มี provider ไม่ยิง
-
-    payload = _build_payload(entry)
-
-    # ยิงใน background thread เพื่อไม่ block caller
-    t = threading.Thread(
-        target=_post,
-        args=(url.rstrip("/") + "/internal/ai-usage/logs", token, payload),
-        daemon=True,
-    )
-    t.start()
-
-
 def _post(endpoint: str, token: str, payload: dict[str, Any]) -> None:
     """POST จริง — ครอบ try/except ทุกกรณี."""
     if not _HTTPX_OK:
@@ -132,6 +144,45 @@ def _post(endpoint: str, token: str, payload: dict[str, Any]) -> None:
         pass  # ไม่ให้ log error ทำลาย flow หลัก
 
 
+def record_ai_usage(entry: dict[str, Any]) -> None:
+    """บันทึก 1 event ลง local และยิงไป Hub แบบ fire-and-forget.
+
+    - รวม context (actor, reference, metadata) เข้า entry อัตโนมัติ
+    - เขียน local ทันที (ไม่ block, ไม่ throw)
+    - ยิง Hub ใน background thread (ไม่ block)
+    """
+    if not entry.get("provider"):
+        return
+
+    try:
+        merged = _merge_context(entry)
+        # 1. local first เพื่อไม่สูญหายแม้ process ตายหลังนี้
+        log_local_usage(merged)
+
+        # 2. Hub fire-and-forget
+        url, token = _read_hub_credentials()
+        if not url or not token:
+            return
+
+        payload = _build_payload(merged)
+        t = threading.Thread(
+            target=_post,
+            args=(url.rstrip("/") + "/" + _HUB_ENDPOINT.lstrip("/"), token, payload),
+            daemon=True,
+        )
+        t.start()
+    except Exception:
+        pass  # fire-and-forget — ไม่ให้ logging error ทำลาย flow หลัก
+
+
+def log_ai_usage(entry: dict[str, Any]) -> None:
+    """Deprecated alias: ยิง log 1 event ไป AI Usage Hub + เซฟ local.
+
+    ใช้ ``record_ai_usage()`` แทน — function นี้คงไว้เพื่อ backward compatibility.
+    """
+    record_ai_usage(entry)
+
+
 def make_entry(
     *,
     provider: str = "openrouter",
@@ -140,17 +191,26 @@ def make_entry(
     source: str | None = None,
     user: str | None = None,
     reference: str | None = None,
+    request_id: str | None = None,
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
+    units: dict[str, Any] | None = None,
     cost_usd: float | None = None,
     duration_ms: int | None = None,
+    attempt: int = 1,
     status: str = "success",
-    error_message: str | None = None,
     http_status: int | None = None,
+    error_message: str | None = None,
+    raw_usage: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """สร้าง entry dict สำหรับส่งให้ ``log_ai_usage`` — กรอกเฉพาะที่มี."""
-    entry: dict[str, Any] = {"provider": provider, "operation": operation, "status": status}
+    """สร้าง entry dict สำหรับส่งให้ ``record_ai_usage`` — กรอกเฉพาะที่มี."""
+    entry: dict[str, Any] = {
+        "provider": provider,
+        "operation": operation,
+        "status": status,
+        "attempt": attempt,
+    }
     if model:
         entry["model"] = model
     if source:
@@ -159,18 +219,24 @@ def make_entry(
         entry["user"] = user
     if reference:
         entry["reference"] = reference
+    if request_id:
+        entry["request_id"] = request_id
     if prompt_tokens is not None:
         entry["prompt_tokens"] = prompt_tokens
     if completion_tokens is not None:
         entry["completion_tokens"] = completion_tokens
+    if units:
+        entry["units"] = units
     if cost_usd is not None:
         entry["cost_usd"] = cost_usd
     if duration_ms is not None:
         entry["duration_ms"] = duration_ms
-    if error_message:
-        entry["error_message"] = error_message
     if http_status is not None:
         entry["http_status"] = http_status
+    if error_message:
+        entry["error_message"] = error_message
+    if raw_usage:
+        entry["raw_usage"] = raw_usage
     if metadata:
         entry["metadata"] = metadata
     return entry

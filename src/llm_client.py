@@ -12,9 +12,9 @@ from rich.live import Live
 from rich.text import Text
 
 try:
-    from .ai_usage import log_ai_usage, log_local_usage, make_entry
+    from .ai_usage import record_ai_usage, make_entry
 except ImportError:
-    from ai_usage import log_ai_usage, log_local_usage, make_entry  # type: ignore
+    from ai_usage import record_ai_usage, make_entry  # type: ignore
 
 console = Console()
 
@@ -109,20 +109,30 @@ class LLMClient:
             t0 = time.time()
             try:
                 if stream:
-                    text, usage = self._chat_stream(payload)
-                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt)
+                    text, usage, request_id = self._chat_stream(payload)
+                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
                     return text
                 else:
                     resp = self._client.post("/chat/completions", json=payload)
                     resp.raise_for_status()
                     data = resp.json()
+                    request_id = data.get("id")
                     usage = data.get("usage")
-                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt)
+                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
                     return data["choices"][0]["message"]["content"]
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
                 last_error = exc
                 # log error path ด้วย
-                self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status="error", error_message=str(exc))
+                status = "timeout" if isinstance(exc, httpx.TimeoutException) else "error"
+                http_status: int | None = None
+                request_id: str | None = None
+                if isinstance(exc, httpx.HTTPStatusError):
+                    http_status = exc.response.status_code
+                    try:
+                        request_id = exc.response.json().get("id")
+                    except Exception:
+                        pass
+                self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status=status, http_status=http_status, error_message=str(exc), request_id=request_id)
                 if self._aborted:
                     raise RuntimeError("Request aborted")
                 if attempt < max_retry_limit:
@@ -141,7 +151,9 @@ class LLMClient:
         duration_ms: int,
         attempt: int = 1,
         status: str = "success",
+        http_status: int | None = None,
         error_message: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         """ยิง log ไป AI Usage Hub + เซฟ local — fire-and-forget.
 
@@ -153,34 +165,38 @@ class LLMClient:
                 model=model,
                 operation="chat.completions",
                 source=source,
+                request_id=request_id,
                 duration_ms=duration_ms,
+                attempt=attempt,
                 status=status,
+                http_status=http_status,
                 error_message=error_message,
+                raw_usage=usage,
             )
             if usage:
-                entry["prompt_tokens"] = usage.get("prompt_tokens")
-                entry["completion_tokens"] = usage.get("completion_tokens")
+                if usage.get("prompt_tokens") is not None:
+                    entry["prompt_tokens"] = usage.get("prompt_tokens")
+                if usage.get("completion_tokens") is not None:
+                    entry["completion_tokens"] = usage.get("completion_tokens")
                 cost = usage.get("cost")
                 if cost is not None:
                     entry["cost_usd"] = float(cost)
-                entry["raw_usage"] = usage
-            # 1. ยิงไป Hub (ถ้ามี token)
-            log_ai_usage(entry)
-            # 2. เซฟ local (เสมอ — ไม่ต้องมี token)
-            log_local_usage(entry)
+            record_ai_usage(entry)
         except Exception:
             pass  # fire-and-forget — ไม่ให้ logging error ทำลาย main flow
 
-    def _chat_stream(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    def _chat_stream(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None, str | None]:
         """Stream chat completion and display real-time output.
 
-        คืน (text, usage) — usage มาจาก chunk สุดท้ายเมื่อเปิด stream_options.include_usage
+        คืน (text, usage, request_id) — usage มาจาก chunk สุดท้ายเมื่อเปิด stream_options.include_usage
+        request_id มาจาก chunk แรก/สุดท้ายที่ระบุ id
         """
         import json
 
         collected: list[str] = []
         text = Text()
         usage: dict[str, Any] | None = None
+        request_id: str | None = None
 
         with self._client.stream("POST", "/chat/completions", json=payload) as resp:
             resp.raise_for_status()
@@ -193,6 +209,8 @@ class LLMClient:
                         break
                     try:
                         chunk = json.loads(data)
+                        if chunk.get("id"):
+                            request_id = chunk.get("id")
                         # chunk สุดท้ายมี usage อยู่ระดับ top-level (ไม่ใช่ใน choices)
                         if chunk.get("usage"):
                             usage = chunk["usage"]
@@ -206,7 +224,7 @@ class LLMClient:
                         continue
 
         console.print()
-        return "".join(collected), usage
+        return "".join(collected), usage, request_id
 
     def chat_stream_yield(
         self,
@@ -245,6 +263,7 @@ class LLMClient:
             t0 = time.time()
             try:
                 usage: dict[str, Any] | None = None
+                request_id: str | None = None
                 with self._client.stream("POST", "/chat/completions", json=payload) as resp:
                     resp.raise_for_status()
                     for line in resp.iter_lines():
@@ -255,6 +274,8 @@ class LLMClient:
                             break
                         try:
                             chunk = json.loads(data)
+                            if chunk.get("id"):
+                                request_id = chunk.get("id")
                             if chunk.get("usage"):
                                 usage = chunk["usage"]
                             delta = chunk.get("choices", [{}])[0].get("delta", {})
@@ -263,11 +284,20 @@ class LLMClient:
                                 yield content
                         except (json.JSONDecodeError, IndexError, KeyError):
                             continue
-                self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt)
+                self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
                 return
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
                 last_error = exc
-                self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status="error", error_message=str(exc))
+                status = "timeout" if isinstance(exc, httpx.TimeoutException) else "error"
+                http_status: int | None = None
+                request_id: str | None = None
+                if isinstance(exc, httpx.HTTPStatusError):
+                    http_status = exc.response.status_code
+                    try:
+                        request_id = exc.response.json().get("id")
+                    except Exception:
+                        pass
+                self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status=status, http_status=http_status, error_message=str(exc), request_id=request_id)
                 if attempt < max_retry_limit:
                     time.sleep(2**attempt)
                 continue
@@ -328,8 +358,9 @@ class LLMClient:
                 )
                 msg = response.choices[0].message
                 usage = response.usage
+                request_id = getattr(response, "id", None)
                 self._log_usage(used_model, source, usage.model_dump() if usage else None,
-                                duration_ms=int((time.time() - t0) * 1000), attempt=iteration + 1)
+                                duration_ms=int((time.time() - t0) * 1000), attempt=iteration + 1, request_id=request_id)
 
                 # ถ้า LLM ไม่ขอเรียก tool → ตอบจบ
                 if not msg.tool_calls:
@@ -375,9 +406,12 @@ class LLMClient:
 
             except Exception as exc:
                 last_error = exc
+                http_status = getattr(exc, "status_code", None)
+                status = "timeout" if "timeout" in type(exc).__name__.lower() else "error"
                 self._log_usage(used_model, source, None,
                                 duration_ms=int((time.time() - t0) * 1000),
-                                attempt=iteration + 1, status="error", error_message=str(exc))
+                                attempt=iteration + 1, status=status, http_status=http_status,
+                                error_message=str(exc))
                 if iteration < max_retry_limit:
                     time.sleep(2 ** (iteration + 1))
                     continue

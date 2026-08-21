@@ -101,6 +101,17 @@ LLM บรรยาย + ติด tag ตาม taxonomy ใน `config/assets.
 
 ไม่ใช่: Brand Voice (ตัวตน — อยู่ที่ `brand/`), Terms (คำใช้ — อยู่ที่ `brand/terms.json`), ประวัติแบรนด์ (อยู่ที่ `brand/brand_profile.md`)
 
+## AI Usage
+
+### Actor (user)
+ใครสั่นให้เรียก AI — แทนด้วยช่องทางการทำงาน เช่น `web`, `cli`, `scheduler:<job_id>`, `ingestion` เมื่อระบบยังไม่มี user login จริง
+
+### Subject (reference)
+เรื่องที่ AI call นี้เกี่ยวข้อง — ปกติใช้ `product_id` หรือ `session/flow id` ถ้ายังไม่ทราบสินค้า
+
+### Flow ID
+thread-local correlation id สำหรับผูก usage logs เข้ากับ flow เดียวกัน ไม่ใช่ actor หรือ subject
+
 ## โหมดการสร้าง
 
 ### Separate Mode

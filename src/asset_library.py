@@ -265,12 +265,12 @@ def _default_embedder(text: str, config: dict) -> list[float] | None:
     try:
         from dotenv import load_dotenv
         load_dotenv()
-        from .ai_usage import log_ai_usage, log_local_usage, make_entry
+        from .ai_usage import record_ai_usage, make_entry
     except ImportError:
         try:
-            from ai_usage import log_ai_usage, log_local_usage, make_entry  # type: ignore
+            from ai_usage import record_ai_usage, make_entry  # type: ignore
         except ImportError:
-            log_ai_usage = log_local_usage = make_entry = None
+            record_ai_usage = make_entry = None
 
     model = config.get("embedding", {}).get("model", "openai/text-embedding-3-small")
     t0 = _time.time()
@@ -297,34 +297,47 @@ def _default_embedder(text: str, config: dict) -> list[float] | None:
             data = resp.json()
             # log usage (Hub + local) — source ของ asset_library
             if make_entry:
+                usage = data.get("usage")
+                cost = usage.get("cost") if usage else None
+                cost_usd = float(cost) if cost is not None else None
                 entry = make_entry(
                     provider="openrouter",
                     model=model,
                     operation="embeddings.create",
                     source="asset_library.embedding",
+                    request_id=data.get("id"),
                     duration_ms=int((_time.time() - t0) * 1000),
+                    cost_usd=cost_usd,
+                    raw_usage=usage,
                 )
-                usage = data.get("usage")
                 if usage:
                     entry["prompt_tokens"] = usage.get("prompt_tokens")
                     entry["total_tokens"] = usage.get("total_tokens")
-                entry["raw_usage"] = usage
-                log_ai_usage(entry)
-                log_local_usage(entry)
+                record_ai_usage(entry)
             return data["data"][0]["embedding"]
     except Exception as e:
         if make_entry:
+            http_status: int | None = None
+            request_id: str | None = None
+            if isinstance(e, httpx.HTTPStatusError):
+                http_status = e.response.status_code
+                try:
+                    request_id = e.response.json().get("id")
+                except Exception:
+                    pass
+            status = "timeout" if isinstance(e, httpx.TimeoutException) else "error"
             entry = make_entry(
                 provider="openrouter",
                 model=model,
                 operation="embeddings.create",
                 source="asset_library.embedding",
+                request_id=request_id,
                 duration_ms=int((_time.time() - t0) * 1000),
-                status="error",
+                status=status,
+                http_status=http_status,
                 error_message=str(e)[:200],
             )
-            log_ai_usage(entry)
-            log_local_usage(entry)
+            record_ai_usage(entry)
         return None
 
 
