@@ -31,6 +31,7 @@ from src.brand_loader import load_brand_visual
 from src import media_gen
 from src import product_db
 from src import content_history
+from src import pillar_manager
 from src.flow_context import set_flow_id, clear_flow_id
 from src.cost_summary import write_cost_summary, write_flow_meta, find_flow_id_for_file, find_any_flow_id, update_cost_summary
 
@@ -1841,6 +1842,15 @@ async def api_pillars_save(request: Request) -> JSONResponse:
     # กรอง keywords ให้มีแค่ pillar ที่มีอยู่
     clean_keywords = {p: keywords.get(p, []) for p in pillars}
 
+    # ไม่อนุญาต keyword ซ้ำข้าม pillar — ถ้าซ้ำให้บอก user ก่อน
+    dups = pillar_manager.find_duplicate_keywords(clean_keywords)
+    if dups:
+        dup_texts = [f"'{kw}' ซ้ำใน {', '.join(ps)}" for kw, ps in dups.items()]
+        return JSONResponse(
+            {"ok": False, "error": "ห้ามบันทึก: keyword ซ้ำข้าม pillars — " + "; ".join(dup_texts), "duplicates": dups},
+            status_code=400,
+        )
+
     cfg_path = PROJECT_ROOT / "config" / "content_policy.yaml"
     try:
         # อ่านไฟล์เดิม (ถ้ามี) เพื่อรักษาส่วนอื่นไว้
@@ -1859,6 +1869,108 @@ async def api_pillars_save(request: Request) -> JSONResponse:
         return JSONResponse({"ok": True})
     except Exception as e:
         return JSONResponse({"error": f"บันทึกไม่ได้: {e}"}, status_code=500)
+
+
+def _suggest_pillars(prompt: str, chips: list[str], llm: Any) -> dict[str, Any]:
+    """ขอ AI สร้าง pillars + keywords จากคำอธิบาย/ตัวอย่างโพสต์ หรือจาก chips."""
+    if chips:
+        if not all(chips):
+            return {"pillars": [], "pillar_keywords": {}}
+    else:
+        if not prompt or not prompt.strip():
+            return {"pillars": [], "pillar_keywords": {}}
+
+    from src.config_loader import load_config
+    defaults = load_config().get("defaults", {})
+    max_tokens = int(defaults.get("max_tokens", 4096))
+    temperature = float(defaults.get("temperature", 0.5))
+    max_attempts = int(defaults.get("max_retry_limit", 3))
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "pillars": {"type": "array", "items": {"type": "string"}},
+            "pillar_keywords": {
+                "type": "object",
+                "additionalProperties": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "required": ["pillars", "pillar_keywords"],
+        "additionalProperties": False,
+    }
+    if chips:
+        chip_list = "\n".join(f"- {c}" for c in chips)
+        system_prompt = (
+            "คุณเป็นนักวิเคราะห์กลยุทธ์คอนเทนต์ (Content Pillar Strategist)\n"
+            "หน้าที่: user ให้หัวข้อมาเป็นรายการ (chips) แต่ละ chip คือ 1 content pillar ที่ต้องการสร้าง\n\n"
+            "กติกา:\n"
+            "- 1 chip = 1 pillar ตรงกัน (ไม่เพิ่ม ไม่ลด)\n"
+            "- ชื่อ pillar สั้น ชัดเจน ไม่เกิน 3-5 คำ สามารถขยายความจากชื่อ chip ได้เล็กน้อย\n"
+            "- แต่ละ pillar มี 3-10 keywords ที่ช่วยให้ AI รู้ว่าคอนเทนต์ไหนอยู่ในหมวดนี้\n"
+            "- เลือกภาษาของ pillars และ keywords ให้ตรงกับภาษาของ chips ที่ user ให้มา\n"
+            "- คืนเป็น JSON เท่านั้น ตาม schema ที่กำหนด"
+        )
+        user_prompt = f"สร้าง 1 pillar พร้อม keywords สำหรับแต่ละ chip นี้:\n\n{chip_list}"
+    else:
+        system_prompt = (
+            "คุณเป็นนักวิเคราะห์กลยุทธ์คอนเทนต์ (Content Pillar Strategist)\n"
+            "หน้าที่: อ่านคำอธิบายแบรนด์/สินค้า หรือตัวอย่างโพสต์ที่ user ให้มา แล้วสร้าง content pillars (หมวดหลักคอนเทนต์) พร้อม keywords\n\n"
+            "กติกา:\n"
+            "- 1 คำอธิบาย = 1 ชุดความคิด = สร้าง 1 หัวข้อหลัก (1 chip = 1 pillar)\n"
+            "- ถ้าคำอธิบายมีหลายหัวข้อชัดเจน สูงสุดไม่เกิน 3 pillars แต่ถ้าสั้นหรือเฉพาะเจาะจง สร้างแค่ 1\n"
+            "- ชื่อ pillar สั้น ชัดเจน ไม่เกิน 3-5 คำ\n"
+            "- แต่ละ pillar มี 3-10 keywords ที่ช่วยให้ AI รู้ว่าคอนเทนต์ไหนอยู่ในหมวดนี้\n"
+            "- เลือกภาษาของ pillars และ keywords ให้ตรงกับภาษาของคำอธิบายที่ user ให้มา (ถ้า user อธิบายเป็นไทย ตอบเป็นไทย; ถ้าเป็นอังกฤษ ตอบเป็นอังกฤษ)\n"
+            "- คืนเป็น JSON เท่านั้น ตาม schema ที่กำหนด"
+        )
+        user_prompt = f"สร้าง content pillars จากข้อความนี้:\n\n{prompt.strip()}"
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "pillars_suggest", "strict": True, "schema": schema},
+    }
+    last_error: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            raw = llm.chat(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=False,
+                response_format=response_format,
+                source="web_viewer.pillars_suggest",
+            )
+            clean = raw.strip()
+            if clean.startswith("```"):
+                clean = re.sub(r"^```(?:json)?\s*", "", clean)
+                clean = re.sub(r"\s*```$", "", clean)
+            return json.loads(clean)
+        except Exception as e:
+            last_error = e
+    raise RuntimeError(f"LLM สร้าง pillars ไม่สำเร็จหลังลอง {max_attempts} ครั้ง: {last_error}")
+
+
+@app.post("/api/pillars_suggest")
+async def api_pillars_suggest(request: Request) -> JSONResponse:
+    """รับ prompt หรือ chips จาก user → ใช้ AI สร้าง pillars + keywords."""
+    body = await request.json()
+    prompt = (body.get("prompt") or "").strip()
+    chips = [str(c).strip() for c in body.get("chips", []) if str(c).strip()]
+    if not prompt and not chips:
+        return JSONResponse({"ok": False, "error": "กรุณาใส่คำอธิบายก่อน"}, status_code=400)
+    try:
+        orch = Orchestrator(brand_dir="brand")
+        llm = orch.make_client()
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"สร้าง LLM client ไม่ได้: {e}"}, status_code=500)
+    try:
+        result = _suggest_pillars(prompt, chips, llm)
+        return JSONResponse({"ok": True, "result": result})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.get("/api/agent_config/{agent_key}")
@@ -4139,7 +4251,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div class="credits-badge" id="credits-badge" style="display:none">กำลังโหลด...</div>
     <button class="home-header-btn" onclick="openScheduleList()" id="schedule-header-btn" style="position:relative;">📅 ตารางเวลา<span id="schedule-badge" style="display:none;position:absolute;top:-4px;right:-4px;background:#fbbf24;color:#0f1117;border-radius:10px;font-size:10px;padding:1px 6px;font-weight:700;">●</span></button>
     <button class="home-header-btn" onclick="openPillarsModal()">🎯 Pillars</button>
-    <button class="home-header-btn" onclick="goHome()">🏠 หน้าหลัก</button>
   </div>
 </div>
 <div class="container">
@@ -6361,9 +6472,327 @@ function saveBrandLearnResult(brand, section) {
 }
 
 // ============================================================
-// Content Pillars modal
+// Content Pillars modal — deep module (single state object)
 // ============================================================
-let _pillarsData = { pillars: [], pillar_keywords: {} };
+let _PillarsForm = null;
+
+function PillarsForm(data) {
+  this.data = JSON.parse(JSON.stringify(data));
+  this.original = JSON.parse(JSON.stringify(data));
+  this.aiAbort = null;
+  this.validation = { duplicates: [] };
+  this.provenance = {};
+  this.aiChips = [];
+  (this.data.pillars || []).forEach(pillar => { this.provenance[pillar] = 'original'; });
+}
+
+PillarsForm.prototype.isDirty = function() {
+  return JSON.stringify(this.data) !== JSON.stringify(this.original);
+};
+
+PillarsForm.prototype.isWorking = function() {
+  return !!this.aiAbort;
+};
+
+PillarsForm.prototype.validate = function() {
+  const seen = new Map();
+  this.data.pillars.forEach(pillar => {
+    const kws = this.data.pillar_keywords[pillar] || [];
+    kws.forEach(kw => {
+      const k = String(kw).trim();
+      if (!k) return;
+      if (!seen.has(k)) seen.set(k, []);
+      const list = seen.get(k);
+      if (!list.includes(pillar)) list.push(pillar);
+    });
+  });
+  this.validation.duplicates = [];
+  seen.forEach((pillars, kw) => {
+    if (pillars.length > 1) this.validation.duplicates.push({ kw, pillars });
+  });
+};
+
+PillarsForm.prototype.addKeyword = function(idx, kw) {
+  const pillar = this.data.pillars[idx];
+  const k = String(kw).trim();
+  if (!k) return;
+  if (!this.data.pillar_keywords[pillar]) this.data.pillar_keywords[pillar] = [];
+  if (this.data.pillar_keywords[pillar].some(x => String(x).trim() === k)) return;
+  this.data.pillar_keywords[pillar].push(k);
+  this.validate();
+  this.render();
+};
+
+PillarsForm.prototype.removeKeyword = function(idx, kwIdx) {
+  const pillar = this.data.pillars[idx];
+  if (this.data.pillar_keywords[pillar]) {
+    this.data.pillar_keywords[pillar].splice(kwIdx, 1);
+    this.validate();
+    this.render();
+  }
+};
+
+PillarsForm.prototype.addPillar = function() {
+  const base = 'Pillar ใหม่';
+  let n = 1;
+  let finalName = base;
+  while (this.data.pillars.includes(finalName)) { n++; finalName = base + ' ' + n; }
+  this.data.pillars.push(finalName);
+  this.data.pillar_keywords[finalName] = [];
+  this.provenance[finalName] = 'manual';
+  this.validate();
+  this.render();
+  const inputs = document.querySelectorAll('.pillar-card-name');
+  if (inputs.length) inputs[inputs.length - 1].focus();
+};
+
+PillarsForm.prototype.removePillar = function(idx) {
+  const pillar = this.data.pillars[idx];
+  delete this.data.pillar_keywords[pillar];
+  delete this.provenance[pillar];
+  this.data.pillars.splice(idx, 1);
+  this.validate();
+  this.render();
+};
+
+PillarsForm.prototype.updateName = function(idx, newName) {
+  newName = newName.trim();
+  if (!newName) return;
+  const oldName = this.data.pillars[idx];
+  if (this.data.pillar_keywords[oldName]) {
+    this.data.pillar_keywords[newName] = this.data.pillar_keywords[oldName];
+    delete this.data.pillar_keywords[oldName];
+  }
+  this.provenance[newName] = this.provenance[oldName] || 'manual';
+  delete this.provenance[oldName];
+  this.data.pillars[idx] = newName;
+  this.validate();
+  this.render();
+};
+
+PillarsForm.prototype.setAiSuggestions = function(result) {
+  const rawPillars = (result.pillars || []).slice(0, 5);
+  const rawKeywords = result.pillar_keywords || {};
+  const existingKws = new Set();
+  this.data.pillars.forEach(p => (this.data.pillar_keywords[p] || []).forEach(k => existingKws.add(String(k).trim())));
+  this.aiSuggestions = rawPillars.map(p => {
+    const name = String(p).trim();
+    const kws = (rawKeywords[name] || [])
+      .map(k => String(k).trim())
+      .filter(Boolean)
+      .filter(k => !existingKws.has(k));
+    return { name, keywords: kws };
+  }).filter(s => s.name && !this.data.pillars.includes(s.name));
+  this.aiSelected = new Set(this.aiSuggestions.map(s => s.name));
+  this.renderAiSuggestions();
+};
+
+PillarsForm.prototype.toggleAiSuggestion = function(idx) {
+  const s = this.aiSuggestions[idx];
+  if (!s) return;
+  if (this.aiSelected.has(s.name)) this.aiSelected.delete(s.name);
+  else this.aiSelected.add(s.name);
+  this.renderAiSuggestions();
+};
+
+PillarsForm.prototype.addSelectedSuggestions = function() {
+  const existingKws = new Set();
+  this.data.pillars.forEach(p => (this.data.pillar_keywords[p] || []).forEach(k => existingKws.add(String(k).trim())));
+  const claimedKws = new Set();
+  let added = 0;
+  this.aiSuggestions.filter(s => this.aiSelected.has(s.name)).forEach(s => {
+    const kws = s.keywords.filter(k => {
+      if (existingKws.has(k) || claimedKws.has(k)) return false;
+      claimedKws.add(k);
+      return true;
+    });
+    if (!kws.length) return;
+    this.data.pillars.push(s.name);
+    this.data.pillar_keywords[s.name] = kws;
+    this.provenance[s.name] = 'ai';
+    added++;
+  });
+  this.clearAiSuggestions();
+  this.validate();
+  this.render();
+  return added;
+};
+
+PillarsForm.prototype.clearAiSuggestions = function() {
+  this.aiSuggestions = [];
+  this.aiSelected = new Set();
+  this.renderAiSuggestions();
+};
+
+PillarsForm.prototype.renderAiSuggestions = function() {
+  const box = document.getElementById('pillars-ai-suggestions');
+  const addBtn = document.getElementById('pillars-ai-add-btn');
+  const genBtn = document.getElementById('pillars-ai-generate-btn');
+  if (!box) return;
+  if (!this.aiSuggestions.length) {
+    box.style.display = 'none';
+    if (addBtn) addBtn.style.display = 'none';
+    if (genBtn) genBtn.style.display = '';
+    box.innerHTML = '';
+    return;
+  }
+  if (addBtn) addBtn.style.display = '';
+  if (genBtn) genBtn.style.display = 'none';
+  box.style.display = 'block';
+  box.innerHTML = '<div style="font-size:12px;color:#888;margin-bottom:8px">เลือก Pillar ที่ต้องการเพิ่ม:</div>' +
+    this.aiSuggestions.map((s, i) => {
+      const selected = this.aiSelected.has(s.name);
+      const style = selected
+        ? 'background:#1a3a2e;border:1px solid #4ade80;color:#4ade80;'
+        : 'background:#1c1e2a;border:1px solid #2a2d3a;color:#888;';
+      return `<span class="pillar-keyword-chip" style="cursor:pointer;${style}" onclick="toggleAiSuggestion(${i})">${escapeHtml(s.name)}</span>`;
+    }).join(' ');
+};
+
+PillarsForm.prototype.addAiChip = function(raw) {
+  const k = String(raw).trim();
+  if (!k) return;
+  if (this.aiChips.includes(k)) return;
+  this.aiChips.push(k);
+  this.renderAiChips();
+};
+
+PillarsForm.prototype.removeAiChip = function(idx) {
+  this.aiChips.splice(idx, 1);
+  this.renderAiChips();
+};
+
+PillarsForm.prototype.clearAiChips = function() {
+  this.aiChips = [];
+  this.renderAiChips();
+};
+
+PillarsForm.prototype.renderAiChips = function() {
+  const box = document.getElementById('pillars-ai-chips');
+  if (!box) return;
+  if (!this.aiChips.length) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.style.display = 'block';
+  box.innerHTML = this.aiChips.map((c, i) =>
+    `<span class="pillar-keyword-chip" style="background:#1a2a4a;border:1px solid #7c8aff;color:#e0e0e0">${escapeHtml(c)} <span class="chip-x" onclick="removeAiChip(${i})">×</span></span>`
+  ).join(' ');
+};
+
+PillarsForm.prototype.addAIPillars = function(result) {
+  const newPillars = result.pillars || [];
+  const newKeywords = result.pillar_keywords || {};
+  let added = 0;
+  const existingKws = new Set();
+  this.data.pillars.forEach(p => (this.data.pillar_keywords[p] || []).forEach(k => existingKws.add(String(k).trim())));
+  const claimedKws = new Set();
+  newPillars.forEach(p => {
+    const name = String(p).trim();
+    if (!name || this.data.pillars.includes(name)) return;
+    const rawKws = (newKeywords[name] || [])
+      .map(k => String(k).trim())
+      .filter(Boolean);
+    const kws = [];
+    rawKws.forEach(k => {
+      if (existingKws.has(k) || claimedKws.has(k)) return;
+      claimedKws.add(k);
+      kws.push(k);
+    });
+    if (!kws.length) return;
+    this.data.pillars.push(name);
+    this.data.pillar_keywords[name] = kws;
+    this.provenance[name] = 'ai';
+    added++;
+  });
+  this.validate();
+  this.render();
+  return added;
+};
+
+PillarsForm.prototype.hasBlockingErrors = function() {
+  return this.validation.duplicates.length > 0;
+};
+
+PillarsForm.prototype.payload = function() {
+  return {
+    pillars: this.data.pillars,
+    pillar_keywords: this.data.pillar_keywords,
+  };
+};
+
+PillarsForm.prototype.render = function() {
+  this.validate();
+  const list = document.getElementById('pillars-list');
+  list.innerHTML = '';
+  const pillarNameTip = _tipIcon('Pillar คือหมวดหลักของคอนเทนต์ ควรตั้งชื่อสั้น ชัดเจน เช่น Product Education, Customer Story');
+  const keywordTip = _tipIcon('คำสำคัญที่มักปรากฏในคอนเทนต์หมวดนี้ ช่วยให้ AI แนะนำหมวดได้ถูกต้อง เช่น สินค้า, ราคา, วิธีใช้');
+  this.data.pillars.forEach((pillar, i) => {
+    const keywords = this.data.pillar_keywords[pillar] || [];
+    const inOriginal = this.original.pillars.includes(pillar);
+    const origKws = this.original.pillar_keywords[pillar] || [];
+    const kwsChanged = JSON.stringify([...origKws].sort()) !== JSON.stringify([...keywords].sort());
+    const dupeSet = new Set(this.validation.duplicates
+      .filter(d => d.pillars.includes(pillar))
+      .map(d => d.kw));
+    const newSet = new Set(keywords.filter(k => !origKws.includes(k)));
+    const hasDup = keywords.some(k => dupeSet.has(k));
+    let cardStyle = '';
+    if (hasDup) {
+      cardStyle = 'border-left:4px solid #f87171;background:#2a1a1a;';
+    } else if (!inOriginal) {
+      cardStyle = 'border-left:4px solid #4ade80;background:#1a2e22;';
+    } else if (kwsChanged) {
+      cardStyle = 'border-left:4px solid #fbbf24;background:#2e2a1a;';
+    }
+    const card = document.createElement('div');
+    card.className = 'pillar-card';
+    card.style.cssText = cardStyle;
+    card.innerHTML = `
+      <div style="font-size:12px;color:#888;margin-bottom:4px">ชื่อ Pillar ${pillarNameTip}</div>
+      <div class="pillar-card-header">
+        <input class="pillar-card-name" value="${escapeHtml(pillar)}" onchange="updatePillarName(${i}, this.value)" placeholder="ชื่อ pillar">
+        <button class="pillar-del-btn" onclick="removePillar(${i})">🗑️</button>
+      </div>
+      <div class="pillar-keywords-label">Keywords (คำที่ทำให้ระบบเดาได้ว่าอยู่ในหมวดนี้): ${keywordTip}</div>
+      <div class="pillar-keywords-box" id="pillar-kw-${i}"></div>
+    `;
+    list.appendChild(card);
+    renderKeywordChips(i, keywords, newSet, dupeSet);
+  });
+  const status = document.getElementById('pillars-save-status');
+  if (this.validation.duplicates.length) {
+    const lines = this.validation.duplicates.map(d => `“${d.kw}” ซ้ำใน ${d.pillars.join(', ')}`).join(' — ');
+    status.className = 'upload-status err';
+    status.textContent = 'ห้ามบันทึก: keyword ซ้ำข้าม pillars — ' + lines;
+  } else {
+    status.className = 'upload-status';
+    status.textContent = '';
+  }
+};
+
+function renderKeywordChips(pillarIdx, keywords, newSet, dupSet) {
+  const box = document.getElementById('pillar-kw-' + pillarIdx);
+  box.innerHTML = '';
+  keywords.forEach((kw, j) => {
+    const chip = document.createElement('span');
+    chip.className = 'pillar-keyword-chip';
+    let extraStyle = '';
+    if (dupSet && dupSet.has(kw)) {
+      extraStyle = 'background:#3a1a1a;border:1px solid #f87171;color:#f87171;';
+    } else if (newSet && newSet.has(kw)) {
+      extraStyle = 'background:#1a3a2e;border:1px solid #4ade80;color:#4ade80;';
+    }
+    if (extraStyle) chip.style.cssText = extraStyle;
+    chip.innerHTML = `${escapeHtml(kw)} <span class="chip-x" onclick="removeKeyword(${pillarIdx}, ${j})">×</span>`;
+    box.appendChild(chip);
+  });
+  const addWrap = document.createElement('span');
+  addWrap.className = 'pillar-keyword-add';
+  addWrap.innerHTML = `<input placeholder="+ เพิ่มคำ" onkeydown="if(event.key==='Enter'){addKeyword(${pillarIdx}, this.value); this.value='';}">`;
+  box.appendChild(addWrap);
+}
 
 function openPillarsModal() {
   const status = document.getElementById('pillars-save-status');
@@ -6375,129 +6804,145 @@ function openPillarsModal() {
       status.textContent = data.error;
       return;
     }
-    _pillarsData = data;
-    renderPillarsList();
+    _PillarsForm = new PillarsForm(data);
+    _PillarsForm.render();
+    closePillarsAiForm();
     status.textContent = '';
     status.className = 'upload-status';
     document.getElementById('pillars-overlay').className = 'settings-modal-overlay visible';
   });
 }
 
-function closePillarsModal() {
+function closePillarsModal(force) {
+  if (!_PillarsForm) {
+    closePillarsAiForm();
+    document.getElementById('pillars-overlay').className = 'settings-modal-overlay';
+    return;
+  }
+  if (!force && _PillarsForm.isWorking()) {
+    if (!confirm('AI กำลังสร้าง Pillars อยู่ ต้องการยกเลิกและปิดหน้าต่างหรือไม่?')) return;
+    _PillarsForm.aiAbort.abort();
+    _PillarsForm.aiAbort = null;
+    closePillarsAiForm();
+  }
+  if (!force && _PillarsForm.isDirty()) {
+    if (!confirm('คุณมีการเปลี่ยนแปลงทียังไม่บันทึก ต้องการปิดหน้าต่างหรือไม่?')) return;
+  }
+  _PillarsForm = null;
+  closePillarsAiForm();
   document.getElementById('pillars-overlay').className = 'settings-modal-overlay';
 }
 
-function renderPillarsList() {
-  const list = document.getElementById('pillars-list');
-  list.innerHTML = '';
-  _pillarsData.pillars.forEach((pillar, i) => {
-    const keywords = _pillarsData.pillar_keywords[pillar] || [];
-    const card = document.createElement('div');
-    card.className = 'pillar-card';
-    card.innerHTML = `
-      <div class="pillar-card-header">
-        <input class="pillar-card-name" value="${escapeHtml(pillar)}" onchange="updatePillarName(${i}, this.value)" placeholder="ชื่อ pillar">
-        <button class="pillar-del-btn" onclick="removePillar(${i})">🗑️</button>
-      </div>
-      <div class="pillar-keywords-label">Keywords (คำที่ทำให้ระบบเดาได้ว่าอยู่ในหมวดนี้):</div>
-      <div class="pillar-keywords-box" id="pillar-kw-${i}"></div>
-    `;
-    list.appendChild(card);
-    renderKeywordChips(i, keywords);
-  });
-}
-
-function renderKeywordChips(pillarIdx, keywords) {
-  const box = document.getElementById('pillar-kw-' + pillarIdx);
-  box.innerHTML = '';
-  keywords.forEach((kw, j) => {
-    const chip = document.createElement('span');
-    chip.className = 'pillar-keyword-chip';
-    chip.innerHTML = `${escapeHtml(kw)} <span class="chip-x" onclick="removeKeyword(${pillarIdx}, ${j})">×</span>`;
-    box.appendChild(chip);
-  });
-  // input สำหรับเพิ่ม keyword
-  const addWrap = document.createElement('span');
-  addWrap.className = 'pillar-keyword-add';
-  addWrap.innerHTML = `<input placeholder="+ เพิ่มคำ" onkeydown="if(event.key==='Enter'){addKeyword(${pillarIdx}, this.value); this.value='';}">`;
-  box.appendChild(addWrap);
-}
-
-function addKeyword(pillarIdx, kw) {
-  kw = kw.trim();
-  if (!kw) return;
-  const pillar = _pillarsData.pillars[pillarIdx];
-  if (!_pillarsData.pillar_keywords[pillar]) _pillarsData.pillar_keywords[pillar] = [];
-  if (!_pillarsData.pillar_keywords[pillar].includes(kw)) {
-    _pillarsData.pillar_keywords[pillar].push(kw);
-    renderKeywordChips(pillarIdx, _pillarsData.pillar_keywords[pillar]);
-  }
-}
-
-function removeKeyword(pillarIdx, kwIdx) {
-  const pillar = _pillarsData.pillars[pillarIdx];
-  if (_pillarsData.pillar_keywords[pillar]) {
-    _pillarsData.pillar_keywords[pillar].splice(kwIdx, 1);
-    renderKeywordChips(pillarIdx, _pillarsData.pillar_keywords[pillar]);
-  }
-}
-
-function updatePillarName(idx, newName) {
-  newName = newName.trim();
-  if (!newName) return;
-  const oldName = _pillarsData.pillars[idx];
-  // ย้าย keywords ไปชื่อใหม่
-  if (_pillarsData.pillar_keywords[oldName]) {
-    _pillarsData.pillar_keywords[newName] = _pillarsData.pillar_keywords[oldName];
-    delete _pillarsData.pillar_keywords[oldName];
-  }
-  _pillarsData.pillars[idx] = newName;
-}
-
-function removePillar(idx) {
-  const pillar = _pillarsData.pillars[idx];
-  delete _pillarsData.pillar_keywords[pillar];
-  _pillarsData.pillars.splice(idx, 1);
-  renderPillarsList();
-}
-
-function addPillarCard() {
-  const name = 'Pillar ใหม่';
-  let n = 1;
-  let finalName = name;
-  while (_pillarsData.pillars.includes(finalName)) {
-    n++;
-    finalName = name + ' ' + n;
-  }
-  _pillarsData.pillars.push(finalName);
-  _pillarsData.pillar_keywords[finalName] = [];
-  renderPillarsList();
-  // focus ช่องสุดท้าย
-  const inputs = document.querySelectorAll('.pillar-card-name');
-  if (inputs.length) inputs[inputs.length - 1].focus();
-}
+function addPillarCard() { if (_PillarsForm) _PillarsForm.addPillar(); }
+function removePillar(idx) { if (_PillarsForm) _PillarsForm.removePillar(idx); }
+function updatePillarName(idx, newName) { if (_PillarsForm) _PillarsForm.updateName(idx, newName); }
+function addKeyword(idx, kw) { if (_PillarsForm) _PillarsForm.addKeyword(idx, kw); }
+function removeKeyword(idx, kwIdx) { if (_PillarsForm) _PillarsForm.removeKeyword(idx, kwIdx); }
 
 function savePillars() {
+  if (!_PillarsForm) return;
+  if (_PillarsForm.hasBlockingErrors()) { _PillarsForm.validate(); _PillarsForm.render(); return; }
   const status = document.getElementById('pillars-save-status');
   status.className = 'upload-status';
   status.textContent = 'กำลังบันทึก...';
   fetch('/api/pillars_save', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      pillars: _pillarsData.pillars,
-      pillar_keywords: _pillarsData.pillar_keywords,
-    }),
+    body: JSON.stringify(_PillarsForm.payload()),
   }).then(r => r.json()).then(data => {
     if (data.ok) {
       status.className = 'upload-status ok';
       status.textContent = 'บันทึกแล้ว ✓';
-      setTimeout(closePillarsModal, 800);
+      setTimeout(() => closePillarsModal(true), 800);
     } else {
       status.className = 'upload-status err';
       status.textContent = data.error || 'เกิดข้อผิดพลาด';
     }
   });
+}
+
+function openPillarsAiForm() {
+  const form = document.getElementById('pillars-ai-form');
+  const status = document.getElementById('pillars-ai-status');
+  const prompt = document.getElementById('pillars-ai-prompt');
+  if (prompt) { prompt.value = ''; }
+  if (status) { status.className = 'upload-status'; status.textContent = ''; }
+  if (form) { form.style.display = 'block'; }
+  if (prompt) { prompt.focus(); }
+  if (_PillarsForm) _PillarsForm.clearAiChips();
+}
+
+function closePillarsAiForm() {
+  const form = document.getElementById('pillars-ai-form');
+  const prompt = document.getElementById('pillars-ai-prompt');
+  const status = document.getElementById('pillars-ai-status');
+  const btn = document.getElementById('pillars-ai-generate-btn');
+  if (form) { form.style.display = 'none'; }
+  if (prompt) { prompt.value = ''; }
+  if (status) { status.className = 'upload-status'; status.textContent = ''; }
+  if (btn) { btn.disabled = false; btn.textContent = 'สร้าง'; }
+  if (_PillarsForm && _PillarsForm.aiAbort) {
+    _PillarsForm.aiAbort.abort();
+    _PillarsForm.aiAbort = null;
+  }
+  if (_PillarsForm) _PillarsForm.clearAiChips();
+}
+
+function generatePillarsWithAI() {
+  const status = document.getElementById('pillars-ai-status');
+  const btn = document.getElementById('pillars-ai-generate-btn');
+  if (!_PillarsForm || !_PillarsForm.aiChips.length) {
+    status.className = 'upload-status err';
+    status.textContent = 'กรุณาเพิ่ม chip ก่อน (พิมพ์แล้วกด Enter)';
+    return;
+  }
+  if (_PillarsForm.aiAbort) _PillarsForm.aiAbort.abort();
+  _PillarsForm.aiAbort = new AbortController();
+  status.className = 'upload-status';
+  status.textContent = 'กำลังสร้าง Pillars...';
+  if (btn) { btn.disabled = true; btn.textContent = 'กำลังสร้าง...'; }
+  fetch('/api/pillars_suggest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chips: _PillarsForm.aiChips }),
+    signal: _PillarsForm.aiAbort.signal,
+  }).then(r => r.json()).then(data => {
+    if (_PillarsForm) _PillarsForm.aiAbort = null;
+    if (btn) { btn.disabled = false; btn.textContent = 'สร้าง'; }
+    if (data.ok) {
+      const res = data.result || {};
+      const added = _PillarsForm ? _PillarsForm.addAIPillars(res) : 0;
+      if (added) {
+        status.className = 'upload-status ok';
+        status.textContent = 'เพิ่ม ' + added + ' Pillar แล้ว ✓';
+        setTimeout(closePillarsAiForm, 800);
+      } else {
+        status.className = 'upload-status err';
+        status.textContent = 'AI ไม่สามารถสร้าง Pillar ใหม่ได้';
+      }
+    } else {
+      status.className = 'upload-status err';
+      status.textContent = data.error || 'สร้างไม่สำเร็จ';
+    }
+  }).catch(e => {
+    if (_PillarsForm) _PillarsForm.aiAbort = null;
+    if (btn) { btn.disabled = false; btn.textContent = 'สร้าง'; }
+    if (e.name === 'AbortError') {
+      status.className = 'upload-status';
+      status.textContent = 'ยกเลิกการสร้างแล้ว';
+    } else {
+      status.className = 'upload-status err';
+      status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+    }
+  });
+}
+
+function addAiChip(raw) {
+  if (_PillarsForm) _PillarsForm.addAiChip(raw);
+}
+
+function removeAiChip(idx) {
+  if (_PillarsForm) _PillarsForm.removeAiChip(idx);
 }
 
 function onDragStart(ev, folderPath) {
@@ -8528,10 +8973,6 @@ function generateMediaFromOutput(mediaType) {
   });
 }
 
-function goHome() {
-  closeResultOverlay();
-}
-
 let _settingsAgentKey = null;
 let _instrPresets = [];
 let _instrSettings = {};
@@ -8971,13 +9412,28 @@ function loadCredits() {
 </div>
 <div class="settings-modal-overlay" id="pillars-overlay">
   <div class="settings-modal" style="width:560px;max-height:85vh">
-    <h3>🎯 Content Pillars (เสาหลักคอนเทนต์)</h3>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h3 style="margin:0">🎯 Content Pillars (เสาหลักคอนเทนต์)</h3>
+      <button onclick="closePillarsModal()" title="ปิด" style="background:none;border:none;color:#888;font-size:24px;cursor:pointer;line-height:1;padding:0 4px">&times;</button>
+    </div>
     <p style="font-size:12px;color:#888;margin:0 0 14px 0">หมวดใหญ่ที่แบรนด์พูดเสมอ — AI จะหมุนเวียน ไม่ซ้ำหมวดเดิมบ่อยเกินไป ใส่ keywords ที่ทำให้ระบบเดาได้ว่าคอนเทนต์ไหนอยู่ในหมวดนี้</p>
     <div id="pillars-list" style="max-height:50vh;overflow-y:auto"></div>
-    <button class="pillar-add-btn" onclick="addPillarCard()">+ เพิ่ม Pillar</button>
+    <div style="display:flex;gap:8px">
+      <button class="pillar-add-btn" onclick="addPillarCard()" style="flex:1;width:auto">+ เพิ่ม Pillar</button>
+      <button class="pillar-add-btn" onclick="openPillarsAiForm()" style="flex:1;width:auto;background:#1a2a4a;border-color:#7c8aff">🎓 เพิ่มด้วย AI</button>
+    </div>
+    <div id="pillars-ai-form" style="display:none;margin:12px 0;padding:12px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px">
+      <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">พิมพ์หัวข้อละ chip กด Enter — 1 chip = 1 Pillar</label>
+      <input id="pillars-ai-prompt" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px" placeholder="เช่น นาฬิกาเด็ก" onkeydown="if(event.key==='Enter'){addAiChip(this.value); this.value=''; this.focus();}">
+      <div id="pillars-ai-chips" style="margin-top:10px;display:none"></div>
+      <div class="upload-status" id="pillars-ai-status"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+        <button class="settings-cancel" onclick="closePillarsAiForm()">ยกเลิก</button>
+        <button class="settings-save" id="pillars-ai-generate-btn" onclick="generatePillarsWithAI()">สร้าง</button>
+      </div>
+    </div>
     <div class="upload-status" id="pillars-save-status"></div>
-    <div class="settings-actions">
-      <button class="settings-cancel" onclick="closePillarsModal()">ยกเลิก</button>
+    <div class="settings-actions" style="justify-content:flex-end">
       <button class="settings-save" onclick="savePillars()">บันทึก</button>
     </div>
   </div>

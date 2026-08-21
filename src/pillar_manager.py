@@ -87,3 +87,21 @@ def infer_pillar(concept: str, pillars: list[str], keywords_map: dict[str, list[
             return p
 
     return ""
+
+
+def find_duplicate_keywords(pillar_keywords: dict[str, list[str]]) -> dict[str, list[str]]:
+    """หา keyword ที่ปรากฏในมากกว่า 1 pillar.
+
+    คืน: {keyword: [pillar_name, ...]} สำหรับทุก keyword ที่ซ้ำ
+    """
+    seen: dict[str, list[str]] = {}
+    for pillar, keywords in pillar_keywords.items():
+        for kw in keywords:
+            kw = str(kw).strip()
+            if not kw:
+                continue
+            if kw not in seen:
+                seen[kw] = []
+            if pillar not in seen[kw]:
+                seen[kw].append(pillar)
+    return {kw: pillars for kw, pillars in seen.items() if len(pillars) > 1}
