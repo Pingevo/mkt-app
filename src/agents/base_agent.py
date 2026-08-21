@@ -15,6 +15,7 @@ from typing import Any
 from rich.console import Console
 
 from ..llm_client import LLMClient
+from ..output_validators import validate_output as _validate_output
 from ..brand_priority import BrandRules
 
 console = Console()
@@ -335,6 +336,18 @@ class BaseAgent:
                 response_format=response_format,
             )
 
+        # ตรวจ output ตามรูปแบบของ agent แล้วซ่อมถ้าไม่ผ่าน
+        max_repair = self.config.get("max_retry_limit", 3)
+        ok, error = self.validate_output(output)
+        for _ in range(max_repair):
+            if ok:
+                break
+            console.print(f"[yellow]output ไม่ผ่าน validation: {error}[/yellow]")
+            output = self._repair_output(output, error, messages, response_format)
+            ok, error = self.validate_output(output)
+        if not ok:
+            raise ValueError(f"Agent {self.agent_name} ตรวจ output ไม่ผ่านหลังซ่อม {max_repair} รอบ: {error}")
+
         return output
 
     def _build_multimodal_content(self, text: str, image_paths: list[str] | None) -> str | list[dict]:
@@ -624,6 +637,37 @@ class BaseAgent:
             output = refined
 
         return output
+
+    def validate_output(self, output: str) -> tuple[bool, str]:
+        """ตรวจ output ของ agent ว่าตรงกับรูปแบบที่กำหนดไหม."""
+        required = self.config.get("required_output_sections")
+        return _validate_output(self.agent_name, output, required)
+
+    def _repair_output(
+        self,
+        output: str,
+        error: str,
+        messages: list,
+        response_format: dict | None = None,
+    ) -> str:
+        """ให้ LLM แก้ output ที่ไม่ผ่าน validation โดยไม่เปลี่ยนเนื้อหา."""
+        prompt = self.config.get(
+            "repair_prompt",
+            "ผลงานข้างต้นไม่ตรงตามรูปแบบที่กำหนด: {error}\nกรุณาแก้ไขให้ตรงรูปแบบโดยไม่เปลี่ยนเนื้อหา ส่งเฉพาะผลงานฉบับสุดท้ายเท่านั้น",
+        )
+        repair_messages = messages + [
+            {"role": "assistant", "content": output},
+            {"role": "user", "content": prompt.format(error=error)},
+        ]
+        return self.llm.chat(
+            repair_messages,
+            model=self.config.get("model"),
+            temperature=self.config.get("temperature", 0.7),
+            max_tokens=self.config.get("max_tokens", 4096),
+            max_retry_limit=self.config.get("max_retry_limit", 3),
+            response_format=response_format,
+            source=f"{self.agent_name}.repair",
+        )
 
     def build_prompt(self, *args: Any, **kwargs: Any) -> str:
         """Construct the user prompt for this agent.

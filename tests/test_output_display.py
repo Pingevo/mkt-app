@@ -29,6 +29,12 @@ def _content_json(title="รีวิว Lagenio K3"):
     }, ensure_ascii=False)
 
 
+def _write_flow_meta(session_dir: Path, output_files: list[str], label: str = "AUTO — content_creator"):
+    """เขียน _flow_meta จำลอง เหมือนที่ระบบเขียนตอน flow จบ."""
+    from src.cost_summary import write_flow_meta
+    write_flow_meta(session_dir, "test_flow", output_files, label=label, agents=["content_creator"])
+
+
 def test_scan_sessions_include_title_from_content_json(tmp_path, monkeypatch):
     """_scan_sessions ต้องคืน title ของโพสต์ โดยอ่านจาก .json คู่ของ .md"""
     import web_viewer
@@ -38,10 +44,12 @@ def test_scan_sessions_include_title_from_content_json(tmp_path, monkeypatch):
     out = tmp_path / "output"
     session = out / "19_ส.ค._2569_12.53"
     session.mkdir(parents=True)
-    (session / "04_content_creator_K2_AUTO_โพสต์ที่1_123456.md").write_text("# markdown", encoding="utf-8")
-    (session / "04_content_creator_K2_AUTO_โพสต์ที่1_123456.json").write_text(
-        _content_json("รีวิว Lagenio K3 สมาร์ทวอทช์"), encoding="utf-8")
+    md_file = session / "04_content_creator_K2_AUTO_โพสต์ที่1_123456.md"
+    json_file = session / "04_content_creator_K2_AUTO_โพสต์ที่1_123456.json"
+    md_file.write_text("# markdown", encoding="utf-8")
+    json_file.write_text(_content_json("รีวิว Lagenio K3 สมาร์ทวอทช์"), encoding="utf-8")
     (session / "image_1.png").write_bytes(b"\x89PNG")
+    _write_flow_meta(session, [str(md_file)])
 
     sessions = web_viewer._scan_sessions()
     assert len(sessions) == 1
@@ -59,9 +67,11 @@ def test_api_sessions_returns_title(_client, tmp_path, monkeypatch):
     out = tmp_path / "output"
     session = out / "20_ส.ค._2569_09.00"
     session.mkdir(parents=True)
-    (session / "04_content_creator_K2_โพสต์ที่1_123456.md").write_text("# markdown", encoding="utf-8")
-    (session / "04_content_creator_K2_โพสต์ที่1_123456.json").write_text(
-        _content_json("รีวิว Retro Watch"), encoding="utf-8")
+    md_file = session / "04_content_creator_K2_โพสต์ที่1_123456.md"
+    json_file = session / "04_content_creator_K2_โพสต์ที่1_123456.json"
+    md_file.write_text("# markdown", encoding="utf-8")
+    json_file.write_text(_content_json("รีวิว Retro Watch"), encoding="utf-8")
+    _write_flow_meta(session, [str(md_file)])
 
     res = _client.get("/api/sessions")
     assert res.status_code == 200

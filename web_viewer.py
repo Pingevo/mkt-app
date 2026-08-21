@@ -229,14 +229,11 @@ def _scan_data_folders() -> list[dict[str, Any]]:
     return folders
 
 
-def _is_content_creator_file(path: Path) -> bool:
-    """ตรวจว่าไฟล์เป็น content_creator output ทีเราจะเอาชื่อโพสต์ไปใช้แสดง."""
-    lower = path.name.lower()
-    return "content_creator" in lower and path.suffix.lower() in (".md", ".json")
-
-
 def _extract_title_from_content_file(path: Path) -> str:
-    """ดึง title ของโพสต์แรกจาก content_creator output (.json หรือ .md)."""
+    """ดึง title จาก content_creator output (.json หรือ .md).
+
+    ใช้เฉพาะ content_creator เท่านั้น — agent อื่นใช้ label จาก _flow_meta
+    """
     def _from_json(p: Path) -> str:
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
@@ -273,43 +270,71 @@ def _extract_title_from_content_file(path: Path) -> str:
     return _from_markdown(path)
 
 
+def _read_flow_metas(session_dir: Path) -> list[dict]:
+    """อ่าน _flow_meta_*.json ทั้งหมดใน session — แต่ละ flow มี meta ของตัวเอง."""
+    metas = []
+    for meta_file in sorted(session_dir.glob("_flow_meta_*.json")):
+        try:
+            metas.append(json.loads(meta_file.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return metas
+
+
 def _scan_sessions() -> list[dict[str, Any]]:
+    """สแกน session จาก output/ — อ่านรายการไฟล์จาก _flow_meta เท่านั้น.
+
+    แต่ละ session ต้องมี _flow_meta_*.json อย่างน้อย 1 ไฟล์
+    (เขียนตอน flow จบ) ที่เก็บ output_files และ label
+    session ที่ไม่มี _flow_meta จะไม่แสดง (ย้ายไป output_archive แล้ว)
+    """
     sessions = []
     if not OUTPUT_DIR.exists():
         return sessions
     for item in sorted(OUTPUT_DIR.iterdir(), reverse=True):
         if not item.is_dir() or item.name.startswith(".") or item.name == ".DS_Store":
             continue
+
+        metas = _read_flow_metas(item)
+        if not metas:
+            continue  # ไม่มี _flow_meta → ข้าม (session เก่าอยู่ใน archive แล้ว)
+
+        # รวม output_files จากทุก flow ใน session
         files = []
-        # เก็บชื่อไฟล์ทั้งหมดก่อน เพื่อกรอง .json ที่มี .md คู่กัน (content_creator structured output)
-        all_names: set[str] = set()
-        for f in sorted(item.iterdir()):
-            if f.is_file() and not f.name.startswith(".") and f.name != ".DS_Store":
-                all_names.add(f.name)
-        for f in sorted(item.iterdir()):
-            if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store":
-                continue
-            # ซ่อน .json ที่มี .md คู่กัน (content_creator structured output — user เห็น .md อย่างเดียวพอ)
-            if f.suffix == ".json":
-                md_pair = f.stem + ".md"
-                if md_pair in all_names:
+        seen_names: set[str] = set()
+        for m in metas:
+            for fp in m.get("output_files", []):
+                fname = Path(fp).name
+                if fname in seen_names:
                     continue
-            if not _is_content_creator_file(f):
-                continue
-            title = _extract_title_from_content_file(f)
-            files.append({
-                "name": f.name,
-                "title": title,
-                "size": f.stat().st_size,
-                "modified": datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
-            })
-        if files:
-            session_title = ""
-            for f in files:
-                if f["title"]:
-                    session_title = f["title"]
-                    break
-            sessions.append({"name": item.name, "title": session_title, "files": files})
+                seen_names.add(fname)
+                fpath = item / fname
+                if not fpath.exists():
+                    continue
+                # ซ่อน .json ที่มี .md คู่กัน (content_creator structured output)
+                if fpath.suffix == ".json" and fpath.with_suffix(".md").exists():
+                    continue
+                title = _extract_title_from_content_file(fpath)
+                files.append({
+                    "name": fname,
+                    "title": title,
+                    "size": fpath.stat().st_size,
+                    "modified": datetime.fromtimestamp(fpath.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                })
+
+        if not files:
+            continue
+
+        # session title: content_creator title ดีที่สุด → ถ้าไม่มี ใช้ label จาก _flow_meta
+        session_title = ""
+        for f in files:
+            if f["title"]:
+                session_title = f["title"]
+                break
+        if not session_title:
+            session_title = metas[0].get("label", "")
+
+        sessions.append({"name": item.name, "title": session_title, "files": files})
     return sessions
 
 
@@ -1280,6 +1305,21 @@ async def api_rename_folder(request: Request) -> JSONResponse:
         new_cache = CACHE_DIR / new_name
         if not new_cache.exists():
             old_cache.rename(new_cache)
+    # Update product_db record: product_id + paths inside data/cache
+    record = product_db.load(new_name)
+    if record:
+        record["product_id"] = new_name
+        old_data_prefix = str(DATA_DIR / old_name)
+        new_data_prefix = str(DATA_DIR / new_name)
+        old_cache_prefix = str(CACHE_DIR / old_name)
+        new_cache_prefix = str(CACHE_DIR / new_name)
+        for f in record.get("files", []):
+            if f.get("path"):
+                f["path"] = f["path"].replace(old_data_prefix, new_data_prefix).replace(old_cache_prefix, new_cache_prefix)
+        for img in record.get("image_descriptions", []):
+            if img.get("path"):
+                img["path"] = img["path"].replace(old_data_prefix, new_data_prefix).replace(old_cache_prefix, new_cache_prefix)
+        product_db.save(new_name, record)
     return JSONResponse({"ok": True, "folder": new_name, "renamed": True})
 
 
@@ -3904,7 +3944,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .flow-title { font-size: 14px; color: #888; margin-bottom: 12px; }
   .flow-title b { color: #7c8aff; }
   .flow-steps { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-  .flow-step { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: #1c1e2a; border: 1px solid #2a2d3a; border-radius: 8px; font-size: 13px; color: #888; transition: all 0.3s ease; }
+  .flow-step { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 16px; background: #1c1e2a; border: 1px solid #2a2d3a; border-radius: 8px; font-size: 13px; color: #888; transition: all 0.3s ease; }
   .flow-step.done { background: #1a2a1a; border-color: #22c55e; color: #86efac; }
   .flow-step.running {
     background: #1e1b3a;
@@ -3927,6 +3967,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .flow-step.running .flow-step-name { color: #c792ea; }
   .flow-step.done .flow-step-name { color: #86efac; }
   .flow-step-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #2a2d3a; color: #888; margin-left: 4px; }
+  .flow-step-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; width: 100%; }
+  .flow-step-links { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+  .flow-step-links:empty { display: none; }
   .flow-arrow { color: #555; font-size: 18px; }
   .flow-product { margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #2a2d3a; }
   .flow-product:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
@@ -4798,6 +4841,7 @@ function uploadFiles() {
       _uploadModalOriginal = _getUploadModalData();
       status.className = 'upload-status ok';
       status.textContent = 'บันทึกเรียบร้อยแล้ว';
+      loadFolderList();
       setTimeout(() => closeUploadModal(true), 800);
       return;
     }
@@ -7593,7 +7637,15 @@ function loadSessions() {
     let html = '';
     for (const s of sessions) {
       const sessionLabel = s.title || s.name;
-      html += '<div class="session-item" style="cursor:pointer" onclick="openSessionOutput(\'' + s.name + '\')">' + escapeHtml(sessionLabel) + '</div>';
+      let lastModified = '';
+      if (s.files && s.files.length) {
+        const sorted = [...s.files].sort((a, b) => (b.modified || '').localeCompare(a.modified || ''));
+        lastModified = sorted[0].modified || '';
+      }
+      html += '<div class="session-item" style="cursor:pointer" onclick="openSessionOutput(\'' + s.name + '\')">'
+        + escapeHtml(sessionLabel)
+        + (lastModified ? '<div style="font-size:11px;color:#666;margin-top:2px">' + escapeHtml(lastModified) + '</div>' : '')
+        + '</div>';
     }
     el.innerHTML = html;
   });
@@ -7601,12 +7653,13 @@ function loadSessions() {
 
 function openSessionOutput(session) {
   fetch('/api/session_files/' + encodeURIComponent(session)).then(r => r.json()).then(files => {
-    const contentFiles = files.filter(f => /content_creator.*\.md$/i.test(f.name)).map(f => session + '/' + f.name);
-    if (!contentFiles.length) {
-      alert('ไม่พบ content output ใน session นี้');
+    // หาไฟล์ .md ที่เป็น agent output (ไม่ใช่ metadata ที่ขึ้นต้นด้วย _)
+    const mdFiles = files.filter(f => f.name.endsWith('.md') && !f.name.startsWith('_')).map(f => session + '/' + f.name);
+    if (!mdFiles.length) {
+      alert('ไม่พบ output ใน session นี้');
       return;
     }
-    viewResult(contentFiles[0], contentFiles);
+    viewResult(mdFiles[0], mdFiles);
   }).catch(() => alert('โหลดไฟล์ไม่สำเร็จ'));
 }
 
@@ -7664,21 +7717,32 @@ function renderMarkdown(text) {
   html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
   // Horizontal rule
   html = html.replace(/^---$/gm, '<hr>');
-  // Tables — parse blocks of | separated rows
-  html = html.replace(/((?:^\|[^\n]+\|\n?)+)/gm, function(tableBlock) {
-    const rows = tableBlock.trim().split('\n');
+  // Tables — parse blocks of | separated rows (markdown table และ plain text table)
+  html = html.replace(/((?:^[^\n]*\|[^\n]*\n?)+)/gm, function(tableBlock) {
+    const rows = tableBlock.trim().split('\n').filter(r => r.trim());
     if (rows.length < 2) return tableBlock;
-    // Check if second row is separator (|:---|:---|)
-    if (!rows[1].match(/^\|[\s:|\-]+$/)) return tableBlock;
+    function stripPipes(row) {
+      let r = row.trim();
+      if (r.startsWith('|')) r = r.slice(1);
+      if (r.endsWith('|')) r = r.slice(0, -1);
+      return r;
+    }
+    function parseRow(row) { return stripPipes(row).split('|').map(c => c.trim()); }
+    function countCols(row) { return stripPipes(row).split('|').length; }
+    // ต้องมีอย่างน้อย 2 คอลัมน์ และจำนวนคอลัมน์ใกล้เคียงกันทุกแถว
+    const colCounts = rows.map(countCols);
+    if (colCounts[0] < 2) return tableBlock;
+    if (!colCounts.every(c => Math.abs(c - colCounts[0]) <= 1)) return tableBlock;
+    // markdown table: แถวที่ 2 เป็น separator (|:---|:---|)
+    const isMarkdownTable = rows[1].match(/^[\s|:\-]+$/) && rows[1].includes('-');
     let result = '<table>';
-    // Header
-    const headers = rows[0].split('|').slice(1, -1).map(c => c.trim());
+    const headers = parseRow(rows[0]);
     result += '<thead><tr>';
     for (const h of headers) result += '<th>' + h + '</th>';
     result += '</tr></thead><tbody>';
-    // Body (skip separator row)
-    for (let i = 2; i < rows.length; i++) {
-      const cells = rows[i].split('|').slice(1, -1).map(c => c.trim());
+    const startIdx = isMarkdownTable ? 2 : 1;
+    for (let i = startIdx; i < rows.length; i++) {
+      const cells = parseRow(rows[i]);
       result += '<tr>';
       for (const c of cells) result += '<td>' + c + '</td>';
       result += '</tr>';
@@ -9029,8 +9093,11 @@ async function saveScheduleJob() {
   });
   if (!res.ok) { alert('บันทึกไม่ได้'); return; }
   const data = await res.json();
-  alert('ตั้งเวลาสำเร็จ: ' + data.job_id);
   closeScheduleModal();
+  if (typeof showScheduleToast === 'function') {
+    const when = repeat ? 'ทุกวันเวลา ' + time : 'วันที่ ' + date + ' เวลา ' + time;
+    showScheduleToast('📅 ตั้งเวลาสำเร็จ: ' + name + ' — ' + when);
+  }
 }
 </script>
 <div class="settings-modal-overlay" id="schedule-list-overlay">

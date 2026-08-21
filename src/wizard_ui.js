@@ -60,6 +60,12 @@
     return !!(nextBtn && nextBtn.classList.contains('running'));
   }
 
+  function _isFlowActive(idx) {
+    const flow = flows[idx];
+    if (!flow) return false;
+    return _isFlowRunning(idx) || flow.finished;
+  }
+
   function renderFlowBoxes() {
     const list = document.getElementById('flow-wizard-list');
     if (!list) return;
@@ -73,11 +79,11 @@
       addBtn.onclick = function () { window.addFlow(); };
       list.appendChild(addBtn);
     }
-    // ลบ flow box เดิมที่ไม่ได้รันอยู่ออกก่อน (คงไว้เฉพาะที่กำลังรัน)
+    // ลบ flow box เดิมที่ไม่ได้รัน/เสร็จแล้วออกก่อน (คงไว้เฉพาะที่กำลังรันหรือทำเสร็จแล้ว)
     const existingBoxes = list.querySelectorAll('.flow-box:not(.add-new)');
     existingBoxes.forEach((box) => {
       const idx = parseInt(box.dataset.flowIdx);
-      if (!isNaN(idx) && _isFlowRunning(idx)) return;  // อย่าลบ flow ที่กำลังรัน
+      if (!isNaN(idx) && _isFlowActive(idx)) return;  // อย่าลบ flow ที่กำลังรันหรือเสร็จแล้ว
       box.remove();
     });
     // แทรก flow ใหม่/ที่ยังไม่ได้ render ก่อนปุ่ม "เพิ่ม Flow"
@@ -87,7 +93,17 @@
       wrapper.innerHTML = renderFlowBox(i);
       const newBox = wrapper.firstElementChild;
       addBtn.before(newBox);
-      setWizardStep(i, flowSteps[i] || 1);
+      if (flows[i].finished) {
+        // flow ที่จบแล้ว → ซ่อนปุ่มยืนยัน/กลับ แสดงแค่ ×
+        const nextBtn = document.getElementById('flow-next-' + i);
+        const backBtn = document.getElementById('flow-back-' + i);
+        const removeBtn = document.getElementById('flow-remove-' + i);
+        if (nextBtn) nextBtn.style.display = 'none';
+        if (backBtn) backBtn.style.display = 'none';
+        if (removeBtn) removeBtn.style.display = 'inline-block';
+      } else {
+        setWizardStep(i, flowSteps[i] || 1);
+      }
     }
   }
 
@@ -107,7 +123,7 @@
     // Header
     html += '<div class="flow-box-header">';
     html += '<span class="flow-box-title">Flow ' + (idx + 1) + '</span>';
-    html += '<span class="flow-box-remove" data-flow-idx="' + idx + '" onclick="removeFlow(this.dataset.flowIdx, event)">×</span>';
+    html += '<span class="flow-box-remove" id="flow-remove-' + idx + '" data-flow-idx="' + idx + '" onclick="removeFlow(this.dataset.flowIdx, event)">×</span>';
     html += '</div>';
 
     // Stepper
@@ -264,6 +280,7 @@
     const flow = {
       id: wizardFlowCounter,
       isAuto: false,
+      finished: false,
       autoCombined: false,
       autoCount: 2,
       products: [],
@@ -369,8 +386,20 @@
       const combined = document.getElementById('flow-auto-combined-' + idx);
       const count = document.getElementById('flow-auto-count-' + idx);
       const countWrap = document.getElementById('flow-auto-count-wrap-' + idx);
-      if (combined) combined.value = flow.autoCombined ? 'combined' : 'separate';
-      if (count) count.value = flow.autoCount;
+      const readyCount = productFolderCache.filter(f => f.ready).length;
+      // ถ้ามีสินค้าพร้อม < 2 → ปิด combined, บังคับ separate
+      if (readyCount < 2 && flow.autoCombined) {
+        flow.autoCombined = false;
+      }
+      if (combined) {
+        combined.value = flow.autoCombined ? 'combined' : 'separate';
+        combined.disabled = readyCount < 2;
+      }
+      if (count) {
+        count.max = Math.max(2, readyCount);
+        count.value = Math.min(flow.autoCount, readyCount);
+        flow.autoCount = parseInt(count.value) || 1;
+      }
       if (countWrap) countWrap.style.display = flow.autoCombined ? 'inline-block' : 'none';
     }
 
@@ -403,8 +432,9 @@
     const combined = document.getElementById('flow-auto-combined-' + idx);
     const count = document.getElementById('flow-auto-count-' + idx);
     const countWrap = document.getElementById('flow-auto-count-wrap-' + idx);
-    if (combined) flow.autoCombined = combined.value === 'combined';
-    if (count && flow.autoCombined) flow.autoCount = Math.max(2, Math.min(10, parseInt(count.value) || 2));
+    const readyCount = productFolderCache.filter(f => f.ready).length;
+    if (combined) flow.autoCombined = combined.value === 'combined' && readyCount >= 2;
+    if (count && flow.autoCombined) flow.autoCount = Math.max(2, Math.min(readyCount, parseInt(count.value) || 2));
     if (countWrap) countWrap.style.display = flow.autoCombined ? 'inline-block' : 'none';
     renderStep1(idx);
   };
@@ -767,6 +797,12 @@
   async function confirmAndRunFlows() {
     if (!flows.length) return;
 
+    const finished = flows.findIndex(f => f.finished);
+    if (finished >= 0) {
+      alert('Flow ' + (finished + 1) + ' ทำงานเสร็จแล้ว กรุณาเพิ่ม flow ใหม่หรือกด Reset');
+      return;
+    }
+
     const autoCount = flows.filter(f => f.isAuto).length;
     if (autoCount > 0 && autoCount !== flows.length) {
       alert('ยังไม่รองรับการผสม Auto กับ flow ปกติในรอบเดียว — กรุณาเลือกอย่างใดอย่างหนึ่ง');
@@ -810,11 +846,17 @@
     idx = parseInt(idx);
     const flow = flows[idx];
     if (!flow) return;
+    if (flow.finished) {
+      alert('Flow นี้ทำงานเสร็จแล้ว กรุณาเพิ่ม flow ใหม่หรือกด Reset');
+      return;
+    }
 
     const nextBtn = document.getElementById('flow-next-' + idx);
     const backBtn = document.getElementById('flow-back-' + idx);
-    if (nextBtn) { nextBtn.classList.add('running'); nextBtn.textContent = 'หยุด'; nextBtn.disabled = false; }
+    const removeBtn = document.getElementById('flow-remove-' + idx);
+    if (nextBtn) { nextBtn.classList.add('running'); nextBtn.style.display = 'none'; }
     if (backBtn) backBtn.style.display = 'none';
+    if (removeBtn) removeBtn.style.display = 'none';
 
     if (!flow.isAuto) {
       const needsDb = flow.agents.some(a => a !== 'product_spec');
@@ -828,8 +870,9 @@
           const labels = { empty: 'ว่าง', pending: 'pending', no_usable_data: 'ไม่มีไฟล์', processing: 'กำลังประมวลผล' };
           const msg = notReady.map(n => '• ' + n.folder + ': ' + (labels[n.status] || n.status)).join('\n');
           alert('สินค้ายังไม่พร้อม:\n\n' + msg);
-          if (nextBtn) { nextBtn.classList.remove('running'); nextBtn.textContent = '✓ ยืนยัน'; nextBtn.disabled = false; }
+          if (nextBtn) { nextBtn.classList.remove('running'); nextBtn.style.display = 'inline-block'; nextBtn.textContent = '✓ ยืนยัน'; nextBtn.disabled = false; }
           if (backBtn) backBtn.style.display = 'inline-block';
+          if (removeBtn) removeBtn.style.display = 'inline-block';
           return;
         }
       }
@@ -849,9 +892,17 @@
       }
     } catch (e) {
       if (e.name !== 'AbortError') alert('ผิดพลาด: ' + e.message);
-    } finally {
-      if (nextBtn) { nextBtn.classList.remove('running'); nextBtn.textContent = '✓ ยืนยัน'; nextBtn.disabled = false; }
+      // error → restore buttons so user can retry
+      if (nextBtn) { nextBtn.classList.remove('running'); nextBtn.style.display = 'inline-block'; nextBtn.textContent = '✓ ยืนยัน'; nextBtn.disabled = false; }
       if (backBtn) backBtn.style.display = 'inline-block';
+      if (removeBtn) removeBtn.style.display = 'inline-block';
+    } finally {
+      if (flow.finished) {
+        // done → hide next/back, show × only
+        if (nextBtn) nextBtn.style.display = 'none';
+        if (backBtn) backBtn.style.display = 'none';
+        if (removeBtn) removeBtn.style.display = 'inline-block';
+      }
       loadCredits();
     }
   };
@@ -948,7 +999,11 @@
 
     function resetNextButton() {
       const nextBtn = document.getElementById('flow-next-' + planIdx);
-      if (nextBtn) { nextBtn.classList.remove('running'); nextBtn.textContent = '✓ ยืนยัน'; nextBtn.disabled = false; }
+      const backBtn = document.getElementById('flow-back-' + planIdx);
+      const removeBtn = document.getElementById('flow-remove-' + planIdx);
+      if (nextBtn) { nextBtn.classList.remove('running'); nextBtn.style.display = 'none'; }
+      if (backBtn) backBtn.style.display = 'none';
+      if (removeBtn) removeBtn.style.display = 'inline-block';
     }
 
     if (flow.isAuto) {
@@ -978,14 +1033,17 @@
           link.onclick = function () { viewResult(data.file); };
           linksEl.appendChild(link);
         }
+        _refreshSidebar();
       } else if (data.type === 'error') {
         if (stepEl) stepEl.className = 'flow-step error';
         if (statusEl) statusEl.textContent = '!';
-        if (linksEl) linksEl.innerHTML += '<span style="color:#f87171;font-size:12px"> ' + escapeHtml(data.message || 'ผิดพลาด') + '</span>';
+        if (linksEl) linksEl.innerHTML += '<span style="color:#f87171;font-size:12px"> ' + escapeHtml(data.text || data.message || 'ผิดพลาด') + '</span>';
       } else if (data.type === 'status') {
-        if (statusEl) statusEl.textContent = data.message || '';
+        if (statusEl) statusEl.textContent = data.text || data.message || '';
       } else if (data.type === 'done') {
+        flow.finished = true;
         resetNextButton();
+        _refreshSidebar();
       }
       return;
     }
@@ -1020,14 +1078,29 @@
       if (data.set_num && data.total_sets && data.set_num < data.total_sets && statusEl) {
         statusEl.textContent = data.set_num + '/' + data.total_sets;
       }
+      _refreshSidebar();
     } else if (data.type === 'error' && stepEl) {
       stepEl.className = 'flow-step error';
       if (statusEl) statusEl.textContent = '!';
-      if (linksEl) linksEl.innerHTML += '<span style="color:#f87171;font-size:12px"> ' + escapeHtml(data.message || 'ผิดพลาด') + '</span>';
+      if (linksEl) linksEl.innerHTML += '<span style="color:#f87171;font-size:12px"> ' + escapeHtml(data.text || data.message || 'ผิดพลาด') + '</span>';
     } else if (data.type === 'status' && statusEl) {
-      statusEl.textContent = data.message || '';
+      statusEl.textContent = data.text || data.message || '';
     } else if (data.type === 'done') {
+      flow.finished = true;
       resetNextButton();
+      _refreshSidebar();
+    }
+  }
+
+  function _refreshSidebar() {
+    if (typeof loadSessions !== 'function') return;
+    if (typeof currentSidebarTab !== 'undefined' && currentSidebarTab !== 'sessions') {
+      const tabs = document.querySelectorAll('.sidebar-tab');
+      const sessTab = Array.from(tabs).find(t => t.textContent.includes('ผลลัพธ์'));
+      if (sessTab) sessTab.click();
+      else loadSessions();
+    } else {
+      loadSessions();
     }
   }
 
@@ -1069,7 +1142,14 @@
     document.querySelectorAll('.flow-step').forEach(el => { el.className = 'flow-step' + (el.classList.contains('auto') ? ' auto' : ''); });
     document.querySelectorAll('.flow-step-status').forEach(el => { el.textContent = ''; });
     runningAgents = {};
-    document.querySelectorAll('[id^="flow-next-"]').forEach(el => { el.classList.remove('running'); el.textContent = '✓ ยืนยัน'; el.disabled = false; });
+    document.querySelectorAll('[id^="flow-next-"]').forEach(el => {
+      const idx = parseInt(el.id.replace('flow-next-', ''));
+      const f = flows[idx];
+      el.classList.remove('running');
+      if (f && f.finished) { el.style.display = 'none'; }
+      else { el.textContent = '✓ ยืนยัน'; el.disabled = false; el.style.display = 'inline-block'; }
+    });
+    document.querySelectorAll('[id^="flow-remove-"]').forEach(el => { el.style.display = 'inline-block'; });
     const globalConfirm = document.getElementById('global-confirm');
     const clearBtn = document.getElementById('global-clear');
     const hintEl = document.getElementById('brief-hint');

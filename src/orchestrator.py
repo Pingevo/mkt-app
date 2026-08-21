@@ -718,6 +718,10 @@ class Orchestrator:
             if ready_count == 0:
                 return {"error": "ไม่มีสินค้าที่พร้อมในระบบ — กรุณาอัปโหลดและ ingest สินค้าก่อน"}
 
+            # ปรับ product_count ตามจำนวนสินค้าที่พร้อมจริงในฐานข้อมูล
+            if product_count > ready_count:
+                product_count = ready_count
+
             # ค่าจาก config (ไม่ใช่ hardcode)
             summary_len = auto_cfg.get("list_summary_length", 200)
             summary_fallback_len = auto_cfg.get("list_summary_fallback", 300)
