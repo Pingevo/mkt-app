@@ -11,6 +11,7 @@ Each step can also run independently.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,21 @@ from .llm_client import LLMClient
 
 # Platform display names — ใช้ในหลายที่ นิยามครั้งเดียว
 _PLATFORM_NAMES = {"facebook": "Facebook", "tiktok": "TikTok"}
+
+# ชื่อไฟล์ output ของแต่ละ agent — นิยามครั้งเดียว
+_AGENT_OUTPUT_NAMES = {
+    "product_spec": "01_product_spec",
+    "competitor_analysis": "02_competitor_analysis",
+    "campaign_strategy": "03_campaign_strategy",
+    "content_creator": "04_content_creator",
+}
+
+
+def _make_run_id() -> str:
+    """สร้างรหัสเฉพาะรอบ สำหรับตั้งชื่อไฟล์ output."""
+    return f"{datetime.now().strftime('%H%M%S_%f')}_{uuid.uuid4().hex}"
+
+
 from . import product_db
 
 
@@ -1286,20 +1302,13 @@ class Orchestrator:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        timestamp = datetime.now().strftime("%H%M%S")
+        run_id = _make_run_id()
         pid = self.product_id or "product"
-
-        filenames = {
-            "product_spec": "01_product_spec",
-            "competitor_analysis": "02_competitor_analysis",
-            "campaign_strategy": "03_campaign_strategy",
-            "content_creator": "04_content_creator",
-        }
 
         if agent_key not in self.results:
             return {}
 
-        fname = filenames.get(agent_key, agent_key)
+        fname = _AGENT_OUTPUT_NAMES.get(agent_key, agent_key)
         raw = self.results[agent_key]
 
         # content_creator ใช้ Structured Outputs → result เป็น JSON string
@@ -1308,11 +1317,11 @@ class Orchestrator:
             import json as _json
             try:
                 # เซฟ .json (raw structured output — สำหรับ parse_media_prompts)
-                json_path = output_dir / f"{fname}_{pid}_{timestamp}.json"
+                json_path = output_dir / f"{fname}_{pid}_{run_id}.json"
                 json_path.write_text(raw, encoding="utf-8")
                 # เซฟ .md (markdown ที่ render_posts_to_markdown สร้าง — สำหรับ user ดู)
                 md_content = self.results.get("content_creator_markdown", raw)
-                md_path = output_dir / f"{fname}_{pid}_{timestamp}.md"
+                md_path = output_dir / f"{fname}_{pid}_{run_id}.md"
                 md_path.write_text(md_content, encoding="utf-8")
                 return {agent_key: md_path, f"{agent_key}_json": json_path}
             except (_json.JSONDecodeError, TypeError):
@@ -1320,7 +1329,7 @@ class Orchestrator:
                 # เซฟเป็น .md ธรรมดาเหมือนเดิม
                 pass
 
-        filepath = output_dir / f"{fname}_{pid}_{timestamp}.md"
+        filepath = output_dir / f"{fname}_{pid}_{run_id}.md"
         filepath.write_text(raw, encoding="utf-8")
         return {agent_key: filepath}
 
@@ -1335,20 +1344,13 @@ class Orchestrator:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        timestamp = datetime.now().strftime("%H%M%S")
+        run_id = _make_run_id()
         pid = self.product_id or "product"
         saved: dict[str, Path] = {}
 
-        filenames = {
-            "product_spec": "01_product_spec",
-            "competitor_analysis": "02_competitor_analysis",
-            "campaign_strategy": "03_campaign_strategy",
-            "content_creator": "04_content_creator",
-        }
-
         for key, result in self.results.items():
-            fname = filenames.get(key, key)
-            filepath = output_dir / f"{fname}_{pid}_{timestamp}.md"
+            fname = _AGENT_OUTPUT_NAMES.get(key, key)
+            filepath = output_dir / f"{fname}_{pid}_{run_id}.md"
             filepath.write_text(result, encoding="utf-8")
             saved[key] = filepath
 

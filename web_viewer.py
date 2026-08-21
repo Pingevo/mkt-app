@@ -2099,7 +2099,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
 
     global _cancel_requested, _session_ts
     _cancel_requested = False
-    _session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _session_ts = _session_ts_label([folder])
 
     async def event_stream():
         global _current_llm
@@ -2281,13 +2281,18 @@ def _clamp_content_count(n: int) -> int:
 
 
 def _session_ts_label(folders: list[str], now: datetime | None = None) -> str:
-    """สร้างชื่อ session folder จากวันที่ไทย + ชื่อสินค้า."""
+    """สร้างชื่อ session folder จากวันที่ไทย + ชื่อสินค้า + รหัสรอบเดียว."""
     thai_months = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
                    "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
     now = now or datetime.now()
-    date_str = f"{now.day}_{thai_months[now.month-1]}_{now.year+543}_{now.strftime('%H.%M')}"
+    date_str = f"{now.day}_{thai_months[now.month-1]}_{now.year+543}_{now.strftime('%H.%M.%S.%f')}"
     safe_folders = [f.replace("/", "-")[:int(_sys_cfg().get("filename_max_length", 30))] for f in folders]
-    return f"{date_str} - {' + '.join(safe_folders)}"
+    return f"{date_str}_{uuid.uuid4().hex[:6]} - {' + '.join(safe_folders)}"
+
+
+def _make_run_id() -> str:
+    """สร้างรหัสเฉพาะรอบ สำหรับตั้งชื่อไฟล์ output."""
+    return f"{datetime.now().strftime('%H%M%S_%f')}_{uuid.uuid4().hex}"
 
 
 def _write_to_cache(folder: str, name: str, content: str) -> Path:
@@ -2480,8 +2485,8 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
 
         saved_path: str | None = None
         if save_output:
-            timestamp = datetime.now().strftime("%H%M%S")
-            fname_base = f"04_content_creator_{folder}_{timestamp}"
+            run_id = _make_run_id()
+            fname_base = f"04_content_creator_{folder}_{run_id}"
             json_path = output_dir / f"{fname_base}.json"
             json_path.write_text(combined_json, encoding="utf-8")
             md_filepath = output_dir / f"{fname_base}.md"
@@ -3325,8 +3330,8 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     chosen_pid = " + ".join(chosen_pids) if len(chosen_pids) > 1 else chosen_pids[0]
 
                     # เซฟไฟล์
-                    timestamp = datetime.now().strftime("%H%M%S")
-                    fname_base = f"04_content_creator_{chosen_pid}_AUTO_โพสต์ที่{i+1}_{timestamp}"
+                    run_id = _make_run_id()
+                    fname_base = f"04_content_creator_{chosen_pid}_AUTO_โพสต์ที่{i+1}_{run_id}"
                     json_path = output_dir / f"{fname_base}.json"
                     json_path.write_text(content, encoding="utf-8")
                     md_filepath = output_dir / f"{fname_base}.md"
