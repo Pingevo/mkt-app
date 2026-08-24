@@ -172,3 +172,13 @@ def test_brand_reference_includes_silent_application_reminder():
     system = agent._build_system_prompt()
     assert "ห้ามนำข้อความเหล่านั้น" in system
     assert "ห้ามเขียนประโยคแบบ" in system
+
+
+def test_system_prompt_forbids_future_extrapolation():
+    """Competitor analysis must not forecast future markets without evidence."""
+    cfg = _competitor_config()
+    agent = CompetitorAnalysisAgent(cfg, FakeLLM())
+    system = agent._build_system_prompt()
+    assert "อนาคต" in system or "คาดการณ์" in system, (
+        "system prompt ควรห้ามคาดการณ์อนาคตหรือข้อมูลที่ไม่มีหลักฐาน"
+    )
