@@ -56,9 +56,20 @@ def test_base_agent_valid_output_skips_repair():
 
 
 def test_base_agent_raises_after_max_repairs():
-    llm = FakeLLM(["ไม่ถูก"])
+    llm = FakeLLM(["ไม่ถูก", "ไม่ถูก", "ไม่ถูก", "ไม่ถูก"])
     agent = DummyAgent(_config(), llm)
     with pytest.raises(ValueError) as exc:
         agent.run("prompt")
     assert "ตรวจ output ไม่ผ่าน" in str(exc.value)
     assert llm.calls == 4  # 1 initial + 3 repair attempts
+
+
+def test_base_agent_raises_when_repair_returns_blank():
+    """ถ้า repair คืน output ว่าง ต้อง raise ทันที ไม่ loop ไป 3 รอบเผาเครดิต."""
+    llm = FakeLLM(["output ไม่มี section", "", "third", "fourth"])
+    agent = DummyAgent(_config(), llm)
+    with pytest.raises(ValueError) as exc:
+        agent.run("prompt")
+    assert "ซ่อม output ไม่สำเร็จ" in str(exc.value)
+    assert "output ว่างเปล่า" in str(exc.value)
+    assert llm.calls == 2  # 1 initial + 1 repair

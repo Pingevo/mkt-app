@@ -65,7 +65,8 @@ class LLMClient:
         plugins: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
         source: str = "llm_client.chat",
-    ) -> str:
+        return_annotations: bool = False,
+    ) -> str | tuple[str, list[dict[str, Any]]]:
         """Send a chat completion request and return the assistant's text reply.
 
         If stream=True, displays real-time output as the LLM generates.
@@ -81,11 +82,20 @@ class LLMClient:
         enables OpenRouter Structured Outputs — model returns JSON conforming to schema.
         Note: when response_format is set, stream is forced to False (OpenRouter limitation).
 
+        If return_annotations=True, returns (text, annotations) where annotations
+        is a list of {url, title, content} dicts extracted from OpenRouter
+        url_citation annotations. Used by web search to get real source URLs.
+        Note: return_annotations forces stream=False (annotations only available
+        in non-stream responses).
+
         source: label สำหรับ AI Usage Hub log (เช่น "content_creator", "ingestion")
         """
         used_model = model or self._default_model
         # Structured Outputs ไม่รองรับ stream — บังคับ non-stream
         if response_format:
+            stream = False
+        # annotations มีเฉพาะ non-stream response — บังคับ non-stream
+        if return_annotations:
             stream = False
         payload: dict[str, Any] = {
             "model": used_model,
@@ -119,7 +129,12 @@ class LLMClient:
                     request_id = data.get("id")
                     usage = data.get("usage")
                     self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
-                    return data["choices"][0]["message"]["content"]
+                    msg = data["choices"][0]["message"]
+                    text = msg.get("content", "")
+                    if return_annotations:
+                        annotations = self._extract_url_annotations(msg.get("annotations", []))
+                        return text, annotations
+                    return text
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
                 last_error = exc
                 # log error path ด้วย
@@ -141,6 +156,32 @@ class LLMClient:
                 continue
 
         raise RuntimeError(f"LLM request failed after {max_retry_limit} retries: {last_error}")
+
+    @staticmethod
+    def _extract_url_annotations(raw_annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """แปลง OpenRouter url_citation annotations เป็น list ของ {url, title, content}.
+
+        OpenRouter ส่ง annotations ในรูปแบบ:
+            {"type": "url_citation", "url_citation": {"url": "...", "title": "...", "content": "..."}}
+        คืน list ของ dict ที่ flat แล้ว เรียงตามลำดับที่ปรากฏ
+        """
+        out: list[dict[str, Any]] = []
+        for ann in raw_annotations or []:
+            if not isinstance(ann, dict):
+                continue
+            # รองรับทั้ง url_citation (OpenRouter) และรูปแบบ flat
+            citation = ann.get("url_citation") or ann
+            if not isinstance(citation, dict):
+                continue
+            url = citation.get("url")
+            if not url:
+                continue
+            out.append({
+                "url": url,
+                "title": citation.get("title", ""),
+                "content": citation.get("content", ""),
+            })
+        return out
 
     @staticmethod
     def _log_usage(

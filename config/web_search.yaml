@@ -3,13 +3,44 @@
 # แยกจาก agents.yaml เพื่อ separation of concerns
 # ============================================================
 
-max_results: 5                    # จำนวนผลค้นหาสูงสุด
-max_results_detailed: 3           # จำนวนผลค้นหาสำหรับ detailed search
-max_queries: 5                    # จำนวน query สูงสุดใน planning phase
-competitor_max_results: 5         # จำนวนผลค้นหา competitor
+# OpenRouter agentic web search server tool parameters
+# Model ค้นเอง 0-N รอบ โดย OpenRouter จัดการ agentic loop ให้
 
-# LLM params สำหรับ web search planning + execution
-planning_temperature: 0.2
-planning_max_tokens: 512
-execution_temperature: 0.1
-execution_max_tokens: 1500
+# engine: auto | native | exa | firecrawl | parallel | perplexity
+#   - auto = ใช้ native ของ provider ถ้ามี, ไม่งั้น Exa
+#   - exa = รวม keyword + embeddings, คืน highlights ที่เกี่ยวข้อง
+#   - parallel/perplexity = คืนผลลัพธ์ที ranking ดี
+#   - สำหรับ Claude 3.7 Sonnet ให้ใช้ auto เพื่อ native Anthropic web search
+engine: auto
+
+# max_results_detailed: จำนวนผลค้นหาสูงสุดต่อครั้ง
+max_results_detailed: 5
+
+# competitor_max_results: จำนวนผลค้นหาคู่แข่ง (ใช้โดย web_searcher.py ถ้าเรียกโดยตรง)
+competitor_max_results: 5
+
+# max_uses: จำนวนครั้งที่ model ค้นได้ใน 1 request (follow-up search)
+#   - Claude/ChatGPT ใช้เพื่อค้นหลายรอบจากผลก่อนหน้า
+max_uses: 8
+
+# max_total_results: จำนวนผลรวมสูงสุดข้ามทุก search call ใน 1 request
+#   - ควบคุม cost/context ใน agentic loop
+max_total_results: 25
+
+# search_context_size: low | medium | high — ปริมาณ content ต่อผล
+#   - high = ดึงเนื้อหาเยอะ ลด hallucination
+search_context_size: high
+
+# allowed_domains: จำกัดแหล่งข้อมูล (wildcards support, เช่น *.tcl.com)
+#   - ว่าง = ไม่จำกัด (ใช้ทุก domain)
+allowed_domains: []
+
+# excluded_domains: แหล่งที่ไม่เอา (spam/affiliate ที่ไม่ใช่หน้าสินค้า)
+excluded_domains:
+  - reddit.com
+  - quora.com
+
+# verify_urls: เปิด web_fetch ตรวจ URL หลังค้น — กันลิงก์เสีย/ไม่ใช่สินค้าจริง
+#   - ใช้ openrouter:web_fetch อ่านหน้า แล้วเช็คว่ามีเนื้อหาเกี่ยวข้อง
+#   - เพิ่ม cost แต่ได้ลิงก์ที่กดไปเจอสินค้าจริง
+verify_urls: true

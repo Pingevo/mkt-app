@@ -15,7 +15,7 @@ from typing import Any
 from rich.console import Console
 
 from ..llm_client import LLMClient
-from ..output_validators import validate_output as _validate_output
+from ..output_validators import validate_output as _validate_output, _output_is_blank
 from ..brand_priority import BrandRules
 
 console = Console()
@@ -157,6 +157,23 @@ class BaseAgent:
             labels = [ft_map.get(t, t) for t in forbid_tactics]
             parts.append("ห้ามใช้: " + ", ".join(labels))
 
+        # Evidence discipline — กฎหลักฐานสำหรับการอ้างอิง (เฉพาะ agent ทีมี evidence_policy)
+        ev = ins.get("evidence_policy")
+        if ev:
+            parts.append("กฎหลักฐาน (Evidence Policy):")
+            for claim_type, rules in ev.items():
+                allowed = rules.get("allowed_sources", [])
+                conf = rules.get("confidence", "")
+                note = rules.get("note", "")
+                line = f"  - {claim_type}: แหล่งทียอมรับ = {', '.join(allowed)}"
+                if conf:
+                    line += f"; confidence = {conf}"
+                if note:
+                    line += f"; {note}"
+                parts.append(line)
+            parts.append("  - ถ้าไม่พบข้อมูลที่มีหลักฐานเพียงพอ ให้ระบุ 'ไม่พบข้อมูล' แทนการเติมข้อมูลเอง")
+            parts.append("  - ทุก claim ต้องระบุแหล่งที่มา + ประเภทของหลักฐาน")
+
         # Content creator specifics
         tone = ins.get("tone", [])
         if tone:
@@ -201,6 +218,7 @@ class BaseAgent:
         sections = [system_prompt]
 
         use_brand = self.config.get("use_brand_context", True)
+        priority_text = ""
         if use_brand:
             # ใช้ brand_rules (BrandRules object) ถ้ามี — hard/soft split พร้อม priority prompt
             if self.brand_rules and (self.brand_rules.hard or self.brand_rules.soft):
@@ -238,6 +256,18 @@ class BaseAgent:
         if instruction_block:
             sections.append(instruction_block)
 
+        # Reminder: brand context/guidelines are for internal tone only.
+        # They must not be emitted, repeated, or verified in the final answer.
+        if priority_text or self.brand_context or self.brand_reference:
+            sections.append(
+                "หมายเหตุสำหรับการเขียน final output:\n"
+                "ข้อมูลแบรนด์ กฎ คำต้องห้าม และแนวทางการใช้คำศัพท์ข้างต้น\n"
+                "เป็น context ภายในเท่านั้น ใช้เพื่อกำหนดโทนและคำศัพท์\n"
+                "ห้ามนำข้อความเหล่านั้น คำต้องห้าม หรือการตรวจสอบคำแทนที่มาแสดงใน final output\n"
+                "ห้ามเขียนประโยคแบบ 'Wait, let's check' หรือ '-> No ...' หรือขั้นตอนตรวจสอบออกมาให้ user เห็น\n"
+                "ให้ apply แนวทางแบรนด์โดยไม่ต้องอธิบายหรือ verify"
+            )
+
         return "\n\n".join(sections)
 
     def run(self, user_prompt: str, quick_brief: str = "", image_paths: list[str] | None = None,
@@ -246,12 +276,12 @@ class BaseAgent:
 
         Returns the final (possibly refined) text response.
 
-        If web_search_planning is enabled in config, runs a 3-phase flow:
-          Phase 0: Plan — LLM วางแผนว่าจะค้น web ว่าอะไรบ้าง
-          Phase 1: Search — ค้นแยกแต่ละ query, รวมผล
-          Phase 2: Generate — สร้าง output จากข้อมูลที่ค้นได้
-          Phase 3: Review — ตรวจงาน
-        ถ้าไม่มี web_search_planning → ทำแบบเดิม (ส่ง tools ให้ LLM ค้นเอง)
+        If web_search is enabled in config, runs an agentic loop with
+        openrouter:web_search + openrouter:web_fetch server tools:
+          - model ค้นเอง หลายรอบ (สูงสุด max_uses)
+          - model อ่านหน้าเต็มเองเมื่อต้องการ
+          - คืน final response พร้อม URL citations (annotations)
+          - verify URL ด้วย web_fetch ตาม config verify_urls
 
         If response_format is provided, enables OpenRouter Structured Outputs.
         Note: review/refine phase is skipped when response_format is set
@@ -278,47 +308,46 @@ class BaseAgent:
             )
 
         web_search = self.config.get("web_search")
-        use_planning = self.config.get("web_search_planning", False)
 
-        if web_search and use_planning and not response_format:
-            # --- Phase 0: Plan search queries ---
-            queries = self._plan_search_queries(user_prompt, system_prompt)
-            # --- Phase 1: Execute searches ---
-            search_results = self._execute_searches(queries)
-            # --- Phase 2: Generate with search results ---
-            console.print(f"\n[cyan]กำลังสร้างผลงาน... ({self.display_name})[/cyan]\n")
-            enriched_prompt = self._enrich_prompt_with_search(user_prompt, search_results)
-            user_content = self._build_multimodal_content(enriched_prompt, image_paths)
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ]
-            output = self.llm.chat(
-                messages,
-                model=self.config.get("model"),
-                temperature=self.config.get("temperature", 0.7),
-                max_tokens=self.config.get("max_tokens", 4096),
-                max_retry_limit=self.config.get("max_retry_limit", 3),
-                source=f"{self.agent_name}.generate",
-            )
-        else:
-            # --- Old flow: single call with server tool ---
-            console.print(f"\n[cyan]กำลังสร้างผลงาน... ({self.display_name})[/cyan]\n")
+        if web_search and not response_format:
+            # --- Market parity: agentic server tool loop ---
+            # ส่ง openrouter:web_search + openrouter:web_fetch ให้ model ในครั้งเดียว
+            # OpenRouter จะรัน agentic loop ให้: model ค้น → อ่านผล → คิด → ปรับ query → ค้นต่อเอง
+            # จนหมด budget (max_uses / max_total_results) แล้วคืน final response พร้อม citations
+            console.print(f"\n[cyan]กำลังสร้างผลงาน (web search agentic)... ({self.display_name})[/cyan]\n")
             user_content = self._build_multimodal_content(user_prompt, image_paths)
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ]
-            tools = None
-            if web_search and not response_format:
-                tools = [{"type": "openrouter:web_search", "max_results": int(_web_search_cfg().get("max_results", 5))}]
-            output = self.llm.chat(
+            tools = self._build_web_search_tools()
+            output, annotations = self.llm.chat(
                 messages,
                 model=self.config.get("model"),
                 temperature=self.config.get("temperature", 0.7),
                 max_tokens=self.config.get("max_tokens", 4096),
                 max_retry_limit=self.config.get("max_retry_limit", 3),
                 tools=tools,
+                response_format=response_format,
+                source=f"{self.agent_name}.generate",
+                return_annotations=True,
+            )
+            # แปะ URL จริงจาก citations + verify ถ้าเปิด
+            output = self._append_citations_and_verify(output, annotations)
+        else:
+            # --- Non-web-search flow (เช่น content_creator ที่ไม่ค้น) ---
+            console.print(f"\n[cyan]กำลังสร้างผลงาน... ({self.display_name})[/cyan]\n")
+            user_content = self._build_multimodal_content(user_prompt, image_paths)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ]
+            output = self.llm.chat(
+                messages,
+                model=self.config.get("model"),
+                temperature=self.config.get("temperature", 0.7),
+                max_tokens=self.config.get("max_tokens", 4096),
+                max_retry_limit=self.config.get("max_retry_limit", 3),
                 response_format=response_format,
                 source=f"{self.agent_name}.generate",
             )
@@ -336,6 +365,10 @@ class BaseAgent:
                 response_format=response_format,
             )
 
+        # ถ้า model คืน output ว่างตั้งแต่แรก ไม่ต้องซ่อม บอกผู้ใช้ชัดเจนเลย
+        if _output_is_blank(output):
+            raise ValueError("model คืนคำตอบว่างเปล่า — อาจเกิดจาก model ไม่รองรับ web_search tool, prompt ยาวเกินไป หรือถูกปฏิเสธ")
+
         # ตรวจ output ตามรูปแบบของ agent แล้วซ่อมถ้าไม่ผ่าน
         max_repair = self.config.get("max_retry_limit", 3)
         ok, error = self.validate_output(output)
@@ -343,7 +376,14 @@ class BaseAgent:
             if ok:
                 break
             console.print(f"[yellow]output ไม่ผ่าน validation: {error}[/yellow]")
-            output = self._repair_output(output, error, messages, response_format)
+            repair_error = error
+            repaired = self._repair_output(output, error, messages, response_format)
+            if _output_is_blank(repaired):
+                raise ValueError(
+                    f"Agent {self.agent_name} ซ่อม output ไม่สำเร็จ: "
+                    f"หลังจาก '{repair_error}' model คืน output ว่างเปล่า"
+                )
+            output = repaired
             ok, error = self.validate_output(output)
         if not ok:
             raise ValueError(f"Agent {self.agent_name} ตรวจ output ไม่ผ่านหลังซ่อม {max_repair} รอบ: {error}")
@@ -438,110 +478,95 @@ class BaseAgent:
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         return b64, mime
 
-    def _plan_search_queries(self, user_prompt: str, system_prompt: str) -> list[str]:
-        """Phase 0: ให้ LLM วางแผนว่าจะค้น web ว่าอะไรบ้าง.
 
-        ส่ง product spec + brand context + instructions ให้ LLM
-        แล้วให้มันคืน list ของ search queries (JSON array)
+
+
+    def _verify_urls_with_fetch(self, annotations: list[dict[str, Any]]) -> str:
+        """Verify URL ด้วย openrouter:web_fetch — ตรวจว่าหน้ามีเนื้อหาจริง.
+
+        คืน string ของ URL ที่ verify ผ่าน (หน้ามีเนื้อหา) ว่างถ้าทุก URL ไม่ผ่าน.
+        ถ้า web_fetch ล้มเหลว → ถือว่า URL นั้นไม่ verify (ไม่ throw).
         """
-        max_queries = self.config.get("web_search_max_queries", int(_web_search_cfg().get("max_queries", 5)))
-        # ส่ง instructions ของ user แยกชัด เพื่อให้ planning ใช้คำสั่ง user ในการวางแผน query
-        instruction_block = self._format_instructions()
-        plan_system = (
-            "คุณคือนักวางแผนการค้นข้อมูล (Search Planner)\n"
-            "หน้าที่: อ่านข้อมูลสินค้า บริบทแบรนด์ และคำสั่งจากผู้ใช้ "
-            "แล้ววางแผนว่าควรค้น web ว่าอะไรบ้าง\n"
-            f"สูงสุด {max_queries} queries แต่ละ query ต้องกระชับ ใช้ค้นจริงได้\n\n"
-            "คืนเป็น JSON array ของ string เท่านั้น ไม่ต้องอธิบาย\n"
-            'ตัวอย่าง: ["นาฬิกาเด็ก 4G ไทย ราคา", "Xiaomi Smart Kids Watch ราคา shopee"]'
-        )
-        plan_user = (
-            f"--- ข้อมูลสินค้าและบริบท ---\n"
-            f"{user_prompt}\n\n"
-            f"--- คำสั่งหลักของ agent ---\n"
-            f"{self.config.get('system_prompt', '')}\n\n"
-        )
-        if instruction_block:
-            plan_user += (
-                f"--- คำสั่งจากผู้ใช้ (สำคัญ — ใช้วางแผน query) ---\n"
-                f"{instruction_block}\n\n"
-            )
-        plan_user += "วางแผนค้นข้อมูล — คิดว่าต้องค้นอะไรเพื่อให้ตอบคำสั่งนี้ได้ครบ"
-        console.print(f"\n[yellow]กำลังวางแผนการค้นข้อมูล... ({self.display_name})[/yellow]\n")
-        raw = self.llm.chat(
-            [{"role": "system", "content": plan_system},
-             {"role": "user", "content": plan_user}],
-            model=self.config.get("model"),
-            temperature=float(_web_search_cfg().get("planning_temperature", 0.2)),
-            max_tokens=int(_web_search_cfg().get("planning_max_tokens", 512)),
-            max_retry_limit=self.config.get("max_retry_limit", 3),
-            stream=False,
-            source=f"{self.agent_name}.plan_search",
-        )
-        # parse JSON array
-        import json as _json
-        try:
-            # ลอง parse ตรง
-            queries = _json.loads(raw.strip())
-            if isinstance(queries, list):
-                return [str(q) for q in queries[:max_queries]]
-        except _json.JSONDecodeError:
-            pass
-        # ลอง extract จาก code block
-        import re
-        m = re.search(r'\[.*\]', raw, re.DOTALL)
-        if m:
+        cfg = _web_search_cfg()
+        fetch_tools = [{"type": "openrouter:web_fetch"}]
+        verified: list[str] = []
+        for ann in annotations[:5]:  # จำกัด 5 URL ต่อ query เพื่อควบคุม cost
+            url = ann.get("url")
+            if not url:
+                continue
             try:
-                queries = _json.loads(m.group(0))
-                if isinstance(queries, list):
-                    return [str(q) for q in queries[:max_queries]]
-            except _json.JSONDecodeError:
-                pass
-        # fallback: ใช้บรรทัดเป็น query
-        lines = [l.strip().strip('"').strip("'").strip("- ").strip() for l in raw.split("\n") if l.strip()]
-        return lines[:max_queries] if lines else []
-
-    def _execute_searches(self, queries: list[str]) -> str:
-        """Phase 1: ค้น web แยกแต่ละ query แล้วรวมผล.
-
-        ใช้ OpenRouter web search server tool แต่ละ query แบบ non-stream
-        เพื่อให้ model ค้นแล้วสรุปผลให้ในรอบเดียว
-        """
-        if not queries:
-            return ""
-        tools = [{"type": "openrouter:web_search", "max_results": int(_web_search_cfg().get("max_results_detailed", 3))}]
-        all_results: list[str] = []
-        for i, q in enumerate(queries, 1):
-            console.print(f"[yellow]  ค้นหา [{i}/{len(queries)}]: {q}[/yellow]")
-            try:
-                result = self.llm.chat(
-                    [{"role": "system", "content": "คุณคือผู้ช่วยค้นข้อมูล ค้น web แล้วสรุปผลแบบกระชับ พร้อมลิงก์อ้างอิง"},
-                     {"role": "user", "content": f"ค้นหา: {q}\nสรุปข้อมูลที่เกี่ยวข้อง พร้อมลิงก์ [ชื่อเว็บ](URL)"}],
+                page_text = self.llm.chat(
+                    [{"role": "system", "content": "คุณคือผู้อ่านหน้าเว็บ สรุปเนื้อหาสั้นๆ"},
+                     {"role": "user", "content": f"อ่านหน้า: {url}\nบอกว่าหน้านี้เกี่ยวกับอะไร สั้นๆ"}],
                     model=self.config.get("model"),
-                    temperature=float(_web_search_cfg().get("execution_temperature", 0.1)),
-                    max_tokens=int(_web_search_cfg().get("execution_max_tokens", 1500)),
+                    temperature=float(cfg.get("execution_temperature", 0.1)),
+                    max_tokens=int(cfg.get("execution_max_tokens", 1500)),
                     max_retry_limit=self.config.get("max_retry_limit", 3),
                     stream=False,
-                    tools=tools,
-                    source=f"{self.agent_name}.search",
+                    tools=fetch_tools,
+                    source=f"{self.agent_name}.fetch",
                 )
-                all_results.append(f"### ผลค้นหา: {q}\n{result}")
+                if page_text and len(page_text.strip()) > 20:
+                    verified.append(f"- {url} — {page_text.strip()[:100]}")
             except Exception as e:
-                console.print(f"[red]  ค้นหาล้มเหลว: {e}[/red]")
-                all_results.append(f"### ผลค้นหา: {q}\n(ค้นหาล้มเหลว: {e})")
-        return "\n\n".join(all_results)
+                console.print(f"[dim]  verify URL ล้มเหลว {url}: {e}[/dim]")
+        return "\n".join(verified)
 
-    def _enrich_prompt_with_search(self, user_prompt: str, search_results: str) -> str:
-        """เอาผลค้น web มาใส่ใน user prompt ก่อนส่งให้ LLM สร้าง output."""
-        if not search_results:
-            return user_prompt
-        return (
-            f"{user_prompt}\n\n"
-            f"--- ข้อมูลที่ค้นหาได้จาก web ---\n"
-            f"{search_results}\n"
-            f"--- สิ้นสุดข้อมูลค้นหา ---\n\n"
-            f"ใช้ข้อมูลสินค้า + ข้อมูลแบรนด์ + ข้อมูลที่ค้นหาได้ มาสร้างผลงานตามรูปแบบที่กำหนด"
+    def _build_web_search_tools(self) -> list[dict[str, Any]]:
+        """สร้าง tools สำหรับ agentic web search loop.
+
+        ส่งทั้ง openrouter:web_search (ให้ model ค้นเองหลายรอบ) และ
+        openrouter:web_fetch (ให้ model อ่านหน้าเต็มเอง) ในครั้งเดียว.
+        ใช้ config ครบ: engine, allowed_domains, excluded_domains, max_uses,
+        max_total_results, search_context_size.
+        """
+        cfg = _web_search_cfg()
+        tool_params: dict[str, Any] = {
+            "max_results": int(cfg.get("max_results_detailed", 5)),
+        }
+        for key in ("engine", "allowed_domains", "excluded_domains",
+                    "max_uses", "max_total_results", "search_context_size"):
+            val = cfg.get(key)
+            if val:
+                tool_params[key] = val
+        return [
+            {"type": "openrouter:web_search", "parameters": tool_params},
+            {"type": "openrouter:web_fetch"},
+        ]
+
+    def _append_citations_and_verify(self, output: str, annotations: list[dict[str, Any]]) -> str:
+        """แปะ URL จริงจาก annotations ต่อท้าย output และ verify ด้วย web_fetch.
+
+        แปะเฉพาะ URL ที่ไม่ซ้ำ. ถ้า verify_urls เปิด → เรียก web_fetch ตรวจทีละ URL
+        แล้วแปะเฉพาะ URL ที่ verify ผ่าน (มีเนื้อหาเกี่ยวข้อง).
+        """
+        if not annotations:
+            return output
+        # ถ้า model คืนเนื้อหาว่างมา แม้มี annotations ก็ตาม อย่าแปะ citations ทำให้ดูไม่ว่าง
+        # ให้คืนว่างเพื่อให้ระบบ detect ว่า model คืนคำตอบว่างเปล่า
+        if _output_is_blank(output):
+            return output
+        cfg = _web_search_cfg()
+        unique_urls: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for a in annotations:
+            url = a.get("url")
+            if url and url not in seen:
+                seen.add(url)
+                unique_urls.append(a)
+
+        citation_section = "\n\n---\n\n**แหล่งอ้างอิงจริงจากการค้นหา:**\n"
+        citation_section += "\n".join(
+            f"- [{a.get('title') or a.get('url')}]({a.get('url')})"
+            for a in unique_urls
         )
+        output += citation_section
+
+        if cfg.get("verify_urls"):
+            verified = self._verify_urls_with_fetch(unique_urls)
+            if verified:
+                output += f"\n\n**URL ที่ verify ผ่าน (หน้ามีเนื้อหาเกี่ยวข้อง):**\n{verified}"
+        return output
 
     def _review_and_refine(
         self,
@@ -583,6 +608,31 @@ class BaseAgent:
                 f"--- สิ้นสุด CHECKLIST ---\n"
             )
 
+        # Evidence discipline — ตรวจหลักฐานตาม evidence_policy
+        evidence_section = ""
+        ev = self.instructions.get("evidence_policy") if self.instructions else None
+        if ev:
+            evidence_section = (
+                f"\n--- EVIDENCE DISCIPLINE: ตรวจหลักฐาน ---\n"
+                f"ทุก claim ในผลงานต้องมีหลักฐานที match กับประเภท claim:\n"
+            )
+            for claim_type, rules in ev.items():
+                allowed = rules.get("allowed_sources", [])
+                conf = rules.get("confidence", "")
+                note = rules.get("note", "")
+                line = f"- {claim_type}: ใช้หลักฐานประเภท {', '.join(allowed)}"
+                if conf:
+                    line += f" (confidence: {conf})"
+                if note:
+                    line += f" — {note}"
+                evidence_section += line + "\n"
+            evidence_section += (
+                "\nห้ามอ้าง market share / ส่วนแบ่งตลาด จาก product page / retailer โดยไม่มี market report\n"
+                "ห้ามอ้าง technical specification จาก blog/review โดยไม่มี official source\n"
+                "ถ้า claim ใดไม่มีหลักฐานพอ ให้เปลี่ยนเป้น 'ไม่พบข้อมูล' หรือลบ claim ออก\n"
+                "--- สิ้นสุด EVIDENCE DISCIPLINE ---\n"
+            )
+
         brief_section = ""
         if quick_brief:
             brief_section = (
@@ -604,14 +654,15 @@ class BaseAgent:
                 f"--- ข้อกำหนดหลักของ agent ---\n"
                 f"{system_prompt}\n"
                 f"{checklist_section}"
+                f"{evidence_section}"
                 f"{brief_section}\n"
                 f"--- ผลงานที่ต้องตรวจ ---\n"
                 f"{output}\n"
                 f"--- สิ้นสุดผลงาน ---\n\n"
                 f"{json_instruction}"
                 f"วิธีตรวจ:\n"
-                f"1. อ่าน CHECKLIST ทุกข้อ แล้วเช็คว่าผลงานเป็นไปตามข้อนั้นไหม\n"
-                f"2. ถ้ามีข้อใดข้อหนึ่งที่ผลงานไม่เป็นไปตาม ให้แก้ไขผลงานให้เป็นไปตามข้อนั้น\n"
+                f"1. อ่าน CHECKLIST + EVIDENCE DISCIPLINE ทุกข้อ\n"
+                f"2. ถ้ามี claim ใดไม่มีหลักฐานตาม evidence_policy หรือใช้แหล่งทีผิด ให้แก้หรือลบ\n"
                 f"3. ถ้าครบถ้วนทุกข้อ ส่งผลงานเดิมกลับมาเลย ไม่ต้องเปลี่ยนแปลง\n"
                 f"ส่งกลับเฉพาะผลงานฉบับสุดท้ายเท่านั้น ไม่ต้องอธิบายว่าแก้อะไร"
             )

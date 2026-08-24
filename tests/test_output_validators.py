@@ -1,4 +1,13 @@
-"""Output validation per agent."""
+"""Output validation per agent.
+
+Tests ครอบคลุม heading formats ทุกแบบที่ LLM สร้างจริง:
+  - ## Section (markdown heading)
+  - ### 1. Section (numbered markdown heading)
+  - **1. Section** (bold numbered)
+  - **Section** (bold)
+  - 1. **Section** (numbered bold)
+  - Section: (colon suffix)
+"""
 import json
 
 import pytest
@@ -50,18 +59,11 @@ def test_content_creator_title_wrong_type():
     assert "title" in err
 
 
-def test_product_spec_valid_markdown():
-    text = "ชื่อสินค้า: Lagenio\nหมวดหมู่: สมาร์ทวอทช์\nUSP: แบตอึด"
-    ok, err = validate_output("product_spec", text, required_sections=["ชื่อสินค้า", "หมวดหมู่", "USP"])
-    assert ok is True
-    assert err == ""
+# ---------------------------------------------------------------------------
+# Markdown heading format coverage — รองรับทุก format ที่ LLM สร้างจริง
+# ---------------------------------------------------------------------------
 
-
-def test_product_spec_missing_section():
-    text = "ชื่อสินค้า: Lagenio\nหมวดหมู่: สมาร์ทวอทช์"
-    ok, err = validate_output("product_spec", text, required_sections=["ชื่อสินค้า", "หมวดหมู่", "USP"])
-    assert ok is False
-    assert "USP" in err
+_REQUIRED = ["ภาพรวมตลาด", "ตารางเปรียบเทียบ", "จุดแข็งของเรา vs คู่แข่ง"]
 
 
 def test_markdown_output_empty():
@@ -70,10 +72,74 @@ def test_markdown_output_empty():
     assert "ว่าง" in err
 
 
-def test_product_spec_bilingual_label_markdown():
-    # รูปแบบที่ system_prompt ใน agents.yaml สั่งให้ LLM สร้างจริง:
-    #   1. **ชื่อสินค้า (Product Name)** — ...
-    # ชื่อ section ตามด้วย " (English)" ก่อนถึง ** ตัวปิด
+def test_heading_format_markdown_h2():
+    """## Section"""
+    text = (
+        "## ภาพรวมตลาด\nbody\n"
+        "## ตารางเปรียบเทียบ\nbody\n"
+        "## จุดแข็งของเรา vs คู่แข่ง\nbody\n"
+    )
+    ok, err = validate_output("competitor_analysis", text, required_sections=_REQUIRED)
+    assert ok is True, err
+
+
+def test_heading_format_markdown_h3_numbered():
+    """### 1. Section (Gemini 3.5 Flash สร้างแบบนี้จริง)"""
+    text = (
+        "### 1. ภาพรวมตลาด (Market Overview)\nbody\n"
+        "### 2. ตารางเปรียบเทียบ (Comparison Table)\nbody\n"
+        "### 3. จุดแข็งของเรา vs คู่แข่ง (Our Strengths)\nbody\n"
+    )
+    ok, err = validate_output("competitor_analysis", text, required_sections=_REQUIRED)
+    assert ok is True, err
+
+
+def test_heading_format_bold_numbered():
+    """**1. Section** (Gemini 3.7 Flash สร้างแบบนี้จริง)"""
+    text = (
+        "**1. ภาพรวมตลาด (Market Overview)**\nbody\n"
+        "**2. ตารางเปรียบเทียบ (Comparison Table)**\nbody\n"
+        "**3. จุดแข็งของเรา vs คู่แข่ง**\nbody\n"
+    )
+    ok, err = validate_output("competitor_analysis", text, required_sections=_REQUIRED)
+    assert ok is True, err
+
+
+def test_heading_format_bold_only():
+    """**Section**"""
+    text = (
+        "**ภาพรวมตลาด**\nbody\n"
+        "**ตารางเปรียบเทียบ**\nbody\n"
+        "**จุดแข็งของเรา vs คู่แข่ง**\nbody\n"
+    )
+    ok, err = validate_output("competitor_analysis", text, required_sections=_REQUIRED)
+    assert ok is True, err
+
+
+def test_heading_format_numbered_bold():
+    """1. **Section**"""
+    text = (
+        "1. **ภาพรวมตลาด (Product Overview)**\nbody\n"
+        "2. **ตารางเปรียบเทียบ**\nbody\n"
+        "3. **จุดแข็งของเรา vs คู่แข่ง**\nbody\n"
+    )
+    ok, err = validate_output("competitor_analysis", text, required_sections=_REQUIRED)
+    assert ok is True, err
+
+
+def test_heading_format_colon_suffix():
+    """Section:"""
+    text = (
+        "ภาพรวมตลาด:\nbody\n"
+        "ตารางเปรียบเทียบ:\nbody\n"
+        "จุดแข็งของเรา vs คู่แข่ง:\nbody\n"
+    )
+    ok, err = validate_output("competitor_analysis", text, required_sections=_REQUIRED)
+    assert ok is True, err
+
+
+def test_heading_format_bilingual_label():
+    """1. **ชื่อสินค้า (Product Name)** — ..."""
     text = (
         "1. **ชื่อสินค้า (Product Name)** — Lagenio K3\n"
         "2. **หมวดหมู่ (Category)** — สมาร์ทวอทช์เด็ก\n"
@@ -82,8 +148,70 @@ def test_product_spec_bilingual_label_markdown():
     ok, err = validate_output(
         "product_spec", text, required_sections=["ชื่อสินค้า", "หมวดหมู่", "USP"]
     )
-    assert ok is True
-    assert err == ""
+    assert ok is True, err
+
+
+def test_heading_format_plain_text_bilingual():
+    """ภาพรวมตลาด (Market Overview) — plain text, ไม่มี # ไม่มี **
+
+    กรณีจริงที่ gemini-3.5-flash สร้าง: section name + (English label) บนบรรทัดเดียว
+    ไม่มี markdown decoration ใดๆ — validator เดิมมองไม่เห็น ทำให้ validation fail
+    แล้ว repair คืนว่าง เผาเครดิต 3 รอบ
+    """
+    text = (
+        "ภาพรวมตลาด (Market Overview)\n"
+        "ตลาดสมาร์ทวอทช์เด็กในปัจจุบันมุ่งเน้นไปที่ความปลอดภัย\n\n"
+        "ตารางเปรียบเทียบ (Comparison Table)\n"
+        "คุณสมบัติ | สินค้าของเรา | คู่แข่ง A\n\n"
+        "จุดแข็งของเรา vs คู่แข่ง (Our Strengths vs Competitors)\n"
+        "1. จอใหญ่\n\n"
+        "จุดอ่อนของเรา vs คู่แข่ง (Our Weaknesses vs Competitors)\n"
+        "1. ไม่มี Bluetooth\n\n"
+        "ช่องว่างในตลาด (Market Gaps)\n"
+        "1. ตลาดสายสุขภาพ\n\n"
+        "ภัยคุกคาม (Threats)\n"
+        "1. แบรนด์ใหญ่\n\n"
+        "คำแนะนำเชิงกลยุทธ์ (Strategic Recommendations)\n"
+        "1. วางตำแหน่งพรีเมียม\n\n"
+        "แหล่งอ้างอิง (Sources)\n"
+        "- [imoo](https://imoo.com)"
+    )
+    ok, err = validate_output("competitor_analysis", text, required_sections=_REQUIRED)
+    assert ok is True, err
+
+
+def test_missing_section_still_fails():
+    """ถ้าขาด section จริง ต้อง fail ไม่ใช่ผ่านหมด"""
+    text = (
+        "## ภาพรวมตลาด\nbody\n"
+        "## ตารางเปรียบเทียบ\nbody\n"
+        # ขาด จุดแข็งของเรา vs คู่แข่ง
+    )
+    ok, err = validate_output("competitor_analysis", text, required_sections=_REQUIRED)
+    assert ok is False
+    assert "จุดแข็งของเรา vs คู่แข่ง" in err
+
+
+def test_no_false_positive_on_inline_text():
+    """ประโยคธรรมดาที่บังเอิญมีคำว่า section ต้องไม่นับเป็น heading"""
+    text = (
+        "วันนี้เราจะมาพูดถึงภาพรวมตลาดสมาร์ทวอทช์เด็กกันครับ "
+        "ซึ่งตารางเปรียบเทียบจะแสดงให้เห็นว่าจุดแข็งของเรา vs คู่แข่งนั้นชัดเจน"
+    )
+    ok, err = validate_output("competitor_analysis", text, required_sections=_REQUIRED)
+    assert ok is False
+    # ต้องบอกว่าขาด section ไม่ใช่ผ่าน
+    assert "ไม่พบ section" in err
+
+
+def test_no_false_positive_on_parenthetical_prose():
+    """วงเล็บในประโยคที่ขึ้นต้นด้วยชื่อ section ต้องไม่นับเป็น heading."""
+    text = "ภาพรวมตลาด (เฉพาะในประเทศไทย) กำลังเติบโตอย่างรวดเร็ว"
+    ok, err = validate_output(
+        "competitor_analysis", text, required_sections=["ภาพรวมตลาด"]
+    )
+    assert ok is False
+    assert "ไม่พบ section: ภาพรวมตลาด" in err
 
 
 def test_campaign_strategy_valid_markdown():

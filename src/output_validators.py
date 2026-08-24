@@ -14,6 +14,59 @@ def _output_is_blank(output: str | None) -> bool:
     return not output or not output.strip()
 
 
+# ---------------------------------------------------------------------------
+# Section detection — กฎเดียวครอบคลุมทุก format ที่ LLM สร้างจริง
+#
+# แทนการเพิ่ม pattern ทีละอัน (##, **, 1., colon, plain text, ...) ใช้กฎเดียว:
+#   บรรทัดเป็น heading ของ section ถ้าหลังตัด markdown decoration (#, *, เลข, จุด)
+#   บรรทัดขึ้นต้นด้วยชื่อ section แล้วตามด้วยตัวคั่น (จบบรรทัด, วงเล็บ, ทวิภาค, ขีด)
+#   ไม่ใช่ตามด้วยข้อความต่อเนื่อง — กัน false positive จากประโยคธรรมดา
+# ---------------------------------------------------------------------------
+
+# ตัด decorator ด้านหน้า: #, *, ตัวเลข, จุด, space
+_HEADING_PREFIX_RE = re.compile(r'^[#*\d.\s]+')
+# ตัวคั่บหลังชื่อ section ที่บอกว่า "จบ heading แล้ว" — ไม่ใช่ข้อความต่อ
+_SEPARATOR_CHARS = set(':：*—-\u2014')
+
+
+def _line_is_heading_for(required: str, line: str) -> bool:
+    """บรรทัดนี้เป็น heading ของ section `required` หรือไม่.
+
+    หลักการ: ตัด markdown decoration ด้านหน้าออก แล้วเช็คว่าบรรทัดขึ้นต้นด้วย
+    ชื่อ section และตามด้วยตัวคั่น (ไม่ใช่ข้อความต่อเนื่อง) ครอบคลุมทุก format:
+      ## ภาพรวมตลาด / **ภาพรวมตลาด** / 1. ภาพรวมตลาด / ภาพรวมตลาด: /
+      ภาพรวมตลาด (Market Overview) / ### 1. ภาพรวมตลาด — สถานการณ์
+    แต่ไม่ match ประโยคธรรมดา เช่น "ภาพรวมตลาดสมาร์ทวอทช์เด็กในปัจจุบัน..."
+    """
+    cleaned = _HEADING_PREFIX_RE.sub('', line).strip()
+    # ตัด ** ที่อาจตกค้างด้านหน้า (กรณี **1. Section**)
+    cleaned = cleaned.lstrip('*').strip()
+    if not cleaned.startswith(required):
+        return False
+    rest = cleaned[len(required):]
+    if not rest:
+        return True
+    rest = rest.strip()
+    if not rest:
+        return True
+    if rest.startswith("("):
+        closing = rest.find(")")
+        if closing == -1:
+            return False
+        rest = rest[closing + 1:].strip()
+        if not rest:
+            return True
+    return rest[0] in _SEPARATOR_CHARS
+
+
+def _section_present_in_output(required: str, output: str) -> bool:
+    """required section ปรากฏเป็น heading ใน output บางบรรทัดหรือไม่."""
+    for line in output.split("\n"):
+        if _line_is_heading_for(required, line):
+            return True
+    return False
+
+
 def _validate_json_against_schema(data: Any, schema: dict, path: str = "") -> tuple[bool, str]:
     """Validate a parsed JSON value against a subset of JSON Schema.
 
@@ -23,16 +76,16 @@ def _validate_json_against_schema(data: Any, schema: dict, path: str = "") -> tu
     stype = schema.get("type")
     if stype == "object":
         if not isinstance(data, dict):
-            return False, f"{path or 'root'} ต้องเป้น object"
+            return False, f"{path or 'root'} ต้องเป็น object"
         required = schema.get("required", [])
         for key in required:
             if key not in data:
-                return False, f"{path} ขาดฟีลด์: {key}"
+                return False, f"{path} ขาดฟิลด์: {key}"
         properties = schema.get("properties", {})
         if schema.get("additionalProperties") is False:
             for key in data:
                 if key not in properties:
-                    return False, f"{path} มีฟีลด์เกิน: {key}"
+                    return False, f"{path} มีฟิลด์เกิน: {key}"
         for key, value in data.items():
             if key in properties:
                 child_path = f"{path}.{key}" if path else key
@@ -42,7 +95,7 @@ def _validate_json_against_schema(data: Any, schema: dict, path: str = "") -> tu
         return True, ""
     if stype == "array":
         if not isinstance(data, list):
-            return False, f"{path} ต้องเป้น array"
+            return False, f"{path} ต้องเป็น array"
         items_schema = schema.get("items")
         if items_schema:
             for i, item in enumerate(data):
@@ -52,15 +105,15 @@ def _validate_json_against_schema(data: Any, schema: dict, path: str = "") -> tu
         return True, ""
     if stype == "string":
         if not isinstance(data, str):
-            return False, f"{path} ต้องเป้น string"
+            return False, f"{path} ต้องเป็น string"
         return True, ""
     if stype == "number":
         if not isinstance(data, (int, float)) or isinstance(data, bool):
-            return False, f"{path} ต้องเป้น number"
+            return False, f"{path} ต้องเป็น number"
         return True, ""
     if stype == "boolean":
         if not isinstance(data, bool):
-            return False, f"{path} ต้องเป้น boolean"
+            return False, f"{path} ต้องเป็น boolean"
         return True, ""
     return True, ""
 
@@ -79,14 +132,7 @@ def _validate_markdown(output: str, required_sections: list[str] | None = None) 
     if _output_is_blank(output):
         return False, "output ว่างเปล่า"
     for s in required_sections or []:
-        # ยอมรับหัวข้อแบบ: ชื่อสินค้า:, ## ชื่อสินค้า, **ชื่อสินค้า**, 1. **ชื่อสินค้า**,
-        # 1. **ชื่อสินค้า (Product Name)** — ... (ชื่อ section ตามด้วยขอบเขตของคำ:
-        # ช่องว่าง / ** / : / — / - / จบบรรทัด ถือว่าเป็นหัวข้อ section นั้น)
-        pattern = re.compile(
-            r"(?:^|\n)(?:#+\s*|\d+\.\s+\*\*|\*\*)?" + re.escape(s) + r"(?:\s|$|\*\*|[\*:—\-])",
-            re.MULTILINE,
-        )
-        if not pattern.search(output):
+        if not _section_present_in_output(s, output):
             return False, f"ไม่พบ section: {s}"
     return True, ""
 
@@ -105,3 +151,4 @@ def validate_output(
     if agent_cfg.get("output_format") == "json":
         return _validate_json(output)
     return True, ""
+

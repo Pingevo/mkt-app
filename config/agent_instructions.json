@@ -61,15 +61,81 @@
     ],
     "analysis_style": "strategic",
     "web_search": true,
+    "data_strictness": "strict",
     "rules_must": [
       "ระบุแหล่งที่มาของข้อมูลคู่แข่ง",
-      "แยกข้อมูลที่ค้นหาได้กับที่สันนิษฐาน"
+      "แยกข้อมูลที่ค้นหาได้กับที่สันนิษฐาน",
+      "ทุก claim ต้องมี evidence type + confidence label",
+      "ถ้าไม่พบข้อมูล ต้องระบุ 'ไม่พบข้อมูล' แทนการเติมเอง",
+      "วิเคราะห์คู่แข่งและตลาดเฉพาะในประเทศไทยเท่านั้น",
+      "คู่แข่งต้องมีช่องทางขาย สินค้า หรือเว็บไซต์ทางการในประเทศไทย"
     ],
     "rules_forbid": [
       "ห้ามเดาราคาหรือคุณสมบัติคู่แข่ง",
-      "ห้ามลอกข้อมูลโดยไม่วิเคราะห์"
+      "ห้ามลอกข้อมูลโดยไม่วิเคราะห์",
+      "ห้ามอ้าง market share จาก product page หรือ retailer",
+      "ห้ามอ้าง spec จาก blog/review ถ้าไม่มี official source รองรับ",
+      "ห้ามเขียน claim โดยไม่ระบุ confidence (HIGH/MEDIUM/LOW/UNKNOWN)",
+      "ห้ามแทรก evidence label ภายใน tag HTML (<th>, <td>, <a>, ฯลฯ) ให้ใส่ท้ายประโยค/paragraph เท่านั้น"
     ],
-    "custom": "ต้องมีลิงก์สินค้าคู่แข่งเสมอ ต้องมี Trade off ระหว่างสินค้าเรากับคู่แข่งเสมอ แบรนด์ของคู่แข่งต้องเป็นแบรนด์ที่เป็นคู่แข่งกันได้จริง"
+    "custom": "",
+    "evidence_policy": {
+      "market_share": {
+        "allowed_sources": [
+          "market_report",
+          "financial_report",
+          "industry_report",
+          "government_data"
+        ],
+        "confidence": "HIGH",
+        "note": "ห้ามอ้าง product page / retailer / news"
+      },
+      "price": {
+        "allowed_sources": [
+          "official_store",
+          "major_retailer",
+          "official_announcement",
+          "shopee",
+          "lazada",
+          "powerbuy"
+        ],
+        "confidence": "HIGH",
+        "note": "ต้องมี URL หน้าสินค้าจริง ไม่ใช่หน้า tag/listing"
+      },
+      "specification": {
+        "allowed_sources": [
+          "official_product_page",
+          "datasheet",
+          "manual",
+          "certification",
+          "spec_sheet"
+        ],
+        "confidence": "HIGH",
+        "note": "ถ้าไม่มี official ให้ระบุว่าสันนิษฐานจากแหล่งอื่น"
+      },
+      "market_trend": {
+        "allowed_sources": [
+          "industry_report",
+          "market_report",
+          "news",
+          "research_firm"
+        ],
+        "confidence": "MEDIUM",
+        "note": "ต้องระบุขอบเขตเวลาและแหล่งข่าว"
+      },
+      "inference": {
+        "allowed_sources": [
+          "inferred_from_facts"
+        ],
+        "confidence": "LOW",
+        "note": "ต้องระบุชัดว่าเป็นการอนุมาน"
+      },
+      "unknown": {
+        "allowed_sources": [],
+        "confidence": "UNKNOWN",
+        "note": "ถ้าไม่มีข้อมูล ต้องบอก 'ไม่พบข้อมูล'"
+      }
+    }
   },
   "campaign_strategy": {
     "preset": "balanced",
