@@ -101,6 +101,29 @@ LLM บรรยาย + ติด tag ตาม taxonomy ใน `config/assets.
 
 ไม่ใช่: Brand Voice (ตัวตน — อยู่ที่ `brand/`), Terms (คำใช้ — อยู่ที่ `brand/terms.json`), ประวัติแบรนด์ (อยู่ที่ `brand/brand_profile.md`)
 
+## Agent Input Context
+
+### Agent Input Context (context สำหรับ agent)
+ชุดข้อมูลที่ส่งให้ agent ทำงาน ไม่ผูกกับชื่อ agent หรือ flow ที่ส่งมา มี semantic contract ชัดเจน ว่าฟิลด์ไหนมีความหมายอะไร
+
+ฟิลด์หลักสำหรับ CampaignStrategyAgent:
+- `product` — ข้อมูลสินค้า (required)
+- `competitors` — ผลวิเคราะห์คู่แข่ง (optional)
+- `market` — ข้อมูลตลาด/เทรนด์ (optional)
+- `customers` — กลุ่มเป้าหมาย (optional)
+- `business` — วัตถุประสงค์ งบ ช่องทาง ต้นทุน margin (optional)
+
+ไม่ใช่: `quick_brief` อยู่ใน context (`quick_brief` เป็นคำสั่งเฉพาะรอบ ผ่าน `BaseAgent.run(..., quick_brief=...)`)
+
+### Standalone Agent
+agent ที่สามารถทำงานได้โดยไม่ต้องพึ่ง output ของ agent อื่น ถ้าข้อมูลบางอย่างขาด agent ต้องระบุ uncertainty แทนที่จะหยุดทำงานหรือสร้างข้อมูล
+
+### Uncertainty Statement
+คำอธิบายใน output ที่บอกว่าสิ่งใด agent ไม่รู้หรือไม่สามารถสรุปได้ เนื่องจากขาดข้อมูล ไม่ใช่การเติมข้อมูลเพื่อให้ output ดูครบ
+
+### Evidence-Driven Search
+การใช้ web search เฉพาะเมื่อต้องการข้อมูลภายนอกเพื่อตัดสินใจ ไม่ใช่ขั้นตอนบังคับก่อนทุกงาน
+
 ## AI Usage
 
 ### Actor (user)

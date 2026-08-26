@@ -1,0 +1,200 @@
+"""Campaign strategy tests using a fake LLM.
+
+These tests verify the refactored CampaignStrategyAgent:
+
+1. Accepts a generic `context` dict and renders only provided context blocks.
+2. Requires `product` context; other context keys are optional.
+3. Does not perform pricing/campaign reasoning inside `build_prompt`.
+4. Receives a system prompt that supports standalone operation, indicative
+   pricing, and evidence-driven web search.
+5. Produces output that passes the existing Markdown section validation.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.agents.campaign_strategy import CampaignStrategyAgent
+from src.config_loader import get_agent_config, load_config
+
+
+class FakeLLM:
+    """Deterministic LLM double that captures the request and returns scripted output."""
+
+    def __init__(self, generate_output: str = "", annotations: list | None = None):
+        self.generate_output = generate_output
+        self.annotations = annotations or []
+        self.calls: list[dict] = []
+
+    def chat(self, messages, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        if kwargs.get("return_annotations"):
+            return self.generate_output, self.annotations
+        return self.generate_output
+
+    def close(self):
+        pass
+
+
+def _campaign_config():
+    cfg = load_config()
+    return get_agent_config(cfg, "campaign_strategy")
+
+
+def _valid_output():
+    """A minimal valid output containing all required Markdown section headings."""
+    return (
+        "## ราคาแนะนำ\n"
+        "- ราคาขายปลีก: ฿2,490-2,790 (estimate)\n"
+        "- ราคาโปรโมชัน: ฿2,240\n\n"
+        "## แคมเปญหลัก\n"
+        "- ชื่อ: Launch\n\n"
+        "## แคมเปญเสริม\n"
+        "- แคมเปญ 1\n\n"
+        "## ช่องทางโปรโมท\n"
+        "- TikTok\n\n"
+        "## KPI ที่ควรวัดผล\n"
+        "- ยอดขาย\n\n"
+        "## งบประมาณประมาณการ\n"
+        "- ประมาณ 50,000 บาท\n\n"
+        "## แหล่งอ้างอิง\n"
+        "- [ตัวอย่าง](https://example.com)"
+    )
+
+
+def test_build_prompt_requires_product():
+    agent = CampaignStrategyAgent(_campaign_config(), FakeLLM())
+
+    with pytest.raises(ValueError, match="product context"):
+        agent.build_prompt({})
+
+    with pytest.raises(ValueError, match="product context"):
+        agent.build_prompt({"product": "   ", "competitors": "some"})
+
+
+def test_build_prompt_product_only():
+    agent = CampaignStrategyAgent(_campaign_config(), FakeLLM())
+    prompt = agent.build_prompt({"product": "LAGENIO K2"})
+
+    assert "--- สินค้า (product) ---" in prompt
+    assert "LAGENIO K2" in prompt
+    assert "--- ผลวิเคราะห์คู่แข่ง" not in prompt
+    assert "--- ข้อมูลตลาด" not in prompt
+    assert "--- กลุ่มเป้าหมาย" not in prompt
+    assert "--- ข้อมูลทางธุรกิจ" not in prompt
+
+
+def test_build_prompt_renders_optional_contexts():
+    agent = CampaignStrategyAgent(_campaign_config(), FakeLLM())
+    prompt = agent.build_prompt(
+        {
+            "product": "K2",
+            "competitors": "imoo Z1",
+            "market": "ตลาดเติบโต",
+            "customers": "เด็ก 6-12 ปี",
+            "business": "งบ 100,000",
+        }
+    )
+
+    assert "--- สินค้า (product) ---" in prompt
+    assert "--- ผลวิเคราะห์คู่แข่ง (competitors) ---" in prompt
+    assert "--- ข้อมูลตลาดและเทรนด์ (market) ---" in prompt
+    assert "--- กลุ่มเป้าหมาย (customers) ---" in prompt
+    assert "--- ข้อมูลทางธุรกิจและงบประมาณ (business) ---" in prompt
+    assert "imoo Z1" in prompt
+    assert "ห้ามอ้าง margin/profitability" in prompt
+
+
+def test_build_prompt_ignores_empty_and_quick_brief():
+    agent = CampaignStrategyAgent(_campaign_config(), FakeLLM())
+    prompt = agent.build_prompt(
+        {
+            "product": "K2",
+            "competitors": "",
+            "quick_brief": "เน้น TikTok",
+        }
+    )
+
+    assert "เน้น TikTok" not in prompt
+    assert "quick_brief" not in prompt
+    assert "--- ผลวิเคราะห์คู่แข่ง" not in prompt
+
+
+def test_system_prompt_allows_indicative_pricing():
+    cfg = _campaign_config()
+    agent = CampaignStrategyAgent(cfg, FakeLLM())
+    system = agent._build_system_prompt()
+
+    assert "indicative pricing" in system or "ราคาแนะนำเชิงกลยุทธ์" in system
+    assert "สมมติฐาน" in system or "estimate" in system
+
+
+def test_system_prompt_prohibits_financial_certainty():
+    cfg = _campaign_config()
+    agent = CampaignStrategyAgent(cfg, FakeLLM())
+    system = agent._build_system_prompt()
+
+    assert "ห้ามอ้าง margin" in system or "profitability" in system
+    assert "กำไร X%" in system or "profitability" in system
+
+
+def test_system_prompt_web_search_is_not_mandatory():
+    cfg = _campaign_config()
+    agent = CampaignStrategyAgent(cfg, FakeLLM())
+    system = agent._build_system_prompt()
+
+    assert "web search เป็นเครื่องมือสำรอง" in system
+    assert "ไม่ใช่ขั้นตอนบังคับ" in system
+
+
+def test_system_prompt_addresses_conflicting_context():
+    cfg = _campaign_config()
+    agent = CampaignStrategyAgent(cfg, FakeLLM())
+    system = agent._build_system_prompt()
+
+    assert "ขัดแย้ง" in system
+
+
+def test_run_standalone_product_only():
+    cfg = _campaign_config()
+    cfg["max_review_iterations"] = 0
+    cfg["web_search"] = False
+    llm = FakeLLM(generate_output=_valid_output())
+    agent = CampaignStrategyAgent(cfg, llm)
+
+    prompt = agent.build_prompt({"product": "K2"})
+    result = agent.run(prompt)
+
+    assert result == _valid_output()
+    generate_calls = [c for c in llm.calls if "generate" in c["kwargs"].get("source", "")]
+    assert len(generate_calls) == 1
+    assert "K2" in generate_calls[0]["messages"][1]["content"]
+
+
+def test_run_with_competitor_analysis():
+    cfg = _campaign_config()
+    cfg["max_review_iterations"] = 0
+    cfg["web_search"] = False
+    llm = FakeLLM(generate_output=_valid_output())
+    agent = CampaignStrategyAgent(cfg, llm)
+
+    prompt = agent.build_prompt({"product": "K2", "competitors": "imoo Z1"})
+    result = agent.run(prompt)
+
+    assert result == _valid_output()
+    generate_calls = [c for c in llm.calls if "generate" in c["kwargs"].get("source", "")]
+    assert "imoo Z1" in generate_calls[0]["messages"][1]["content"]
+
+
+def test_run_does_not_force_web_search_when_disabled():
+    cfg = _campaign_config()
+    cfg["max_review_iterations"] = 0
+    cfg["web_search"] = False
+    llm = FakeLLM(generate_output=_valid_output())
+    agent = CampaignStrategyAgent(cfg, llm)
+
+    agent.run(agent.build_prompt({"product": "K2"}))
+
+    generate_calls = [c for c in llm.calls if "generate" in c["kwargs"].get("source", "")]
+    tools = generate_calls[0]["kwargs"].get("tools", [])
+    assert not any(t.get("type") == "openrouter:web_search" for t in tools)
