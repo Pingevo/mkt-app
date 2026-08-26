@@ -305,7 +305,14 @@ class Orchestrator:
             agent = self._make_agent("campaign_strategy", CampaignStrategyAgent, llm)
             # ดึงข้อมูลสินค้าจาก DB ถ้ามี ไม่งั้นใช้ parameter (backward compatible)
             product_data = self._get_product_data(product_spec)
-            prompt = agent.build_prompt(product_data, competitor_analysis)
+            # CampaignStrategyAgent.build_prompt accepts a single context dict.
+            # All policy rules live in the agent's system prompt (agents.yaml);
+            # the orchestrator only passes data, not validation flags.
+            context = {
+                "product": product_data,
+                "competitors": competitor_analysis or "",
+            }
+            prompt = agent.build_prompt(context)
             image_paths = self._get_product_image_paths()
             result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
             self.results["campaign_strategy"] = result

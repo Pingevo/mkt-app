@@ -141,14 +141,25 @@ def validate_output(
     agent_name: str,
     output: str,
     required_sections: list[str] | None = None,
+    context_flags: dict | None = None,
 ) -> tuple[bool, str]:
-    """Return (ok, error_message) for an agent's raw text output."""
+    """Return (ok, error_message) for an agent's raw text output.
+
+    ``context_flags`` is accepted for backward compatibility but no longer
+    used — deterministic Markdown/regex guardrails were removed in favour of
+    keeping all policy rules in the agent's system prompt.
+    """
     cfg = load_config()
     agent_cfg = cfg.get("agents", {}).get(agent_name, {})
     required = required_sections if required_sections is not None else agent_cfg.get("required_output_sections")
     if required:
-        return _validate_markdown(output, required)
-    if agent_cfg.get("output_format") == "json":
-        return _validate_json(output)
+        ok, err = _validate_markdown(output, required)
+        if not ok:
+            return ok, err
+    elif agent_cfg.get("output_format") == "json":
+        ok, err = _validate_json(output)
+        if not ok:
+            return ok, err
+
     return True, ""
 

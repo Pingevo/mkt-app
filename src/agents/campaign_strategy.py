@@ -9,12 +9,17 @@ class CampaignStrategyAgent(BaseAgent):
     agent_name = "campaign_strategy"
     display_name = "นักวางกลยุทธ์แคมเปญ"
 
+    def __init__(self, config: dict, llm_client=None, **kwargs):
+        super().__init__(config, llm_client, **kwargs)
+
     def build_prompt(self, context: dict) -> str:
         """Build the user prompt from a semantic context dict.
 
         `context` may come from any upstream source — user, competitor agent,
         market agent, etc.  Only `product` is required; everything else is
         enrichment.  This method formats data; it does not reason or decide.
+        All policy rules live in the system prompt (agents.yaml) — this method
+        does NOT duplicate them.
         """
         product = context.get("product", "")
         if not product.strip():
@@ -25,9 +30,6 @@ class CampaignStrategyAgent(BaseAgent):
             product,
             "",
             "จากข้อมูลข้างต้น ให้ออกแบบแคมเปญและราคาแนะนำ",
-            "สิ่งที่ไม่มีข้อมูล ให้ระบุว่าเป็น estimate/hypothesis หรือไม่สามารถสรุปได้",
-            "ห้ามสร้างข้อมูลเพื่อให้ทุก section ดูครบ",
-            "ห้ามอ้าง margin/profitability ที่ไม่มีต้นทุนหรือข้อมูลทางการเงินรองรับ",
         ]
 
         for key, label in [
@@ -41,3 +43,14 @@ class CampaignStrategyAgent(BaseAgent):
                 sections.extend([f"--- {label} ---", str(value), ""])
 
         return "\n".join(sections)
+
+    def validate_output(self, output: str) -> tuple[bool, str]:
+        """Validate output: section presence only (no regex guardrails)."""
+        from ..output_validators import validate_output
+
+        required = self.config.get("required_output_sections")
+        return validate_output(
+            self.agent_name,
+            output,
+            required_sections=required,
+        )

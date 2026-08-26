@@ -547,6 +547,11 @@ class BaseAgent:
         if _output_is_blank(output):
             return output
         cfg = _web_search_cfg()
+        # Per-agent override: agent config `verify_urls` takes precedence over
+        # the global web_search.verify_urls setting.  This lets agents that
+        # don't benefit from URL verification (e.g. campaign_strategy) opt out
+        # without affecting other agents.
+        verify_urls = self.config.get("verify_urls", cfg.get("verify_urls"))
         unique_urls: list[dict[str, Any]] = []
         seen: set[str] = set()
         for a in annotations:
@@ -562,7 +567,7 @@ class BaseAgent:
         )
         output += citation_section
 
-        if cfg.get("verify_urls"):
+        if verify_urls:
             verified = self._verify_urls_with_fetch(unique_urls)
             if verified:
                 output += f"\n\n**URL ที่ verify ผ่าน (หน้ามีเนื้อหาเกี่ยวข้อง):**\n{verified}"
