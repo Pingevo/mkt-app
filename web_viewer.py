@@ -924,26 +924,20 @@ async def api_upload(
     is_new_upload = not product_dir.exists()
     product_dir.mkdir(parents=True, exist_ok=True)
 
-    saved = []
+    # อ่านเนื้อไฟล์ทั้งหมดก่อน (UploadFile ต้อง await) แล้วเซฟผ่าน save_uploaded_files
+    # ซึ่งข้ามไฟล์ที่เนื้อซ้ำ (hash ตรง) — ป้องกันก้อนซ้ำ `ชื่อ_1.ext` ตอนอัปโหลดซ้ำ
+    files_to_save: list[tuple[str, bytes]] = []
     for f in files:
         if not f.filename or f.filename.startswith(".") or f.filename == ".DS_Store":
             continue
-        dest = product_dir / f.filename
-        if dest.exists():
-            stem = dest.stem
-            suffix = dest.suffix
-            i = 1
-            while dest.exists():
-                dest = product_dir / f"{stem}_{i}{suffix}"
-                i += 1
         content = await f.read()
-        dest.write_bytes(content)
-        saved.append(dest.name)
+        files_to_save.append((f.filename, content))
+    from src import product_db
+    saved = product_db.save_uploaded_files(folder_name, files_to_save)
 
     # Auto-trigger ingestion after upload — user ไม่ต้องกดปุ่มเอง
     if saved:
         import threading
-        from src import product_db
         from src.ingestion import ingest_product
 
         # ถ้ายังไม่ได้ processing ให้เริ่ม ingestion
@@ -960,6 +954,84 @@ async def api_upload(
             thread.start()
 
     return JSONResponse({"ok": True, "folder": folder_name, "files": saved})
+
+
+# ------------------------------------------------------------------
+#  Staging API (block A) — upload → preview → commit
+# ------------------------------------------------------------------
+
+@app.post("/api/upload_stage")
+async def api_upload_stage(files: list[UploadFile] = File(...)) -> JSONResponse:
+    """อัปโหลดไป staging + รัน segmentation + คืน segments/matches (preview).
+
+    ไม่สร้างสินค้าจริง — user ต้องกด commit ผ่าน /api/stage/{batch_id}/commit
+    """
+    from src import staging
+    from src.ingestion import _make_llm
+
+    files_to_save: list[tuple[str, bytes]] = []
+    for f in files:
+        if not f.filename or f.filename.startswith(".") or f.filename == ".DS_Store":
+            continue
+        content = await f.read()
+        files_to_save.append((f.filename, content))
+
+    if not files_to_save:
+        return JSONResponse({"error": "ไม่มีไฟล์ที่รองรับ"}, status_code=400)
+
+    batch_id = staging.create_batch(files_to_save)
+    try:
+        llm = _make_llm()
+    except Exception:
+        llm = None
+    result = staging.run_segmentation(batch_id, llm=llm)
+    if llm is not None:
+        llm.close()
+
+    batch = staging._load_batch(batch_id)
+    return JSONResponse({
+        "batch_id": batch_id,
+        "files": batch.get("files", []),
+        "segments": result["segments"],
+        "matches": result["matches"],
+    })
+
+
+@app.get("/api/stage/{batch_id}")
+def api_get_stage(batch_id: str) -> JSONResponse:
+    """ดึง batch info (segments + matches) เพื่อ refresh preview."""
+    from src import staging
+    batch = staging._load_batch(batch_id)
+    if not batch:
+        return JSONResponse({"error": "batch ไม่มี"}, status_code=404)
+    return JSONResponse(batch)
+
+
+@app.post("/api/stage/{batch_id}/commit")
+def api_commit_stage(batch_id: str, body: dict = None) -> JSONResponse:
+    """materialize ตามที่ user เลือกใน preview.
+
+    body: {choices: [{segment_index, action, target?, name?}]}
+    """
+    from src import staging
+    choices = (body or {}).get("choices", [])
+    if not choices:
+        return JSONResponse({"error": "ต้องส่ง choices"}, status_code=400)
+    try:
+        result = staging.commit_batch(batch_id, choices)
+        return JSONResponse(result)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+
+
+@app.delete("/api/stage/{batch_id}")
+def api_delete_stage(batch_id: str) -> JSONResponse:
+    """ยกเลิก batch — ลบ staging (ปิดหน้าต่าง หรือ user ยกเลิก)."""
+    from src import staging
+    staging.discard_batch(batch_id)
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/supported_formats")
@@ -4588,6 +4660,9 @@ let _uploadQueue = [];
 let _filesToDelete = [];  // ไฟล์ที่ทำเครื่องหมายจะลบใน modal — ลบจริงตอนกด "บันทึก"
 let _editingFolder = null;
 let _supportedFormats = null;
+let _stagingBatchId = null;     // batch_id ของ staging (block A preview flow)
+let _stagingSegments = [];      // segments จาก segmentation
+let _stagingMatches = [];       // matches: ตัวไหน update/create
 
 function loadSupportedFormats() {
   if (_supportedFormats) {
@@ -4634,6 +4709,13 @@ function openUploadModal() {
   _ppFolder = '';
   _productProfileOriginal = null;
   _uploadModalOriginal = null;
+  _stagingBatchId = null;
+  _stagingSegments = [];
+  _stagingMatches = [];
+  const previewEl = document.getElementById('staging-preview-modal');
+  if (previewEl) { previewEl.style.display = 'none'; previewEl.innerHTML = ''; }
+  const submitBtn = document.getElementById('upload-submit-btn');
+  if (submitBtn) submitBtn.style.display = '';
   console.log('[openUploadModal] start');
   const ppSection = document.getElementById('pp-section');
   if (ppSection) ppSection.style.display = 'none';
@@ -4671,6 +4753,14 @@ function openUploadModalForFolder(folder, status) {
   _ppFolder = '';
   _productProfileOriginal = null;
   _uploadModalOriginal = null;
+  // reset staging state — ห้ามให้ preview จากการเพิ่มสินค้าใหม่โผล่ใน modal แก้ไขสินค้าเดิม
+  _stagingBatchId = null;
+  _stagingSegments = [];
+  _stagingMatches = [];
+  const previewEl = document.getElementById('staging-preview-modal');
+  if (previewEl) { previewEl.style.display = 'none'; previewEl.innerHTML = ''; }
+  const submitBtn = document.getElementById('upload-submit-btn');
+  if (submitBtn) submitBtn.style.display = '';
   const section = document.getElementById('pp-section');
   if (section) section.style.display = 'none';
   const nameInput = document.getElementById('upload-product-name-modal');
@@ -4876,6 +4966,17 @@ function closeUploadModal(force) {
       return;
     }
   }
+  // discard staging batch ถ้ามี (lifecycle: หายถ้าปิดหน้าต่าง)
+  if (_stagingBatchId) {
+    fetch('/api/stage/' + encodeURIComponent(_stagingBatchId), { method: 'DELETE' }).catch(() => {});
+    _stagingBatchId = null;
+    _stagingSegments = [];
+    _stagingMatches = [];
+    const el = document.getElementById('staging-preview-modal');
+    if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+    const submitBtn = document.getElementById('upload-submit-btn');
+    if (submitBtn) submitBtn.style.display = '';
+  }
   document.getElementById('upload-overlay').className = 'settings-modal-overlay';
   _ppFolder = '';
   _editingFolder = null;
@@ -4921,6 +5022,225 @@ function removeFromQueue(idx) {
   if (_editingFolder) loadExistingFilesInModal(_editingFolder);
 }
 
+function startStagingUpload() {
+  // อัปโหลดไป staging + รัน segmentation + โชว์ preview (block A)
+  const status = document.getElementById('upload-modal-status');
+  if (_uploadQueue.length === 0) {
+    status.className = 'upload-status err';
+    status.textContent = 'กรุณาเลือกไฟล์';
+    return;
+  }
+  // ยกเลิก batch เดิมถ้ามี
+  if (_stagingBatchId) {
+    fetch('/api/stage/' + encodeURIComponent(_stagingBatchId), { method: 'DELETE' }).catch(() => {});
+    _stagingBatchId = null;
+  }
+  const formData = new FormData();
+  for (const f of _uploadQueue) {
+    formData.append('files', f);
+  }
+  status.className = 'upload-status';
+  status.textContent = 'กำลังตรวจและแยกข้อมูลสินค้า...';
+  const submitBtn = document.getElementById('upload-submit-btn');
+  if (submitBtn) submitBtn.disabled = true;
+  fetch('/api/upload_stage', { method: 'POST', body: formData }).then(r => r.json()).then(data => {
+    if (data.error) {
+      status.className = 'upload-status err';
+      status.textContent = data.error;
+      if (submitBtn) submitBtn.disabled = false;
+      return;
+    }
+    _stagingBatchId = data.batch_id;
+    _stagingSegments = data.segments || [];
+    _stagingMatches = data.matches || [];
+    _uploadQueue = [];
+    renderUploadQueueModal();
+    renderStagingPreview();
+    status.className = 'upload-status';
+    status.textContent = '';
+    if (submitBtn) submitBtn.disabled = false;
+  }).catch(e => {
+    status.className = 'upload-status err';
+    status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+    if (submitBtn) submitBtn.disabled = false;
+  });
+}
+
+function renderStagingPreview() {
+  const el = document.getElementById('staging-preview-modal');
+  if (!_stagingSegments.length) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  el.style.display = 'block';
+
+  // นับสรุป: กี่ตัวมีอยู่แล้ว, กี่ตัวใหม่
+  let nExists = 0, nNew = 0;
+  for (const m of _stagingMatches) {
+    if (m.action === 'update') nExists++;
+    else nNew++;
+  }
+
+  // summary box — อธิบายก่อนว่าระบบเจออะไร
+  let html = '<div style="background:#0f1117;border:1px solid #2a2d3a;border-radius:8px;padding:10px 12px;margin-bottom:12px">';
+  html += '<div style="color:#7c8aff;font-size:13px;margin-bottom:4px">ตรวจพบ ' + _stagingSegments.length + ' สินค้าจากไฟล์ที่อัปโหลด</div>';
+  let desc = '';
+  if (nExists > 0 && nNew > 0) {
+    desc = 'ระบบแยกได้ <b>' + _stagingSegments.length + ' สินค้า</b> — <b>' + nExists + ' ตัวมีอยู่แล้ว</b> (จะข้าม) และ <b>' + nNew + ' ตัวใหม่</b> (จะสร้าง)';
+  } else if (nExists > 0) {
+    desc = 'ระบบเจอว่าไฟล์นี้ <b>เหมือนสินค้าที่มีอยู่แล้ว ' + nExists + ' ตัว</b> — ไม่ต้องทำอะไร';
+  } else {
+    desc = 'เป็นสินค้าใหม่ — ไม่ตรงกับสินค้าที่มีอยู่ ระบบจะสร้างใหม่';
+  }
+  html += '<div style="font-size:12px;color:#aaa;line-height:1.5">' + desc + '</div>';
+  html += '</div>';
+
+  // header
+  html += '<div style="display:grid;grid-template-columns:30px 1fr 150px 120px;gap:8px;align-items:center;padding:6px;font-size:11px;color:#888;border-bottom:1px solid #2a2d3a">';
+  html += '<div>#</div><div>ชื่อสินค้า</div><div>สถานะ</div><div>จะทำอะไร</div>';
+  html += '</div>';
+
+  for (let i = 0; i < _stagingSegments.length; i++) {
+    const seg = _stagingSegments[i];
+    const match = _stagingMatches[i] || { action: 'create', target: null, match_by: null };
+    const isExists = match.action === 'update';
+    const nameVal = seg.suggested_name || '';
+
+    html += '<div style="display:grid;grid-template-columns:30px 1fr 150px 120px;gap:8px;align-items:center;padding:8px 6px;border-bottom:1px solid #1e212b' + (isExists ? ';opacity:0.6' : '') + '">';
+    // number
+    html += '<div style="color:#888;text-align:center;font-size:12px">' + (i + 1) + '</div>';
+    // name + key
+    html += '<div style="min-width:0">';
+    const nameDisabled = isExists ? 'disabled' : '';
+    html += '<input type="text" data-seg-name="' + i + '" value="' + escapeHtml(nameVal) + '" ' + nameDisabled + ' ';
+    html += 'style="width:100%;background:#1c1e2a;border:1px solid #2a2d3a;color:#fff;border-radius:4px;padding:5px 8px;font-size:12px;box-sizing:border-box">';
+    if (seg.product_key) {
+      html += '<div style="font-size:10px;color:#555;margin-top:3px">key: ' + escapeHtml(seg.product_key) + '</div>';
+    }
+    html += '</div>';
+    // status
+    html += '<div style="font-size:11px;line-height:1.4">';
+    if (isExists) {
+      html += '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;background:#2a2d3a;color:#888">มีอยู่แล้ว</span>';
+      html += '<div style="color:#666;margin-top:3px">' + escapeHtml(match.target || '') + '</div>';
+    } else {
+      html += '<span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;background:#1a3d2a;color:#4ade80">ใหม่</span>';
+    }
+    html += '</div>';
+    // action dropdown (มีแค่ตัวที่ยังไม่มี)
+    html += '<div>';
+    if (isExists) {
+      html += '<span style="font-size:11px;color:#666">—</span>';
+    } else {
+      html += '<select data-seg-action="' + i + '" onchange="_updateStagingConfirmLabel()" style="background:#1c1e2a;border:1px solid #2a2d3a;color:#fff;border-radius:4px;padding:5px 8px;font-size:12px;width:100%">';
+      html += '<option value="create" selected>สร้างใหม่</option>';
+      html += '<option value="skip">ข้าม</option>';
+      html += '</select>';
+    }
+    html += '</div>';
+    html += '</div>';
+  }
+
+  // ปุ่มยืนยัน/ยกเลิก
+  html += '<div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px">';
+  html += '<button class="settings-cancel" onclick="cancelStaging()">ยกเลิก</button>';
+  html += '<button class="settings-save" onclick="confirmStagingCommit()" id="staging-confirm-btn">ยืนยัน</button>';
+  html += '</div>';
+
+  el.innerHTML = html;
+  // ซ่อนปุ่มอัปโหลดเดิมตอนโชว์ preview
+  const submitBtn = document.getElementById('upload-submit-btn');
+  if (submitBtn) submitBtn.style.display = 'none';
+  // update confirm button label
+  _updateStagingConfirmLabel();
+}
+
+function _updateStagingConfirmLabel() {
+  const btn = document.getElementById('staging-confirm-btn');
+  if (!btn) return;
+  let nCreate = 0;
+  const selects = document.querySelectorAll('#staging-preview-modal select[data-seg-action]');
+  for (const sel of selects) {
+    if (sel.value === 'create') nCreate++;
+  }
+  if (nCreate === 0) {
+    btn.textContent = 'ยืนยัน';
+    btn.disabled = true;
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'ยืนยัน (สร้าง ' + nCreate + ')';
+  }
+}
+
+function confirmStagingCommit() {
+  const status = document.getElementById('upload-modal-status');
+  if (!_stagingBatchId) return;
+  // อ่าน choices จาก dropdown action (มีแค่ตัวที่ยังไม่มี — ตัวที่มีอยู่แล้วไม่มี dropdown)
+  const choices = [];
+  const selects = document.querySelectorAll('#staging-preview-modal select[data-seg-action]');
+  for (const sel of selects) {
+    const idx = parseInt(sel.dataset.segAction);
+    const action = sel.value;
+    if (action === 'skip') continue;
+    const nameInput = document.querySelector('#staging-preview-modal input[data-seg-name="' + idx + '"]');
+    const choice = { segment_index: idx, action: action };
+    if (action === 'create') {
+      choice.name = nameInput ? nameInput.value.trim() : '';
+    }
+    choices.push(choice);
+  }
+  if (choices.length === 0) {
+    status.className = 'upload-status err';
+    status.textContent = 'เลือกอย่างน้อย 1 สินค้า (เปลี่ยนจาก "ข้าม" เป็น "สร้างใหม่")';
+    return;
+  }
+  const saveBtn = document.getElementById('staging-confirm-btn');
+  if (saveBtn) { saveBtn.textContent = 'กำลังบันทึก...'; saveBtn.disabled = true; }
+  status.className = 'upload-status';
+  status.textContent = 'กำลังบันทึก ' + choices.length + ' สินค้า...';
+  fetch('/api/stage/' + encodeURIComponent(_stagingBatchId) + '/commit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ choices }),
+  }).then(r => r.json()).then(data => {
+    if (data.error) {
+      status.className = 'upload-status err';
+      status.textContent = data.error;
+      if (saveBtn) { saveBtn.textContent = 'ยืนยัน'; saveBtn.disabled = false; }
+      return;
+    }
+    const created = (data.created || []).length;
+    status.className = 'upload-status ok';
+    status.textContent = 'บันทึกเรียบร้อย — สร้าง ' + created + ' สินค้า';
+    _stagingBatchId = null;
+    _stagingSegments = [];
+    _stagingMatches = [];
+    loadFolderList();
+    startSidebarPolling();
+    setTimeout(() => closeUploadModal(true), 1500);
+  }).catch(e => {
+    status.className = 'upload-status err';
+    status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+    if (saveBtn) { saveBtn.textContent = 'ยืนยัน'; saveBtn.disabled = false; }
+  });
+}
+
+function cancelStaging() {
+  if (_stagingBatchId) {
+    fetch('/api/stage/' + encodeURIComponent(_stagingBatchId), { method: 'DELETE' }).catch(() => {});
+    _stagingBatchId = null;
+  }
+  _stagingSegments = [];
+  _stagingMatches = [];
+  const el = document.getElementById('staging-preview-modal');
+  if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+  const submitBtn = document.getElementById('upload-submit-btn');
+  if (submitBtn) submitBtn.style.display = '';
+  const status = document.getElementById('upload-modal-status');
+  if (status) { status.className = 'upload-status'; status.textContent = ''; }
+}
+
 function uploadFiles() {
   if (_productProfileSavingFor === _ppFolder) { alert('กรุณารอให้บันทึกข้อมูลเสร็จก่อน'); return; }
   const status = document.getElementById('upload-modal-status');
@@ -4928,7 +5248,9 @@ function uploadFiles() {
   let name = document.getElementById('upload-product-name-modal').value.trim();
   if (!isEditing) {
     if (_uploadQueue.length === 0) { status.className = 'upload-status err'; status.textContent = 'กรุณาเลือกไฟล์สำหรับสินค้าใหม่'; return; }
-    name = _makeProductNameFromFile(_uploadQueue[0]);
+    // สินค้าใหม่ → ใช้ staging flow (block A): upload_stage → preview → commit
+    startStagingUpload();
+    return;
   } else if (!name) {
     status.className = 'upload-status err'; status.textContent = 'กรุณาตั้งชื่อสินค้า'; return;
   }
@@ -9337,6 +9659,7 @@ function loadCredits() {
     <label>เลือกไฟล์ <span id="upload-formats-tooltip" style="cursor:help;color:#7c8aff;font-size:12px" title="กำลังโหลด...">ⓘ</span></label>
     <input type="file" id="upload-files-modal" multiple onchange="addFilesToQueueModal()">
     <div id="upload-queue-modal" class="upload-queue"></div>
+    <div id="staging-preview-modal" style="display:none;margin-top:12px;max-height:420px;overflow-y:auto;padding:10px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px"></div>
     <div id="supported-formats-info" style="display:none"></div>
     <div id="existing-files-modal"></div>
     <div id="pp-section" style="display:none;margin-top:16px;padding:12px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px">

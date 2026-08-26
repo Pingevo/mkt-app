@@ -400,3 +400,79 @@ def test_split_failure_rolls_back_no_partial_products(_ingest, tmp_path, monkeyp
 
     # ต้นฉบับยังอยู่ — ผู้ใช้รันใหม่ได้
     assert (tmp_path / "data" / temp_name).exists(), "โฟลเดอร์ต้นฉบับต้องยังอยู่หลัง rollback"
+
+
+# ------------------------------------------------------------------
+#  Idempotent re-import — อัปโหลด catalog ซ้ำไม่สร้างสินค้าก้อนซ้ำ
+# ------------------------------------------------------------------
+
+def test_reingest_catalog_recreates_only_missing_product(_ingest, tmp_path, monkeypatch):
+    """ลบ 1 รุ่นจาก 3 → อัปโหลด catalog เดิมซ้ำ → ได้คืนแค่ตัวที่ขาด ไม่มีก้อนซ้ำ.
+
+    สถานการณ์จริงที่ user เจอ:
+      1. อัปโหลด price list 3 รุ่น → ได้ CACGO K67, K72, K71
+      2. ลบ K71 โดยไม่ตั้งใจ
+      3. อัปโหลด price list เดิมซ้ำเพื่อเอา K71 คืน
+      4. ต้องได้แค่ K71 คืน — K67/K72 ต้องไม่ถูกสร้างซ้ำเป็น (1)
+    """
+    ingestion = _ingest
+    import src.product_db as product_db
+
+    # --- รอบที่ 1: อัปโหลด catalog 3 รุ่น ---
+    temp_name = "catalog"
+    data_dir = tmp_path / "data" / temp_name
+    data_dir.mkdir(parents=True)
+    (data_dir / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
+    llm = _FakeLLM(_make_seg_response())
+    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
+    ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+
+    names = [p["product_id"] for p in product_db.get_all_products()]
+    assert set(names) == {"CACGO K67", "CACGO K72", "CACGO K71"}
+
+    # --- user ลบ K71 โดยไม่ตั้งใจ ---
+    import shutil
+    shutil.rmtree(tmp_path / "data" / "CACGO K71", ignore_errors=True)
+    shutil.rmtree(tmp_path / "cache" / "CACGO K71", ignore_errors=True)
+
+    # --- รอบที่ 2: อัปโหลด catalog เดิมซ้ำ (temp folder ใหม่ ชื่อเดิม) ---
+    data_dir2 = tmp_path / "data" / temp_name
+    data_dir2.mkdir(parents=True)
+    (data_dir2 / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
+    llm2 = _FakeLLM(_make_seg_response())
+    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm2)
+    ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+
+    # ต้องมี 3 สินค้า ไม่มีก้อนซ้ำ (ไม่มี (1) suffix)
+    names2 = [p["product_id"] for p in product_db.get_all_products()]
+    assert sorted(names2) == ["CACGO K67", "CACGO K71", "CACGO K72"], \
+        f"ต้องมี 3 สินค้า ไม่มี duplicate: {names2}"
+    assert not any("(1)" in n for n in names2), f"ห้ามมี suffix (1): {names2}"
+
+
+def test_reingest_catalog_all_exist_no_duplicates(_ingest, tmp_path, monkeypatch):
+    """อัปโหลด catalog เดิมซ้ำทั้ง 3 รุ่นที่มีอยู่ครบ → ไม่สร้างอะไรใหม่ ไม่มีก้อนซ้ำ."""
+    ingestion = _ingest
+    import src.product_db as product_db
+
+    temp_name = "catalog"
+    data_dir = tmp_path / "data" / temp_name
+    data_dir.mkdir(parents=True)
+    (data_dir / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
+    llm = _FakeLLM(_make_seg_response())
+    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
+    ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+
+    before = sorted(p["product_id"] for p in product_db.get_all_products())
+
+    # อัปโหลดซ้ำทั้งหมด
+    data_dir2 = tmp_path / "data" / temp_name
+    data_dir2.mkdir(parents=True)
+    (data_dir2 / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
+    llm2 = _FakeLLM(_make_seg_response())
+    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm2)
+    ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+
+    after = sorted(p["product_id"] for p in product_db.get_all_products())
+    assert after == before, f"ต้องไม่เพิ่ม/ซ้ำ: before={before} after={after}"
+    assert not any("(1)" in n for n in after)

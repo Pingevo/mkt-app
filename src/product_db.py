@@ -220,6 +220,60 @@ def compute_file_hash(path: Path) -> str:
     return _file_hash(path)
 
 
+def get_existing_file_hashes(product_id: str) -> set[str]:
+    """คืน set ของ hash ของไฟล์ที่มีอยู่ในสินค้า — สำหรับตรวจ duplicate ตอนอัปโหลด.
+
+    ใช้ตอนอัปโหลดไฟล์ซ้ำ: ถ้า hash ของไฟล์ที่อัปโหลดตรอบไฟล์ที่มีอยู่แล้ว → ข้าม
+    (ป้องกันสร้างไฟล์ก้อนซ้ำ `ชื่อ_1.ext` ในโฟลเดอร์สินค้า)
+
+    ไฟล์ที่ยังไม่มี hash (ยังไม่ ingest) จะไม่ถูกนับ — เพื่อไม่ให้ข้ามไฟล์จริง
+    ที่ยังไม่ได้ประมวลผล.
+    """
+    record = load(product_id)
+    return {f.get("hash") for f in record.get("files", []) if f.get("hash")}
+
+
+def save_uploaded_files(
+    product_id: str,
+    files: list[tuple[str, bytes]],
+) -> list[str]:
+    """เซฟไฟล์อัปโหลดลง data/{product_id}/ โดยข้ามไฟล์ที่เนื้อซ้ำ (idempotent).
+
+    Args:
+        product_id: ชื่อสินค้า (โฟลเดอร์ปลายทาง)
+        files: list ของ (filename, content)
+
+    คืน: list ของชื่อไฟล์ที่เซฟจริง (ไม่นับที่ข้าม)
+
+    กฎ:
+      - ข้าม dotfile (ชื่อขึ้นต้นด้วย "." เช่น .DS_Store)
+      - ถ้า hash เนื้อตรงไฟล์ที่มีอยู่ใน DB → ข้าม (ไม่สร้างก้อนซ้ำ)
+      - ถ้าชื่อซ้ำแต่เนื้อต่าง → เปลี่ยนชื่อเป็น ชื่อ_1.ext (dedup ชื่อ ไม่เขียนทับของเดิม)
+    """
+    product_dir = _project_root() / "data" / product_id
+    product_dir.mkdir(parents=True, exist_ok=True)
+    existing_hashes = get_existing_file_hashes(product_id)
+
+    saved: list[str] = []
+    for filename, content in files:
+        if not filename or filename.startswith(".") or filename == ".DS_Store":
+            continue
+        content_hash = hashlib.sha256(content).hexdigest()
+        if content_hash in existing_hashes:
+            continue  # เนื้อซ้ำ → ข้าม
+        dest = product_dir / filename
+        if dest.exists():
+            stem = dest.stem
+            suffix = dest.suffix
+            i = 1
+            while dest.exists():
+                dest = product_dir / f"{stem}_{i}{suffix}"
+                i += 1
+        dest.write_bytes(content)
+        saved.append(dest.name)
+    return saved
+
+
 def find_stale_files(product_id: str) -> list[dict[str, Any]]:
     """หาไฟล์ที่เปลี่ยน/ลบ/เพิ่ม — เพื่อ re-ingest.
 

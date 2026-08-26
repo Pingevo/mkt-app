@@ -417,44 +417,55 @@ def _materialize_split_products(
     segments: list[dict],
     llm,
 ) -> dict[str, Any]:
-    """สร้างสินค้าแยกจาก segments + ลบโฟลเดอร์ต้นฉบับ.
+    """สร้าง/อัปเดตสินค้าจาก segments + ลบโฟลเดอร์ต้นฉบับ (idempotent).
 
     ขั้นตอน:
-      1. จองชื่อสินค้าทั้งหมดก่อน (ป้องกันชนกันและชนสินค้าเดิม)
-      2. สร้างโฟลเดอร์ + source files (hard link/copy) ทุกตัว
-      3. สร้าง product DB records (raw_text, metadata, scope, status=ready)
-      4. สร้าง product profile ของแต่ละรุ่น
+      1. จับคู่ segment กับสินค้าที่มีอยู่ด้วย product_key (หรือ text_hash สำรอง)
+         — ตัวที่ตรง = update สินค้าเดิม, ตัวที่ไม่ตรง = create ใหม่
+      2. จองชื่อเฉพาะ segment ที่ create (dedup ชนโฟลเดอร์ที่มีอยู่)
+      3. สร้างโฟลเดอร์ + source files (hard link/copy) เฉพาะ create
+      4. สร้าง/อัปเดต product DB records (raw_text, metadata, scope, status=ready)
+         — update ที่ text เดิมไม่เปลี่ยน → ข้าม re-profile (ประหยัด LLM)
       5. ลบโฟลเดอร์ต้นฉบับ + cache ต้นฉบับ
 
-    ถ้า error ระหว่างทำ → rollback (ลบเฉพาะที่รอบนี้สร้าง) แล้ว raise.
+    ถ้า error ระหว่างทำ → rollback (ลบเฉพาะที่รอบนี้สร้างใหม่) แล้ว raise.
     """
     import shutil
+
+    from .product_match import match_segments_to_existing
 
     project_root = _project_root()
     temp_data_dir = project_root / "data" / temp_product_id
     temp_cache_dir = project_root / "cache" / temp_product_id
 
-    # 1. จองชื่อ — ตรวจชนกันและชนสินค้าเดิม
-    used_names: set[str] = set()
-    final_names: list[str] = []
-    for seg in segments:
-        name = seg.get("suggested_name", "").strip()
+    # 1. จับคู่ segment กับสินค้าที่มีอยู่ — ไม่นับโฟลเดอร์ต้นฉบับ (temp)
+    existing = [r for r in product_db.get_all_products()
+                if r.get("product_id") != temp_product_id]
+    matches = match_segments_to_existing(segments, existing)
+
+    # 2. จองชื่อเฉพาะ segment ที่ create (dedup ชนโฟลเดอร์/ชื่อที่ใช้แล้ว)
+    used_names: set[str] = {r.get("product_id", "") for r in existing}
+    create_names: list[str] = []   # เรียงตาม create segment
+    for i, m in enumerate(matches):
+        if m["action"] != "create":
+            continue
+        seg = m["segment"]
+        name = (seg.get("suggested_name") or "").strip()
         if not name:
-            name = seg.get("product_key", f"product-{len(final_names)+1}")
-        # ตรวจชนสินค้าที่มีอยู่แล้ว
+            name = seg.get("product_key") or f"product-{i + 1}"
         base_name = name
         suffix = 1
         while (project_root / "data" / name).exists() or name in used_names:
             name = f"{base_name} ({suffix})"
             suffix += 1
         used_names.add(name)
-        final_names.append(name)
+        create_names.append(name)
 
-    # 2. สร้างโฟลเดอร์ + source files
+    # 3. สร้างโฟลเดอร์ + source files เฉพาะ create
     created_dirs: list[Path] = []
     created_caches: list[Path] = []
     try:
-        for name, seg in zip(final_names, segments):
+        for name in create_names:
             new_data_dir = project_root / "data" / name
             new_data_dir.mkdir(parents=True, exist_ok=False)
             created_dirs.append(new_data_dir)
@@ -470,21 +481,37 @@ def _materialize_split_products(
                     except (OSError, AttributeError):
                         shutil.copy2(str(src_file), str(dest))  # fallback copy
 
-        # 3. สร้าง product DB records
-        for name, seg in zip(final_names, segments):
+        # 4. สร้าง/อัปเดต DB records ทุก segment (ตามลำดับเดิม)
+        final_names: list[str] = []
+        ci = 0  # cursor ใน create_names
+        for m in matches:
+            seg = m["segment"]
+            if m["action"] == "update":
+                name = m["target"]
+            else:
+                name = create_names[ci]
+                ci += 1
+            final_names.append(name)
+
             new_cache_dir = project_root / "cache" / name
             new_cache_dir.mkdir(parents=True, exist_ok=True)
-            created_caches.append(new_cache_dir)
+            if m["action"] == "create":
+                created_caches.append(new_cache_dir)
 
-            # สร้าง record เหมือน ingestion ปกติ
-            record = product_db.load(name)
+            # อัปเดตเฉพาะถ้า text เปลี่ยน — ถ้าเดิม → ข้าม re-profile (ประหยัด LLM)
+            old_record = product_db.load(name)
+            new_text = seg.get("text", "")
+            is_update = m["action"] == "update"
+            text_unchanged = is_update and old_record.get("raw_text", "") == new_text
+
+            data_dir = project_root / "data" / name
+            record = old_record
             record["product_id"] = name
             record["status"] = product_db.STATUS_PROCESSING
 
-            # source files — จากโฟลเดอร์ใหม่
+            # source files — สแกนโฟลเดอร์สินค้า (create: โฟลเดอร์ใหม่, update: โฟลเดอร์เดิม)
             files_list: list[dict] = []
-            new_data_dir = project_root / "data" / name
-            for f in sorted(new_data_dir.iterdir()):
+            for f in sorted(data_dir.iterdir()):
                 if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store":
                     continue
                 ftype = _classify_file(f.name, _load_config())
@@ -500,8 +527,8 @@ def _materialize_split_products(
             record["files"] = files_list
 
             # text เฉพาะรุ่น (จาก segmentation — คัดจากต้นฉบับแล้ว)
-            record["text_extracts"] = [{"file": "segmented", "text": seg.get("text", "")}]
-            record["raw_text"] = seg.get("text", "")
+            record["text_extracts"] = [{"file": "segmented", "text": new_text}]
+            record["raw_text"] = new_text
 
             # scope — บอกขอบเขตสินค้า (ใช้ตอน re-ingest)
             record["scope"] = {
@@ -522,14 +549,15 @@ def _materialize_split_products(
 
             product_db.save(name, record)
 
-            # สร้าง product profile ของรุ่นนี้ (ใช้ text เฉพาะรุ่น)
-            _generate_product_profile(name, llm)
+            if not text_unchanged:
+                # สร้าง product profile ของรุ่นนี้ (ใช้ text เฉพาะรุ่น)
+                _generate_product_profile(name, llm)
 
             # ตั้ง status ready
             product_db.set_status(name, product_db.STATUS_READY)
 
     except Exception as e:
-        # rollback — ลบเฉพาะที่รอบนี้สร้าง
+        # rollback — ลบเฉพาะที่รอบนี้สร้างใหม่ (update ไม่ลบ เพราะมีอยู่ก่อน)
         for d in created_dirs:
             if d.exists():
                 shutil.rmtree(d, ignore_errors=True)
@@ -538,7 +566,7 @@ def _materialize_split_products(
                 shutil.rmtree(c, ignore_errors=True)
         raise RuntimeError(f"Split products failed, rolled back: {e}") from e
 
-    # 4. ลบโฟลเดอร์ต้นฉบับ + cache ต้นฉบับ
+    # 5. ลบโฟลเดอร์ต้นฉบับ + cache ต้นฉบับ
     if temp_data_dir.exists():
         shutil.rmtree(temp_data_dir, ignore_errors=True)
     if temp_cache_dir.exists():
