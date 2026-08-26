@@ -63,3 +63,16 @@ default_max_file_mb: 100          # ขนาดไฟล์สูงสุด d
 
 # --- Product DB ---
 raw_text_max_length: 12000        # ความยาว raw_text สูงสุดที่เก็บ (ตัวอักษร)
+
+# --- Catalog Segmentation ---
+# ตรวจและแยกหลายสินค้าจากไฟล์เดียว (เช่น price list 20 รุ่นใน 1 PDF)
+# LLM ระบุเฉพาะชื่อ/รหัสและตำแหน่งในต้นฉบับ — ระบบคัด text เอง (ไม่รับสเปก/ราคาที่ LLM เขียนใหม่)
+product_segmentation:
+  enabled: true                    # เปิด/ปิด segmentation (ถ้าปิด → ใช้ single-product flow เดิม)
+  model: google/gemini-3.7-flash   # model สำหรับ segmentation (override ของ ingestion หลัก)
+  temperature: 0.2                 # ต่ำ → ผลคงที่ขึ้น
+  max_output_tokens: 16384         # พอสำหรับ catalog 20+ รุ่น (แต่ละรุ่นมี source_refs)
+  batch_size: 8000                 # จำนวนบรรทัดต่อ batch (เอกสารใหญ่แบ่งส่ง)
+  batch_overlap: 500               # overlap ระหว่าง batch (บรรทัด) — กันสินค้าขาด
+  pdf_max_bytes: 2000000           # ขนาด PDF สูงสุดที่ส่ง direct input (bytes)
+  name_format: "{brand} {model}"   # รูปแบบชื่อสินค้าที่สร้างจาก segmentation

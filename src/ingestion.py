@@ -24,9 +24,12 @@ Flow:
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -366,12 +369,206 @@ def _scan_product_files(product_id: str, config: dict) -> list[dict[str, Any]]:
     return files
 
 
-def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
+def _try_segment_and_split(
+    product_id: str,
+    all_extracted: list[dict[str, Any]],
+    llm,
+) -> dict[str, Any] | None:
+    """ตรวจและแยก catalog หลายสินค้า — คืน result dict ถ้าแยกสำเร็จ, None ถ้าไม่แยก.
+
+    ขั้นตอน:
+      1. เรียก segment_products() กับ text ที่ extract ได้
+      2. ถ้า mode=single → คืน None (ใช้ flow เดิมต่อ)
+      3. ถ้า mode=multi → materialize สินค้าแยก + ลบโฟลเดอร์ต้นฉบับ
+      4. ถ้ามี error → คืน None (fallback สู่ single flow เดิม)
+    """
+    from .product_segmentation import segment_products
+
+    # เตรียม files สำหรับ segmentation — เฉพาะ text ที่ extract ได้
+    seg_files: list[dict] = []
+    for ext in all_extracted:
+        if ext.get("type") == "text" and ext.get("text"):
+            seg_files.append({
+                "name": ext["file"],
+                "path": "",  # ไม่จำเป็นตอนนี้ — segmentation ใช้ text
+                "text": ext["text"],
+                "type": "text",
+            })
+
+    if not seg_files:
+        return None
+
+    result = segment_products(seg_files, llm)
+
+    # error หรือ single → ใช้ flow เดิม
+    if result.get("error") or result.get("mode") != "multi":
+        return None
+
+    products = result.get("products", [])
+    if len(products) <= 1:
+        return None
+
+    # materialize — สร้างสินค้าแยก
+    return _materialize_split_products(product_id, products, llm)
+
+
+def _materialize_split_products(
+    temp_product_id: str,
+    segments: list[dict],
+    llm,
+) -> dict[str, Any]:
+    """สร้างสินค้าแยกจาก segments + ลบโฟลเดอร์ต้นฉบับ.
+
+    ขั้นตอน:
+      1. จองชื่อสินค้าทั้งหมดก่อน (ป้องกันชนกันและชนสินค้าเดิม)
+      2. สร้างโฟลเดอร์ + source files (hard link/copy) ทุกตัว
+      3. สร้าง product DB records (raw_text, metadata, scope, status=ready)
+      4. สร้าง product profile ของแต่ละรุ่น
+      5. ลบโฟลเดอร์ต้นฉบับ + cache ต้นฉบับ
+
+    ถ้า error ระหว่างทำ → rollback (ลบเฉพาะที่รอบนี้สร้าง) แล้ว raise.
+    """
+    import shutil
+
+    project_root = _project_root()
+    temp_data_dir = project_root / "data" / temp_product_id
+    temp_cache_dir = project_root / "cache" / temp_product_id
+
+    # 1. จองชื่อ — ตรวจชนกันและชนสินค้าเดิม
+    used_names: set[str] = set()
+    final_names: list[str] = []
+    for seg in segments:
+        name = seg.get("suggested_name", "").strip()
+        if not name:
+            name = seg.get("product_key", f"product-{len(final_names)+1}")
+        # ตรวจชนสินค้าที่มีอยู่แล้ว
+        base_name = name
+        suffix = 1
+        while (project_root / "data" / name).exists() or name in used_names:
+            name = f"{base_name} ({suffix})"
+            suffix += 1
+        used_names.add(name)
+        final_names.append(name)
+
+    # 2. สร้างโฟลเดอร์ + source files
+    created_dirs: list[Path] = []
+    created_caches: list[Path] = []
+    try:
+        for name, seg in zip(final_names, segments):
+            new_data_dir = project_root / "data" / name
+            new_data_dir.mkdir(parents=True, exist_ok=False)
+            created_dirs.append(new_data_dir)
+
+            # hard link หรือ copy source files จาก temp folder
+            if temp_data_dir.exists():
+                for src_file in temp_data_dir.iterdir():
+                    if not src_file.is_file() or src_file.name.startswith(".") or src_file.name == ".DS_Store":
+                        continue
+                    dest = new_data_dir / src_file.name
+                    try:
+                        os.link(str(src_file), str(dest))  # hard link — ไม่กินพื้นที่ซ้ำ
+                    except (OSError, AttributeError):
+                        shutil.copy2(str(src_file), str(dest))  # fallback copy
+
+        # 3. สร้าง product DB records
+        for name, seg in zip(final_names, segments):
+            new_cache_dir = project_root / "cache" / name
+            new_cache_dir.mkdir(parents=True, exist_ok=True)
+            created_caches.append(new_cache_dir)
+
+            # สร้าง record เหมือน ingestion ปกติ
+            record = product_db.load(name)
+            record["product_id"] = name
+            record["status"] = product_db.STATUS_PROCESSING
+
+            # source files — จากโฟลเดอร์ใหม่
+            files_list: list[dict] = []
+            new_data_dir = project_root / "data" / name
+            for f in sorted(new_data_dir.iterdir()):
+                if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store":
+                    continue
+                ftype = _classify_file(f.name, _load_config())
+                files_list.append({
+                    "name": f.name,
+                    "path": str(f),
+                    "type": ftype,
+                    "status": "ingested" if ftype is not None else "unsupported",
+                    "hash": product_db.compute_file_hash(f),
+                    "size": f.stat().st_size,
+                    "ingested_at": datetime.now().isoformat() if ftype is not None else None,
+                })
+            record["files"] = files_list
+
+            # text เฉพาะรุ่น (จาก segmentation — คัดจากต้นฉบับแล้ว)
+            record["text_extracts"] = [{"file": "segmented", "text": seg.get("text", "")}]
+            record["raw_text"] = seg.get("text", "")
+
+            # scope — บอกขอบเขตสินค้า (ใช้ตอน re-ingest)
+            record["scope"] = {
+                "product_key": seg.get("product_key", ""),
+                "source_refs": seg.get("source_refs", []),
+                "common_refs": seg.get("common_refs", []),
+                "split_from": temp_product_id,
+            }
+
+            # metadata จาก segmentation (ไม่เรียก LLM ซ้ำ — ประหยัด token)
+            record["metadata"] = {
+                "summary": seg.get("summary", ""),
+                "category": seg.get("category", ""),
+                "file_count": len(files_list),
+                "has_images": any(f.get("type") == "image" for f in files_list),
+                "image_count": sum(1 for f in files_list if f.get("type") == "image"),
+            }
+
+            product_db.save(name, record)
+
+            # สร้าง product profile ของรุ่นนี้ (ใช้ text เฉพาะรุ่น)
+            _generate_product_profile(name, llm)
+
+            # ตั้ง status ready
+            product_db.set_status(name, product_db.STATUS_READY)
+
+    except Exception as e:
+        # rollback — ลบเฉพาะที่รอบนี้สร้าง
+        for d in created_dirs:
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+        for c in created_caches:
+            if c.exists():
+                shutil.rmtree(c, ignore_errors=True)
+        raise RuntimeError(f"Split products failed, rolled back: {e}") from e
+
+    # 4. ลบโฟลเดอร์ต้นฉบับ + cache ต้นฉบับ
+    if temp_data_dir.exists():
+        shutil.rmtree(temp_data_dir, ignore_errors=True)
+    if temp_cache_dir.exists():
+        shutil.rmtree(temp_cache_dir, ignore_errors=True)
+
+    return {
+        "status": "ready",
+        "files_total": len(segments),
+        "files_ingested": len(segments),
+        "files_skipped": 0,
+        "files_unsupported": 0,
+        "errors": [],
+        "split_products": final_names,
+    }
+
+
+def ingest_product(
+    product_id: str,
+    force: bool = False,
+    *,
+    is_new_upload: bool = False,
+) -> dict[str, Any]:
     """รัน ingestion pipeline สำหรับสินค้านี้.
 
     Args:
         product_id: ชื่อสินค้า
         force: ถ้า True → re-ingest ทุกไฟล์แม้ hash เหมือนเดิม
+        is_new_upload: True เฉพาะตอนอัปโหลดสินค้าใหม่ — เปิดใช้ catalog
+            segmentation (แยกหลายสินค้าจากไฟล์เดียว). re-ingest ของสินค้า
+            เดิมไม่ส่ง True เพราะจะทำให้แตกโฟลเดอร์โดยไม่คาดคิด.
 
     Returns:
         dict สรุปผล: {status, files_total, files_ingested, files_unsupported, errors}
@@ -578,13 +775,34 @@ def ingest_product(product_id: str, force: bool = False) -> dict[str, Any]:
             })
             errors.append(f"{f['name']}: {e}")
 
+    # 3.5 Catalog segmentation — ถ้าเป็น upload ใหม่และมี LLM ให้ตรวจว่าไฟล์เป็น
+    # catalog หลายสินค้าหรือไม่. ถ้าใช่ → สร้างสินค้าแยกและลบโฟลเดอร์ต้นฉบับ.
+    if is_new_upload and llm is not None:
+        split_result = _try_segment_and_split(product_id, all_extracted, llm)
+        if split_result is not None:
+            # แยกสินค้าเสร็จแล้ว — ไม่ทำ metadata/profile ของต้นฉบับต่อ
+            if llm is not None:
+                llm.close()
+            return split_result
+
     # 4. สร้าง metadata summary (LLM สรุปสั้นๆ ครั้งเดียว — สำหรับ automate discovery)
     _generate_metadata_summary(product_id, llm)
 
     # 4.5 Rebuild raw_text จาก text_extracts ทั้งหมด (รวมของเดิมที่ไม่ได้ re-ingest)
+    # ถ้าสินค้ามี scope (เคยแยกจาก catalog) → ใช้ scope เพื่อคัดเฉพาะส่วนของรุ่นนี้
+    # ไม่กลับไปรวมทั้ง catalog อีก
     record = product_db.load(product_id)
-    text_parts = [t.get("text", "") for t in record.get("text_extracts", []) if t.get("text")]
-    record["raw_text"] = "\n\n".join(text_parts).strip()
+    scope = record.get("scope")
+    if scope and scope.get("source_refs"):
+        # มี scope → คัด text จาก text_extracts ตาม source_refs + common_refs
+        from .product_segmentation import _slice_refs
+        text_by_file = {t.get("file", ""): t.get("text", "") for t in record.get("text_extracts", [])}
+        own_text = _slice_refs(text_by_file, scope.get("source_refs", []))
+        common_text = _slice_refs(text_by_file, scope.get("common_refs", []))
+        record["raw_text"] = "\n".join(t for t in [common_text, own_text] if t).strip()
+    else:
+        text_parts = [t.get("text", "") for t in record.get("text_extracts", []) if t.get("text")]
+        record["raw_text"] = "\n\n".join(text_parts).strip()
     product_db.save(product_id, record)
 
     # 5. ตั้งสถานะ — ถ้าไม่มีไฟล์ ingested สักไฟล์ → no_usable_data ไม่ใช่ ready

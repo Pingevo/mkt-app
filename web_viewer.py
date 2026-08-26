@@ -920,6 +920,8 @@ async def api_upload(
 
     folder_name = product_name.strip()
     product_dir = DATA_DIR / folder_name
+    # ตรวจว่าเป็นการอัปโหลดสินค้าใหม่ (โฟลเดอร์ยังไม่มี) — ใช้เปิด catalog segmentation
+    is_new_upload = not product_dir.exists()
     product_dir.mkdir(parents=True, exist_ok=True)
 
     saved = []
@@ -949,7 +951,7 @@ async def api_upload(
         if current_status != product_db.STATUS_PROCESSING:
             def _run():
                 try:
-                    ingest_product(folder_name, force=False)
+                    ingest_product(folder_name, force=False, is_new_upload=is_new_upload)
                 except Exception as e:
                     product_db.set_status(folder_name, product_db.STATUS_NO_USABLE, extra={
                         "ingest_error": str(e),
@@ -4990,7 +4992,7 @@ function uploadFiles() {
     fetch('/api/upload', { method: 'POST', body: formData }).then(r => r.json()).then(data => {
       if (data.ok) {
         status.className = 'upload-status ok';
-        status.textContent = 'เพิ่ม ' + data.files.length + ' ไฟล์ เข้า ' + data.folder + ' — กำลังประมวลผลข้อมูลอัตโนมัติ...';
+        status.textContent = 'เพิ่ม ' + data.files.length + ' ไฟล์ เข้า ' + data.folder + ' — กำลังตรวจและแยกข้อมูลสินค้าอัตโนมัติ...';
         _uploadQueue = [];
         _editingFolder = data.folder;
         _uploadModalOriginal = _getUploadModalData();

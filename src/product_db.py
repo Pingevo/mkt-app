@@ -299,6 +299,7 @@ def get_fields_for_agent(product_id: str) -> dict[str, Any]:
         "image_descriptions": record.get("image_descriptions", []),
         "video_transcripts": record.get("video_transcripts", []),
         "audio_transcripts": record.get("audio_transcripts", []),
+        "scope": record.get("scope"),
     }
 
 
@@ -308,11 +309,23 @@ def get_agent_context_text(product_id: str) -> str:
     วิธีสากล: ส่ง raw text ทั้งหมดให้ agent โดยไม่สกัด fields ล่วงหน้า
     แต่ละ agent จะแยกเองว่าต้องการข้อมูลอะไร
 
+    ถ้าสินค้ามี scope (แยกจาก catalog) → ระบุชื่อ/รหัสสินค้าก่อน raw text
+    เพื่อไม่ให้ agent สับสนเมื่อไฟล์ต้นฉบับเป็น catalog หลายรุ่น
+
     Note: ฟังก์ชันนี้คืน text เท่านั้น (backward compatible)
     สำหรับ multimodal (text + รูปจริง) ใช้ get_agent_context() แทน
     """
     data = get_fields_for_agent(product_id)
     parts = []
+
+    # ถ้ามี scope (สินค้าที่แยกจาก catalog) → บอก agent ว่านี่คือสินค้าใด
+    scope = data.get("scope")
+    if scope and scope.get("product_key"):
+        parts.append(f"--- ขอบเขตสินค้า ---")
+        parts.append(f"รหัสสินค้า: {scope['product_key']}")
+        if scope.get("split_from"):
+            parts.append(f"แยกจาก: {scope['split_from']}")
+        parts.append("--- สิ้นสุดขอบเขตสินค้า ---\n")
 
     if data["raw_text"]:
         parts.append("--- ข้อมูลดิบ (text) ---")
