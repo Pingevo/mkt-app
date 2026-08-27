@@ -27,6 +27,7 @@ from src.orchestrator import Orchestrator
 from src.data_loader import detect_data_files
 from src.file_loader import load_file
 from src.run_resources import RunResourceStore
+from src.run_context import build_step_run_context, StepRunContext
 from src.config_loader import get_env, load_config, get_section
 from src.brand_loader import load_brand_visual, load_product_profile
 from src import media_gen
@@ -2266,6 +2267,8 @@ async def api_run_agent(request: Request) -> StreamingResponse:
     auto_video = body.get("auto_video", None)
     platforms = body.get("platforms", ["facebook", "tiktok"])
     media_type = body.get("media_type", "")
+    upload_session_id = body.get("upload_session_id", "")
+    resource_refs = body.get("resource_refs", [])
 
     if not agent_key or not folder:
         return JSONResponse({"error": "missing agent or folder"})
@@ -2308,6 +2311,24 @@ async def api_run_agent(request: Request) -> StreamingResponse:
 
                     raw_contents, image_paths, ready_contents = _read_folder(folder)
 
+                    flow_id = f"agent_{uuid.uuid4().hex[:8]}"
+                    set_flow_id(flow_id)
+                    workflow_id = flow_id
+                    step_id = f"{workflow_id}_step_0"
+                    product_refs = [f"product:{folder}"]
+                    step_context = build_step_run_context(
+                        _resource_store,
+                        workflow_id=workflow_id,
+                        step_id=step_id,
+                        agent_key=agent_key,
+                        quick_brief=quick_brief,
+                        product_refs=product_refs,
+                        resource_refs=resource_refs,
+                        upload_session_id=upload_session_id,
+                    )
+                    if step_context.warnings:
+                        raise ValueError("; ".join(step_context.warnings))
+
                     try:
                         def _status_cb(msg, _ak=agent_key):
                             q.put_nowait(_sse("status", msg, agent=_ak))
@@ -2319,6 +2340,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                             media_type=media_type,
                             status_callback=_status_cb,
                             folders=[folder],
+                            step_context=step_context,
                         )
                         for i, (result, filepath) in enumerate(results):
                             set_num = i + 1 if len(results) > 1 else None
@@ -2469,7 +2491,8 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                       status_callback=None,
                       folders: list[str] | None = None,
                       resource_context: str = "",
-                      extra_image_paths: list[str] | None = None) -> list[tuple[str, str | None]]:
+                      extra_image_paths: list[str] | None = None,
+                      step_context=None) -> list[tuple[str, str | None]]:
     """Run one agent, return list of (result_text, filepath) tuples.
 
     context: {use_competitor: bool, use_campaign: bool} — user เลือกว่าจะใช้ context อะไร
@@ -2505,6 +2528,8 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
             run_kwargs["resource_context"] = resource_context
         if extra_image_paths:
             run_kwargs["extra_image_paths"] = extra_image_paths
+        if step_context is not None:
+            run_kwargs["step_context"] = step_context
         result = orch.run_product_spec(
             raw_data, image_paths, llm=llm, quick_brief=quick_brief, **run_kwargs
         )
@@ -2521,6 +2546,8 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
             run_kwargs["resource_context"] = resource_context
         if extra_image_paths:
             run_kwargs["extra_image_paths"] = extra_image_paths
+        if step_context is not None:
+            run_kwargs["step_context"] = step_context
         result = orch.run_competitor_analysis(
             "", None, llm=llm, quick_brief=quick_brief, **run_kwargs
         )
@@ -2541,6 +2568,8 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
             run_kwargs["resource_context"] = resource_context
         if extra_image_paths:
             run_kwargs["extra_image_paths"] = extra_image_paths
+        if step_context is not None:
+            run_kwargs["step_context"] = step_context
         result = orch.run_campaign_strategy(
             "", analysis_text, llm=llm, quick_brief=quick_brief, **run_kwargs
         )
@@ -2626,6 +2655,10 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                     run_kwargs["resource_context"] = resource_context
                 if extra_image_paths:
                     run_kwargs["extra_image_paths"] = extra_image_paths
+                effective_step_context = step_context
+                if step_context is not None:
+                    effective_step_context = step_context.with_quick_brief(multi_brief)
+                    run_kwargs["step_context"] = effective_step_context
                 result = orch.run_content_creator(
                     "", analysis_text, campaign_text,
                     llm=llm, quick_brief=multi_brief,
@@ -3081,34 +3114,31 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                 # Resolve run-scoped resources for this flow
                 upload_session_id = flow.get("upload_session_id", "")
                 resource_refs = flow.get("resource_refs", [])
-                input_refs: list[str] = [f"product:{f}" for f in folders] + resource_refs
+                product_refs = [f"product:{f}" for f in folders]
+                input_refs: list[str] = product_refs + resource_refs
                 resource_context = ""
                 extra_image_paths: list[str] = []
                 resource_trace: list[dict[str, Any]] = []
-                if resource_refs:
-                    if not upload_session_id:
-                        raise ValueError("resource_refs ต้องระบุ upload_session_id")
-                    if not upload_session_id:
-                        raise ValueError("resource_refs ต้องระบุ upload_session_id")
-                    records: list[dict[str, Any]] = []
-                    missing: list[str] = []
-                    for ref in resource_refs:
-                        rec = _resource_store.resolve_input_ref(ref, upload_session_id)
-                        if rec:
-                            records.append(rec)
-                        else:
-                            missing.append(ref)
-                    if missing:
-                        raise ValueError(f"resource_refs ไม่ถูกต้องหรือหมดอายุ: {missing}")
-                    ctx = _resource_store.build_resource_context(
-                        records, workflow_id=workflow_id, step_id=step_id,
-                    )
-                    resource_context = ctx["text"]
-                    extra_image_paths = ctx["image_paths"]
-                    resource_trace = ctx["trace"]
+                step_context: StepRunContext | None = None
+                step_context = build_step_run_context(
+                    _resource_store,
+                    workflow_id=workflow_id,
+                    step_id=step_id,
+                    agent_key=flow_agents[0] if flow_agents else "",
+                    quick_brief=flow_quick_brief,
+                    product_refs=product_refs,
+                    resource_refs=resource_refs,
+                    upload_session_id=upload_session_id,
+                )
+                if step_context.warnings:
+                    raise ValueError("; ".join(step_context.warnings))
+                resource_context = step_context.resource_text
+                extra_image_paths = list(step_context.resource_image_paths)
+                resource_trace = [t.__dict__ for t in step_context.resource_trace]
+                all_phase_traces: list[dict[str, Any]] = [t.as_dict() for t in step_context.phase_traces]
 
                 def run_one_agent(agent_key: str, product: str, context: dict) -> str:
-                    nonlocal orch, llm, output_dir
+                    nonlocal orch, llm, output_dir, all_phase_traces
                     if _cancel_requested:
                         return ""
 
@@ -3120,6 +3150,8 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                         def _status_cb(msg, _ak=agent_key):
                             q.put_nowait(_sse("status", msg, agent=_ak, plan=plan_idx))
 
+                        agent_context = step_context.with_agent_key(agent_key).with_phase("generation")
+                        all_phase_traces.append(agent_context.phase_traces[-1].as_dict())
                         results = _run_single_agent(
                             agent_key, product, all_raw, all_images,
                             all_ready, orch, llm, output_dir,
@@ -3131,6 +3163,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                             folders=folders,
                             resource_context=resource_context,
                             extra_image_paths=extra_image_paths,
+                            step_context=agent_context,
                         )
                         result_text = results[0][0] if results else ""
                         file_path = results[0][1] if results else None
@@ -3176,12 +3209,13 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                         agents=flow.get("agents", []),
                         products=product_label,
                     )
-                    # เก็บ mapping output_file → flow_id พร้อม workflow + resource trace
+                    # เก็บ mapping output_file → flow_id พร้อม workflow + resource trace + phase traces
                     write_flow_meta(
                         output_dir, flow_id, flow_output_files,
                         label=f"Flow {flow_idx+1}: {agent_label} — {product_label}",
                         agents=flow.get("agents", []),
                         resources=resource_trace,
+                        phase_traces=all_phase_traces,
                         workflow_id=workflow_id,
                         step_id=step_id,
                         input_refs=input_refs,
@@ -3448,27 +3482,25 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                 step_id = f"{workflow_id}_step_0"
                 upload_session_id = body.get("upload_session_id", "")
                 resource_refs = body.get("resource_refs", [])
+                input_refs: list[str] = list(resource_refs)
                 resource_context = ""
                 extra_image_paths: list[str] = []
                 resource_trace: list[dict[str, Any]] = []
-                input_refs: list[str] = list(resource_refs)
-                if resource_refs:
-                    records: list[dict[str, Any]] = []
-                    missing: list[str] = []
-                    for ref in resource_refs:
-                        rec = _resource_store.resolve_input_ref(ref, upload_session_id)
-                        if rec:
-                            records.append(rec)
-                        else:
-                            missing.append(ref)
-                    if missing:
-                        raise ValueError(f"resource_refs ไม่ถูกต้องหรือหมดอายุ: {missing}")
-                    ctx = _resource_store.build_resource_context(
-                        records, workflow_id=workflow_id, step_id=step_id,
-                    )
-                    resource_context = ctx["text"]
-                    extra_image_paths = ctx["image_paths"]
-                    resource_trace = ctx["trace"]
+                step_context = build_step_run_context(
+                    _resource_store,
+                    workflow_id=workflow_id,
+                    step_id=step_id,
+                    agent_key=agents[0] if agents else "content_creator",
+                    quick_brief=quick_brief,
+                    product_refs=[],
+                    resource_refs=resource_refs,
+                    upload_session_id=upload_session_id,
+                )
+                if step_context.warnings:
+                    raise ValueError("; ".join(step_context.warnings))
+                resource_context = step_context.resource_text
+                extra_image_paths = list(step_context.resource_image_paths)
+                resource_trace = [t.__dict__ for t in step_context.resource_trace]
 
                 def _status_cb(msg):
                     q.put_nowait(_sse("status", msg, agent="content_creator"))
@@ -3487,12 +3519,15 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     selection = orch.select_product_auto(
                         llm=llm, quick_brief=quick_brief, platforms=platforms,
                         product_count=product_count,
+                        step_context=step_context,
                     )
                     if "error" in selection:
                         q.put_nowait(_sse("error", selection["error"], agent="content_creator"))
                         q.put_nowait(_sse("done", ""))
                         q.put_nowait(None)
                         return
+
+                    step_context = selection.pop("step_context", step_context)
 
                     chosen_pids = selection.get("product_ids", [])
                     chosen_concept = selection.get("concept", "")
@@ -3514,7 +3549,8 @@ async def api_run_auto(request: Request) -> StreamingResponse:
 
                     # อ่านข้อมูลสินค้าที่เลือก
                     folder_label = " + ".join(chosen_pids)
-                    input_refs = [f"product:{p}" for p in chosen_pids] + list(resource_refs)
+                    step_context = step_context.with_products(chosen_pids)
+                    input_refs = list(step_context.input_refs)
                     all_raw = []
                     all_images = []
                     all_ready = {}
@@ -3526,6 +3562,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                             all_ready[f"{pid}/{fname}"] = content
 
                     # รัน agent ที่เลือกตามลำดับ (เหมือน flow_runner)
+                    all_phase_traces: list[dict[str, Any]] = [t.as_dict() for t in step_context.phase_traces]
                     flow_results: dict[str, str] = {}
                     for agent_key in agents:
                         if _cancel_requested:
@@ -3539,6 +3576,8 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                 q.put_nowait(_sse("status", msg, agent=_ak))
 
                             cc_count = content_count if agent_key == "content_creator" else 1
+                            agent_context = step_context.with_agent_key(agent_key).with_phase("generation")
+                            all_phase_traces.append(agent_context.phase_traces[-1].as_dict())
                             results_list = _run_single_agent(
                                 agent_key, folder_label, all_raw, all_images,
                                 all_ready, orch, llm, output_dir,
@@ -3548,8 +3587,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                 platforms=platforms, media_type=media_type,
                                 status_callback=_agent_status,
                                 folders=chosen_pids,
-                                resource_context=resource_context,
-                                extra_image_paths=extra_image_paths,
+                                step_context=agent_context,
                             )
                             result_text = results_list[0][0] if results_list else ""
                             file_path = results_list[0][1] if results_list else None
@@ -3608,9 +3646,10 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                         platforms=current_platform,
                         product_count=product_count,
                         status_callback=_status_cb,
-                        resource_context=resource_context,
-                        extra_image_paths=extra_image_paths,
+                        step_context=step_context.with_quick_brief(multi_brief),
                     )
+
+                    step_context = result.pop("step_context", step_context)
 
                     if "error" in result:
                         q.put_nowait(_sse("error", result["error"], agent="content_creator"))
@@ -3631,7 +3670,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     markdown = result.get("markdown", content)
                     chosen_pids = result.get("product_ids", [result.get("product_id", "AUTO")])
                     chosen_pid = " + ".join(chosen_pids) if len(chosen_pids) > 1 else chosen_pids[0]
-                    input_refs = [f"product:{p}" for p in chosen_pids] + list(resource_refs)
+                    input_refs = list(step_context.input_refs)
 
                     # เซฟไฟล์
                     run_id = _make_run_id()
@@ -3749,12 +3788,13 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                         label=f"AUTO — {', '.join(agents)}",
                         agents=agents,
                     )
-                    # เก็บ mapping output_file → flow_id พร้อม workflow + resource trace
+                    # เก็บ mapping output_file → flow_id พร้อม workflow + resource trace + phase traces
                     write_flow_meta(
                         output_dir_for_cost, flow_id, flow_output_files,
                         label=f"AUTO — {', '.join(agents)}",
                         agents=agents,
                         resources=resource_trace,
+                        phase_traces=all_phase_traces if 'all_phase_traces' in locals() else [t.as_dict() for t in (step_context.phase_traces if step_context is not None else [])],
                         workflow_id=workflow_id,
                         step_id=step_id,
                         input_refs=input_refs,

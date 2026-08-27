@@ -103,6 +103,10 @@ LLM บรรยาย + ติด tag ตาม taxonomy ใน `config/assets.
 
 ## Agent Input Context
 
+> Source of truth สำหรับ routing และการสลับลำดับ agent คือ `AGENT_ORCHESTRATION_SPEC.md` ระบบเป้าหมายไม่ใช่ flow ตายตัว 1→2→3→4; agent ต้องรันเดี่ยว เรียงใหม่ และใช้ agent เดิมซ้ำเป็นคนละ step ได้
+>
+> Source of truth สำหรับสถานะ ความพร้อม และเกณฑ์ release ของ agent แต่ละตัวคือ `AGENT_PRODUCTION_READINESS_SPEC.md`
+
 ### Agent Input Context (context สำหรับ agent)
 ชุดข้อมูลที่ส่งให้ agent ทำงาน ไม่ผูกกับชื่อ agent หรือ flow ที่ส่งมา มี semantic contract ชัดเจน ว่าฟิลด์ไหนมีความหมายอะไร
 
@@ -117,6 +121,15 @@ LLM บรรยาย + ติด tag ตาม taxonomy ใน `config/assets.
 
 ### Standalone Agent
 agent ที่สามารถทำงานได้โดยไม่ต้องพึ่ง output ของ agent อื่น ถ้าข้อมูลบางอย่างขาด agent ต้องระบุ uncertainty แทนที่จะหยุดทำงานหรือสร้างข้อมูล
+
+### Workflow Step
+หนึ่งตำแหน่งใน workflow ที่ user กำหนด มี `step_id` ไม่ซ้ำและมี `agent_key` ระบุ agent ที่จะรัน Agent เดิมปรากฏหลาย step ได้
+
+### Artifact
+ผลลัพธ์ของ workflow step ที่มี identity และ metadata ของ producer ใช้ `artifact_id` หรือ `step_id` อ้างอิงเป็น context ให้ step อื่น โดยไม่ผูกกับลำดับหมายเลข agent
+
+### Dynamic Agent Routing
+การที่ user เลือก agent ลำดับ และ artifact context ของแต่ละ step ได้เอง ไม่ได้แปลว่า Manager LLM ต้องตัดสินใจแทน user และไม่ใช่การบังคับ pipeline 1→2→3→4
 
 ### Uncertainty Statement
 คำอธิบายใน output ที่บอกว่าสิ่งใด agent ไม่รู้หรือไม่สามารถสรุปได้ เนื่องจากขาดข้อมูล ไม่ใช่การเติมข้อมูลเพื่อให้ output ดูครบ

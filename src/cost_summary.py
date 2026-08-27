@@ -118,6 +118,7 @@ def write_flow_meta(
     label: str = "",
     agents: list[str] | None = None,
     resources: list[dict[str, Any]] | None = None,
+    phase_traces: list[dict[str, Any]] | None = None,
     workflow_id: str = "",
     step_id: str = "",
     input_refs: list[str] | None = None,
@@ -138,6 +139,7 @@ def write_flow_meta(
         "agents": agents or [],
         "output_files": output_files,
         "resources": resources or [],
+        "phase_traces": phase_traces or [],
         "written_at": datetime.now().isoformat(),
     }
     out_path = output_dir / f"_flow_meta_{flow_id}.json"

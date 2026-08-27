@@ -17,6 +17,7 @@ from rich.console import Console
 from ..llm_client import LLMClient
 from ..output_validators import validate_output as _validate_output, _output_is_blank
 from ..brand_priority import BrandRules
+from ..run_context import StepRunContext, build_multimodal_content
 
 console = Console()
 
@@ -272,7 +273,8 @@ class BaseAgent:
 
     def run(self, user_prompt: str, quick_brief: str = "", image_paths: list[str] | None = None,
             extra_image_paths: list[str] | None = None,
-            resource_context: str = "", response_format: dict | None = None) -> str:
+            resource_context: str = "", response_format: dict | None = None,
+            step_context: "StepRunContext" | None = None) -> str:
         """Generate output then review/refine it.
 
         Returns the final (possibly refined) text response.
@@ -300,6 +302,13 @@ class BaseAgent:
             extra_image_paths = []
         if image_paths is None:
             image_paths = []
+
+        # Use StepRunContext as the single source of truth when provided.
+        if step_context is not None:
+            quick_brief = step_context.quick_brief
+            resource_context = step_context.resource_text
+            extra_image_paths = list(step_context.resource_image_paths)
+
         all_image_paths = image_paths + extra_image_paths
 
         # Append resource context as untrusted user-provided documents
@@ -432,93 +441,11 @@ class BaseAgent:
         return output
 
     def _build_multimodal_content(self, text: str, image_paths: list[str] | None) -> str | list[dict]:
-        """สร้าง message content แบบ multimodal (text + รูปจริง) ถ้ามีรูป.
-
-        สถาปัตยกรรมใหม่ (retrieve-then-read):
-          - ถ้ามี image_paths → ส่งเป็น list: [{type: text}, {type: image_url}, ...]
-            LLM vision เห็นรูปจริง (resize ลด token — ความแม่นยำใกล้เดิม)
-          - ถ้าไม่มี → ส่งเป็น string (backward compatible)
-
-        รูปใหญ่เกิน 1024px จะถูก resize ลง (preserve aspect ratio) ก่อน encode
-        เพื่อลด image tokens ที่ LLM คิด (1 tile = 256x256 = ~258 tokens)
-        """
-        if not image_paths:
-            return text
-
-        import base64
-        import io
-        import mimetypes
-        from pathlib import Path
-
-        content: list[dict] = [{"type": "text", "text": text}]
-
-        for img_path in image_paths:
-            p = Path(img_path)
-            if not p.exists():
-                continue
-            try:
-                # Resize รูปใหญ่ก่อน encode — ลด image tokens 74%
-                b64, mime = self._encode_image_resized(p)
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{b64}"},
-                })
-            except OSError:
-                continue
-
-        # ถ้าไม่มีรูปที่อ่านได้ → คืน text ธรรมดา
-        if len(content) == 1:
-            return text
-
-        console.print(f"[dim]ส่งรูปจริง {len(content) - 1} รูปให้ LLM vision ({self.display_name})[/dim]")
+        """สร้าง message content แบบ multimodal (text + รูปจริง) ถ้ามีรูป."""
+        content = build_multimodal_content(text, tuple(image_paths or []))
+        if isinstance(content, list):
+            console.print(f"[dim]ส่งรูปจริง {len(content) - 1} รูปให้ LLM vision ({self.display_name})[/dim]")
         return content
-
-    def _encode_image_resized(self, p: Any, max_dim: int = 1024) -> tuple[str, str]:
-        """Encode รูปเป็น base64 — resize ถ้าใหญ่เกิน max_dim (preserve aspect ratio).
-
-        คืน (base64_str, mime_type)
-        รูปเล็กกว่า max_dim ส่งต้นฉบับเลย (lossless)
-        รูปใหญ่กว่า resize ลง (ลด image tokens ~74%)
-        """
-        import base64
-        import io
-        import mimetypes
-
-        mime, _ = mimetypes.guess_type(str(p))
-        if not mime or not mime.startswith("image/"):
-            mime = "image/png"
-
-        # อ่านขนาดรูป
-        try:
-            from PIL import Image
-            img = Image.open(p)
-            w, h = img.size
-        except Exception:
-            # ไม่มี PIL หรืออ่านไม่ได้ → ส่งต้นฉบับ
-            return base64.b64encode(p.read_bytes()).decode("ascii"), mime
-
-        # ถ้าเล็กอยู่แล้ว → ส่งต้นฉบับ
-        if w <= max_dim and h <= max_dim:
-            return base64.b64encode(p.read_bytes()).decode("ascii"), mime
-
-        # Resize (preserve aspect ratio)
-        scale = max_dim / max(w, h)
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        img_resized = img.resize((new_w, new_h), Image.LANCZOS)
-
-        # Convert BMP → PNG (เล็กกว่ามาก)
-        buf = io.BytesIO()
-        save_format = "PNG" if mime in ("image/png", "image/bmp", "image/x-ms-bmp") else "JPEG"
-        if save_format == "JPEG":
-            # JPEG ไม่รองรับ alpha → convert
-            if img_resized.mode in ("RGBA", "LA", "P"):
-                img_resized = img_resized.convert("RGB")
-            mime = "image/jpeg"
-        img_resized.save(buf, format=save_format)
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        return b64, mime
-
 
 
 

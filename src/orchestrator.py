@@ -32,6 +32,7 @@ from .brand_priority import load_brand_priority
 from .config_loader import get_agent_config, load_config
 from .data_loader import detect_data_files, get_agent_data
 from .llm_client import LLMClient
+from .run_context import StepRunContext, build_multimodal_content
 
 # Platform display names — ใช้ในหลายที่ นิยามครั้งเดียว
 _PLATFORM_NAMES = {"facebook": "Facebook", "tiktok": "TikTok"}
@@ -204,6 +205,7 @@ class Orchestrator:
         self, raw_data: str, product_images: list[str] | None = None, llm: LLMClient | None = None,
         quick_brief: str = "", resource_context: str = "",
         extra_image_paths: list[str] | None = None,
+        step_context: StepRunContext | None = None,
     ) -> str:
         """Run product_spec agent — สร้างเอกสารสเปคสินค้าเป็น deliverable สำหรับ user.
 
@@ -224,6 +226,7 @@ class Orchestrator:
             result = agent.run(
                 prompt, quick_brief=quick_brief, image_paths=image_paths,
                 resource_context=resource_context, extra_image_paths=extra_image_paths,
+                step_context=step_context,
             )
             self.results["product_spec"] = result
 
@@ -283,6 +286,7 @@ class Orchestrator:
         self, product_spec: str, competitor_data: str | None = None, llm: LLMClient | None = None,
         quick_brief: str = "", resource_context: str = "",
         extra_image_paths: list[str] | None = None,
+        step_context: StepRunContext | None = None,
     ) -> str:
         own = llm is None
         if own:
@@ -297,6 +301,7 @@ class Orchestrator:
             result = agent.run(
                 prompt, quick_brief=quick_brief, image_paths=image_paths,
                 resource_context=resource_context, extra_image_paths=extra_image_paths,
+                step_context=step_context,
             )
             self.results["competitor_analysis"] = result
 
@@ -309,6 +314,7 @@ class Orchestrator:
         self, product_spec: str, competitor_analysis: str, llm: LLMClient | None = None,
         quick_brief: str = "", resource_context: str = "",
         extra_image_paths: list[str] | None = None,
+        step_context: StepRunContext | None = None,
     ) -> str:
         own = llm is None
         if own:
@@ -329,6 +335,7 @@ class Orchestrator:
             result = agent.run(
                 prompt, quick_brief=quick_brief, image_paths=image_paths,
                 resource_context=resource_context, extra_image_paths=extra_image_paths,
+                step_context=step_context,
             )
             self.results["campaign_strategy"] = result
             return result
@@ -347,6 +354,7 @@ class Orchestrator:
         asset_summary: str = "",
         resource_context: str = "",
         extra_image_paths: list[str] | None = None,
+        step_context: StepRunContext | None = None,
     ) -> str:
         own = llm is None
         if own:
@@ -424,6 +432,7 @@ class Orchestrator:
                 prompt, quick_brief=quick_brief, image_paths=image_paths,
                 resource_context=resource_context, extra_image_paths=extra_image_paths,
                 response_format=CONTENT_RESPONSE_FORMAT,
+                step_context=step_context,
             )
             # แปลง JSON → markdown สำหรับ display + เก็บ JSON ดิบไว้สำหรับ parse_media_prompts
             try:
@@ -719,6 +728,7 @@ class Orchestrator:
         quick_brief: str = "",
         platforms: list[str] | None = None,
         product_count: int = 1,
+        step_context: StepRunContext | None = None,
     ) -> dict[str, Any]:
         """Phase 1 ของ auto mode — ให้ LLM เลือกสินค้า + แนวคิดที่ยังไม่ซ้ำ.
 
@@ -757,7 +767,7 @@ class Orchestrator:
                 and p.get("status") == product_db.STATUS_READY
             )
             if ready_count == 0:
-                return {"error": "ไม่มีสินค้าที่พร้อมในระบบ — กรุณาอัปโหลดและ ingest สินค้าก่อน"}
+                return {"error": "ไม่มีสินค้าที่พร้อมในระบบ — กรุณาอัปโหลดและ ingest สินค้าก่อน", "step_context": step_context}
 
             # ปรับ product_count ตามจำนวนสินค้าที่พร้อมจริงในฐานข้อมูล
             if product_count > ready_count:
@@ -901,9 +911,17 @@ class Orchestrator:
                 selected = [platform_names.get(p, p) for p in platforms]
                 platform_str = f"\nแพลตฟอร์มที่ต้องสร้าง: {' หรือ '.join(selected)}"
 
+            effective_brief = quick_brief
+            resource_section = ""
+            if step_context is not None:
+                effective_brief = step_context.quick_brief
+                selection_view = step_context.for_phase("selection")
+                if selection_view.instruction_text:
+                    resource_section = f"\n\n--- เอกสารประกอบจากผู้ใช้ ---\n{selection_view.instruction_text}"
+
             brief_section = ""
-            if quick_brief:
-                brief_section = f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
+            if effective_brief:
+                brief_section = f"\n\nคำขอเพิ่มเติมจาก user: {effective_brief}"
 
             # Output schema — ใช้ product_ids เสมอ (รองรับทั้ง 1 และหลายชิ้น)
             count_hint = ""
@@ -932,7 +950,7 @@ class Orchestrator:
             )
 
             user_prompt = (
-                f"เลือกสินค้าและแนวคิดเพื่อสร้างคอนเทนต์{platform_str}{brief_section}\n\n"
+                f"เลือกสินค้าและแนวคิดเพื่อสร้างคอนเทนต์{platform_str}{brief_section}{resource_section}\n\n"
                 f"ขั้นตอน: เรียก list_products() → เรียก get_content_history() → "
                 f"เรียก get_product_detail() สำหรับสินค้าที่สนใจ → ตอบ JSON\n"
                 f"ถ้ามีวัตถุดิบแบรนด์ (โลโก้ พรีเซนเตอร์ เพลง) ให้เรียก list_assets() "
@@ -943,9 +961,15 @@ class Orchestrator:
                 f"(เช่น ถ้าเลือกสินค้า 1 ชิ้น ห้ามเลือก pillar ที่ต้องเปรียบเทียบหลายชิ้น)"
             )
 
+            if step_context is not None:
+                selection_view = step_context.for_phase("selection")
+                user_content = build_multimodal_content(user_prompt, selection_view.image_paths)
+            else:
+                user_content = user_prompt
+
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": user_content},
             ]
 
             # --- tool calling loop (ค่าจาก config) ---
@@ -968,14 +992,14 @@ class Orchestrator:
                 result = _json.loads(text)
             except _json.JSONDecodeError:
                 err_len = auto_cfg.get("raw_text_preview_length", 500)
-                return {"error": f"LLM ไม่คืน JSON ที่ถูกต้อง: {response[:err_len]}"}
+                return {"error": f"LLM ไม่คืน JSON ที่ถูกต้อง: {response[:err_len]}", "step_context": step_context}
 
             # รองรับทั้ง product_id (1 ชิ้น) และ product_ids (หลายชิ้น)
             if "product_id" in result and "product_ids" not in result:
                 result["product_ids"] = [result["product_id"]]
             product_ids = result.get("product_ids", [])
             if not product_ids:
-                return {"error": "LLM ไม่ได้เลือกสินค้า"}
+                return {"error": "LLM ไม่ได้เลือกสินค้า", "step_context": step_context}
 
             # ตรวจทุกสินค้าที่เลือก — ต้องมีจริงในระบบ
             all_ready = [
@@ -994,7 +1018,7 @@ class Orchestrator:
                             validated.append(vpid)
                             break
                     else:
-                        return {"error": f"LLM เลือกสินค้าที่ไม่มีในระบบ: {pid}"}
+                        return {"error": f"LLM เลือกสินค้าที่ไม่มีในระบบ: {pid}", "step_context": step_context}
             result["product_ids"] = validated
             result["product_id"] = validated[0]
 
@@ -1016,6 +1040,7 @@ class Orchestrator:
                     result.get("concept", ""), pillars, pillar_keywords,
                 )
 
+            result["step_context"] = step_context.with_phase("selection") if step_context is not None else None
             return result
         finally:
             if own:
@@ -1031,6 +1056,7 @@ class Orchestrator:
         status_callback=None,
         resource_context: str = "",
         extra_image_paths: list[str] | None = None,
+        step_context: StepRunContext | None = None,
     ) -> dict[str, Any]:
         """Auto mode — agent เลือกสินค้าเอง + สร้างคอนเทนต์ที่ไม่ซ้ำ.
 
@@ -1069,10 +1095,12 @@ class Orchestrator:
             selection = self.select_product_auto(
                 llm=llm, quick_brief=quick_brief, platforms=platforms,
                 product_count=product_count,
+                step_context=step_context,
             )
             if "error" in selection:
                 return selection
 
+            step_context = selection.get("step_context") or step_context
             chosen_pids = selection.get("product_ids", [])
             chosen_concept = selection.get("concept") or selection.get("angle", "")
             chosen_pillar = selection.get("pillar", "")
@@ -1109,6 +1137,14 @@ class Orchestrator:
             base_auto_brief = f"แนวคิดที่ต้องใช้: {chosen_concept}"
             if quick_brief:
                 base_auto_brief += f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
+
+            if step_context is not None:
+                step_context = (
+                    step_context
+                    .with_products(chosen_pids)
+                    .with_quick_brief(quick_brief)
+                    .with_phase("generation")
+                )
 
             project_root = Path(__file__).resolve().parent.parent
             max_dedup_retries = int(ch_cfg.get("dedup_max_retries", 3))
@@ -1155,14 +1191,17 @@ class Orchestrator:
                         if status_callback:
                             status_callback(f"คอนเทนต์ซ้ำ (ครั้งที่ {retry_count}) — กำลังสร้างใหม่...")
 
-                    content = self.run_content_creator(
-                        "", "", "",
-                        llm=llm, quick_brief=attempt_brief,
-                        media_type=media_type,
-                        asset_summary=asset_summary,
-                        resource_context=resource_context,
-                        extra_image_paths=extra_image_paths,
-                    )
+                    content_kwargs = {
+                        "llm": llm,
+                        "quick_brief": attempt_brief,
+                        "media_type": media_type,
+                        "asset_summary": asset_summary,
+                        "resource_context": resource_context,
+                        "extra_image_paths": extra_image_paths,
+                    }
+                    if step_context is not None:
+                        content_kwargs["step_context"] = step_context.with_quick_brief(attempt_brief)
+                    content = self.run_content_creator("", "", "", **content_kwargs)
 
                     # ดึง caption เพื่อตรวจซ้ำ
                     caption_summary = ""
@@ -1246,7 +1285,7 @@ class Orchestrator:
                 config=ch_cfg,
             )
 
-            return {
+            result = {
                 "product_ids": chosen_pids,
                 "product_id": chosen_pids[0],
                 "pillar": chosen_pillar,
@@ -1259,6 +1298,9 @@ class Orchestrator:
                 "dedup_retries": last_retry_count,
                 "script_review": all_script_reviews,
             }
+            if step_context is not None:
+                result["step_context"] = step_context
+            return result
         finally:
             if own:
                 llm.close()
