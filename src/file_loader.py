@@ -2,7 +2,7 @@
 
 Supports:
 - Text files (.txt, .md, .csv) — direct read
-- PDF files (.pdf) — extract text using PyPDF2
+- PDF files (.pdf) — extract text using PyMuPDF
 - Excel files (.xlsx, .xls) — openpyxl
 - Word files (.docx) — python-docx (text) + zip media extraction (images)
 - Image files (.png, .jpg, .jpeg, .webp) — OCR using pytesseract (requires tesseract installed)
@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Literal
 
 try:
-    import PyPDF2
+    import fitz  # PyMuPDF
 except ImportError:
-    PyPDF2 = None
+    fitz = None
 
 try:
     from PIL import Image
@@ -89,18 +89,17 @@ def _load_csv(path: Path) -> str:
 
 
 def _load_pdf(path: Path) -> str:
-    """Extract text from PDF using PyPDF2."""
-    if PyPDF2 is None:
+    """Extract text from PDF using PyMuPDF."""
+    if fitz is None:
         raise ValueError(
-            "PyPDF2 is required for PDF support. "
-            "Install it with: pip install PyPDF2"
+            "PyMuPDF is required for PDF support. "
+            "Install it with: pip install PyMuPDF"
         )
 
     text_parts: list[str] = []
-    with open(path, "rb") as f:
-        reader = PyPDF2.PdfReader(f)
-        for page in reader.pages:
-            text = page.extract_text()
+    with fitz.open(str(path)) as doc:
+        for page in doc:
+            text = page.get_text()
             if text:
                 text_parts.append(text)
 
