@@ -43,14 +43,3 @@ class CampaignStrategyAgent(BaseAgent):
                 sections.extend([f"--- {label} ---", str(value), ""])
 
         return "\n".join(sections)
-
-    def validate_output(self, output: str) -> tuple[bool, str]:
-        """Validate output: section presence only (no regex guardrails)."""
-        from ..output_validators import validate_output
-
-        required = self.config.get("required_output_sections")
-        return validate_output(
-            self.agent_name,
-            output,
-            required_sections=required,
-        )
