@@ -19,6 +19,8 @@ cache_ttl_capabilities: 3600      # TTL cache model capabilities (วินา�
 
 # Streaming
 stream_refresh_rate: 15           # refresh rate (fps)
+stream_attempt_timeout_seconds: 300  # total wall-clock timeout ต่อ stream attempt (วินาที)
+stream_progress_timeout_seconds: 60  # no-model-progress timeout — keepalive ไม่รีเซ็ต (วินาที)
 
 # File processing
 file_hash_chunk_size: 8192        # chunk size สำหรับ hash ไฟล์ (bytes)

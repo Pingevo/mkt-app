@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -26,6 +28,18 @@ class _EmptyResponseError(Exception):
     using the same config value as HTTP/timeout retries. No new status enum
     is added; logged as ``status="error"`` with the message as-is.
     """
+
+
+@dataclass
+class _WatchdogState:
+    """Shared state between main thread and watchdog thread for one stream attempt.
+
+    ใช้ dataclass แทน list/dict ที่ผ่าน closure เพื่อให้ชัดเจนว่า field ไหนเป็นอะไร
+    และกันการ access ผิด index/key — timeout_reason เขียนจาก watchdog, อ่านจาก main
+    last_progress เขียนจาก main, อ่านจาก watchdog
+    """
+    timeout_reason: str | None = None
+    last_progress: float = field(default_factory=time.monotonic)
 
 
 def _system_cfg() -> dict:
@@ -60,6 +74,8 @@ class LLMClient:
             timeout=timeout,
         )
         self._aborted = False
+        self._attempt_lock = threading.Lock()
+        self._active_attempts: list[Any] = []
 
     def chat(
         self,
@@ -114,8 +130,8 @@ class LLMClient:
             "stream": stream,
         }
         if stream:
-            # เปิด include_usage เพื่อให้ chunk สุดท้ายมี usage ส่งกลับมา
-            payload["stream_options"] = {"include_usage": True}
+            # stream_options.include_usage ถูก OpenRouter deprecate แล้ว — usage ส่งอัตโนมัติ
+            pass
         if tools:
             payload["tools"] = tools
         if plugins:
@@ -250,43 +266,182 @@ class LLMClient:
         except Exception:
             pass  # fire-and-forget — ไม่ให้ logging error ทำลาย main flow
 
+    def _make_attempt_client(self) -> httpx.Client:
+        """Create a per-attempt httpx client with same config as the main client.
+
+        แยก client ต่อ attempt เพื่อให้ watchdog ปิด socket ของ attempt นี้ได้โดยไม่ทำลาย
+        client ของ retry ถัดไปหรือ parallel flow อื่น — ค่าใช้จ่ายคือเปิด connection ใหม่
+        ต่อ streaming attempt ซึ่งยอมรับได้สำหรับจำนวน request ของโปรเจกต์
+        """
+        return httpx.Client(
+            base_url=self._base_url,
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=self._timeout,
+        )
+
+    def _register_attempt(self, attempt_client: Any) -> None:
+        with self._attempt_lock:
+            self._active_attempts.append(attempt_client)
+
+    def _unregister_attempt(self, attempt_client: Any) -> None:
+        with self._attempt_lock:
+            try:
+                self._active_attempts.remove(attempt_client)
+            except ValueError:
+                pass
+
+    def _stream_attempt(
+        self, payload: dict[str, Any], *, attempt_timeout: float, progress_timeout: float,
+    ):
+        """หนึ่ง stream attempt พร้อม watchdog ที่ interrupt blocked read ได้จริง.
+
+        สร้าง httpx.Client แยกสำหรับ attempt นี้ แล้วปล่อย watchdog daemon thread คอยนับเวลา
+        สองแบบ: total attempt deadline และ no-model-progress deadline เมื่อถึง deadline
+        watchdog ปิด attempt client เพื่อ interrupt socket read ที่ block อยู่ใน iter_lines()
+
+        ค่า "model progress" รีเซ็ตเฉพาะเมื่อได้รับ content/reasoning/tool-call delta จริง
+        ไม่รีเซ็ตจาก SSE comment (: OPENROUTER PROCESSING) หรือ usage-only chunk
+
+        Yields (event_type, value) tuples:
+            ("content", str) — content delta จาก model
+            ("usage", dict) — usage info จาก chunk สุดท้าย
+            ("request_id", str) — request ID
+            ("finish", str) — finish_reason ที่ไม่ใช่ error
+
+        Raises:
+            httpx.ReadTimeout — watchdog ปิด connection เพราะ total หรือ progress deadline
+            httpx.RemoteProtocolError — mid-stream error event หรือ dropped connection
+        """
+        attempt_client = self._make_attempt_client()
+        self._register_attempt(attempt_client)
+
+        done_event = threading.Event()
+        state = _WatchdogState()
+
+        def watchdog() -> None:
+            deadline_total = time.monotonic() + attempt_timeout
+            poll = min(0.1, attempt_timeout / 10, progress_timeout / 10)
+            while not done_event.wait(poll):
+                now = time.monotonic()
+                if now > deadline_total:
+                    state.timeout_reason = "total"
+                    break
+                if now - state.last_progress > progress_timeout:
+                    state.timeout_reason = "progress"
+                    break
+            if state.timeout_reason:
+                try:
+                    attempt_client.close()
+                except Exception:
+                    pass
+            done_event.set()
+
+        watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+        watchdog_thread.start()
+
+        try:
+            with attempt_client.stream("POST", "/chat/completions", json=payload) as resp:
+                resp.raise_for_status()
+                saw_done = False
+                saw_finish_reason = False
+
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    if not line.startswith("data: "):
+                        continue  # skip SSE comments เช่น : OPENROUTER PROCESSING
+                    data = line[6:]
+                    if data.strip() == "[DONE]":
+                        saw_done = True
+                        break
+
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # mid-stream error: HTTP 200 + SSE error event
+                    if chunk.get("error"):
+                        msg = chunk["error"].get("message", "unknown stream error")
+                        raise httpx.RemoteProtocolError(f"OpenRouter stream error: {msg}")
+
+                    if chunk.get("id"):
+                        yield ("request_id", chunk["id"])
+
+                    if chunk.get("usage"):
+                        yield ("usage", chunk["usage"])
+
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue  # usage-only/debug chunk — ไม่มี IndexError
+
+                    choice = choices[0]
+                    finish_reason = choice.get("finish_reason")
+                    if finish_reason:
+                        saw_finish_reason = True
+                        if finish_reason == "error":
+                            raise httpx.RemoteProtocolError(
+                                "stream terminated with finish_reason=error"
+                            )
+                        yield ("finish", finish_reason)
+
+                    delta = choice.get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        state.last_progress = time.monotonic()
+                        yield ("content", content)
+                    elif delta.get("reasoning") or delta.get("tool_calls"):
+                        state.last_progress = time.monotonic()
+
+                # EOF โดยไม่มี [DONE] และไม่มี successful finish_reason = dropped stream
+                if not saw_done and not saw_finish_reason:
+                    raise httpx.RemoteProtocolError(
+                        "stream ended without [DONE] or finish_reason"
+                    )
+
+        except httpx.ReadTimeout:
+            reason = state.timeout_reason or "unknown"
+            raise httpx.ReadTimeout(f"stream {reason} timeout") from None
+
+        finally:
+            done_event.set()
+            try:
+                attempt_client.close()
+            except Exception:
+                pass
+            self._unregister_attempt(attempt_client)
+            watchdog_thread.join(timeout=5)
+
     def _chat_stream(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None, str | None]:
         """Stream chat completion and display real-time output.
 
-        คืน (text, usage, request_id) — usage มาจาก chunk สุดท้ายเมื่อเปิด stream_options.include_usage
+        คืน (text, usage, request_id) — usage มาจาก chunk สุดท้าย (OpenRouter ส่งอัตโนมัติ)
         request_id มาจาก chunk แรก/สุดท้ายที่ระบุ id
         """
-        import json
+        cfg = _system_cfg()
+        attempt_timeout = float(cfg.get("stream_attempt_timeout_seconds", self._timeout))
+        progress_timeout = float(cfg.get("stream_progress_timeout_seconds", 60))
 
         collected: list[str] = []
         text = Text()
         usage: dict[str, Any] | None = None
         request_id: str | None = None
 
-        with self._client.stream("POST", "/chat/completions", json=payload) as resp:
-            resp.raise_for_status()
-            with Live(text, console=console, refresh_per_second=int(_system_cfg().get("stream_refresh_rate", 15)), transient=False) as live:
-                for line in resp.iter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data.strip() == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                        if chunk.get("id"):
-                            request_id = chunk.get("id")
-                        # chunk สุดท้ายมี usage อยู่ระดับ top-level (ไม่ใช่ใน choices)
-                        if chunk.get("usage"):
-                            usage = chunk["usage"]
-                        delta = chunk.get("choices", [{}])[0].get("delta", {})
-                        content = delta.get("content", "")
-                        if content:
-                            collected.append(content)
-                            text.append(content)
-                            live.update(text)
-                    except (json.JSONDecodeError, IndexError, KeyError):
-                        continue
+        with Live(text, console=console, refresh_per_second=int(cfg.get("stream_refresh_rate", 15)), transient=False) as live:
+            for event_type, value in self._stream_attempt(
+                payload, attempt_timeout=attempt_timeout, progress_timeout=progress_timeout,
+            ):
+                if event_type == "content":
+                    collected.append(value)
+                    text.append(value)
+                    live.update(text)
+                elif event_type == "usage":
+                    usage = value
+                elif event_type == "request_id":
+                    request_id = value
 
         console.print()
         return "".join(collected), usage, request_id
@@ -307,8 +462,6 @@ class LLMClient:
 
         source: label สำหรับ AI Usage Hub log
         """
-        import json
-
         used_model = model or self._default_model
         payload: dict[str, Any] = {
             "model": used_model,
@@ -316,12 +469,16 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": True,
-            "stream_options": {"include_usage": True},
+            # stream_options.include_usage ถูก OpenRouter deprecate — usage ส่งอัตโนมัติ
         }
         if tools:
             payload["tools"] = tools
         if plugins:
             payload["plugins"] = plugins
+
+        cfg = _system_cfg()
+        attempt_timeout = float(cfg.get("stream_attempt_timeout_seconds", self._timeout))
+        progress_timeout = float(cfg.get("stream_progress_timeout_seconds", 60))
 
         last_error: Exception | None = None
         for attempt in range(1, max_retry_limit + 1):
@@ -330,27 +487,16 @@ class LLMClient:
                 usage: dict[str, Any] | None = None
                 request_id: str | None = None
                 yielded_any = False
-                with self._client.stream("POST", "/chat/completions", json=payload) as resp:
-                    resp.raise_for_status()
-                    for line in resp.iter_lines():
-                        if not line or not line.startswith("data: "):
-                            continue
-                        data = line[6:]
-                        if data.strip() == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                            if chunk.get("id"):
-                                request_id = chunk.get("id")
-                            if chunk.get("usage"):
-                                usage = chunk["usage"]
-                            delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content", "")
-                            if content:
-                                yielded_any = True
-                                yield content
-                        except (json.JSONDecodeError, IndexError, KeyError):
-                            continue
+                for event_type, value in self._stream_attempt(
+                    payload, attempt_timeout=attempt_timeout, progress_timeout=progress_timeout,
+                ):
+                    if event_type == "content":
+                        yielded_any = True
+                        yield value
+                    elif event_type == "usage":
+                        usage = value
+                    elif event_type == "request_id":
+                        request_id = value
                 self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
                 # Empty content = failed attempt — retry like chat() does
                 # (can only retry if nothing was yielded yet)
@@ -359,6 +505,11 @@ class LLMClient:
                 return
             except (_EmptyResponseError, httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
                 last_error = exc
+                # หลัง yield content แล้ว = committed — ห้าม retry เพราะจะส่งข้อความซ้ำ
+                if yielded_any:
+                    status = "timeout" if isinstance(exc, httpx.TimeoutException) else "error"
+                    self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status=status, error_message=str(exc), request_id=request_id)
+                    raise
                 if isinstance(exc, _EmptyResponseError):
                     status = "error"
                     http_status = None
@@ -373,6 +524,8 @@ class LLMClient:
                         except Exception:
                             pass
                 self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status=status, http_status=http_status, error_message=str(exc), request_id=request_id)
+                if self._aborted:
+                    raise RuntimeError("Request aborted")
                 if attempt < max_retry_limit:
                     time.sleep(2**attempt)
                 continue
@@ -380,6 +533,13 @@ class LLMClient:
         raise RuntimeError(f"LLM request failed after {max_retry_limit} retries: {last_error}")
 
     def close(self) -> None:
+        with self._attempt_lock:
+            for ac in self._active_attempts:
+                try:
+                    ac.close()
+                except Exception:
+                    pass
+            self._active_attempts.clear()
         self._client.close()
 
     def chat_with_tools(
@@ -497,6 +657,13 @@ class LLMClient:
     def abort(self) -> None:
         """Force-close the connection, aborting any in-flight request."""
         self._aborted = True
+        with self._attempt_lock:
+            for ac in self._active_attempts:
+                try:
+                    ac.close()
+                except Exception:
+                    pass
+            self._active_attempts.clear()
         try:
             self._client.close()
         except Exception:
