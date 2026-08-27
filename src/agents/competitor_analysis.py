@@ -105,7 +105,10 @@ class CompetitorAnalysisAgent(BaseAgent):
                 }
 
         # 3) target product match
-        if target_model and re.search(re.escape(target_model.lower()), source_text):
+        # ใช้ word boundary เพื่อกัน false positive จากรุ่นใกล้เคียง เช่น K77 vs K771/K77A
+        if target_model and re.search(
+            r"\b" + re.escape(target_model.lower()) + r"\b", source_text
+        ):
             return {
                 "relevant": True,
                 "relevance_type": "target",

@@ -134,3 +134,30 @@ def test_competitor_relevance_cases(
     result = agent._assess_source_relevance(annotation)
     assert result["relevant"] is expected_relevant
     assert result.get("relevance_type") == expected_type
+
+
+@pytest.mark.parametrize(
+    "source_text,should_be_target",
+    [
+        ("K77", True),
+        ("CACGO K77 Smart Watch", True),
+        ("CACGO-K77-smartwatch", True),
+        ("K77-smart-watch", True),
+        ("K771", False),
+        ("E-3LUE K771 Mechanical Keyboard", False),
+        ("K77A", False),
+    ],
+)
+def test_target_model_uses_word_boundary(
+    agent: CompetitorAnalysisAgent,
+    source_text: str,
+    should_be_target: bool,
+) -> None:
+    """target_model K77 ต้อง match เป็น token ไม่ใช่ substring."""
+    annotation = {"url": f"https://example.com/{source_text.replace(' ', '-')}", "title": source_text, "content": ""}
+    result = agent._assess_source_relevance(annotation)
+    if should_be_target:
+        assert result["relevant"] is True
+        assert result["relevance_type"] == "target"
+    else:
+        assert result["relevance_type"] != "target"
