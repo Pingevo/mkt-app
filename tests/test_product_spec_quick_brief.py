@@ -178,3 +178,29 @@ def test_existing_prompt_tests_still_work():
     prompt = agent.build_prompt("ข้อมูล K77", product_images=None)
     assert "ข้อมูลดิบ" in prompt
     assert "K77" in prompt
+
+
+def test_product_spec_review_prompt_has_fact_guardrails():
+    """review prompt ของ product_spec ต้องมีกฎป้องกัน unsupported / comparative / inference claims."""
+    cfg = get_agent_config(load_config(), "product_spec")
+    review_prompt = cfg.get("review_prompt", "")
+    assert review_prompt, "ต้องมี review_prompt"
+    assert "ไม่มีข้อมูลระบุ" in review_prompt, "ต้องบังคับให้เขียนว่า 'ไม่มีข้อมูลระบุ' เมื่อ source ไม่กล่าวถึง"
+    assert (
+        "ดีกว่า" in review_prompt
+        and "สูงกว่า" in review_prompt
+        and "คุ้มกว่า" in review_prompt
+    ), "ต้องห้าม comparative/superiority claims"
+    assert "ประโยชน์เชิงอนุมาน" in review_prompt, "ต้องติดป้าย benefit ที่อนุมาน"
+    assert "ให้ลบ" in review_prompt, "ต้องบอกให้ลบ claim ที่ไม่แน่ใจ"
+
+
+def test_product_spec_review_prompt_tags_inferred_audience_strengths():
+    """review prompt ต้องบังคับให้ Target Audience / Strengths / Benefit ที่ไม่อยู่ใน source ติดป้ายเชิงวิเคราะห์."""
+    cfg = get_agent_config(load_config(), "product_spec")
+    review_prompt = cfg.get("review_prompt", "")
+    assert "ข้อเสนอเชิงวิเคราะห์" in review_prompt, "ต้องมีป้าย 'ข้อเสนอเชิงวิเคราะห์'"
+    assert "ประโยชน์เชิงอนุมาน" in review_prompt, "ต้องมีป้าย 'ประโยชน์เชิงอนุมาน'"
+    assert "Target Audience" in review_prompt or "กลุ่มเป้าหมาย" in review_prompt, "ต้องกล่าวถึง Target Audience/กลุ่มเป้าหมาย"
+    assert "Strengths" in review_prompt or "จุดแข็ง" in review_prompt, "ต้องกล่าวถึง Strengths/จุดแข็ง"
+    assert "ห้ามนำ inference" in review_prompt or "ห้ามนำอนุมาน" in review_prompt, "ต้องห้ามเขียน inference เป็น fact"
