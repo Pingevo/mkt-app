@@ -208,6 +208,9 @@ class Orchestrator:
 
         สิ่งนี้ไม่ใช่ data source ของ agent ตัวอื่น — agent การตลาดดึงข้อมูลจาก product DB
         product_spec agent ทำหน้าที่แปลงข้อมูลดิบ → เอกสารสเปคภาษาไทยให้ user เท่านั้น
+
+        raw_data ที่ส่งเข้าควรมาจาก product_db.get_scoped_context_text() ไม่ใช่ไฟล์ดิบ
+        เพราะไฟล์ดิบอาจเป็น catalog หลายรุ่น → LLM จะเขียนสเปคทั้งซีรีส์แทนเฉพาะรุ่นที่เลือก
         """
         own = llm is None
         if own:

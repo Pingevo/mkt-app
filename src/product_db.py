@@ -410,6 +410,24 @@ def get_agent_context_text(product_id: str) -> str:
     return "\n".join(parts) if parts else ""
 
 
+def get_scoped_context_text(folders: list[str]) -> str:
+    """สร้าง scoped context สำหรับสินค้าที่เลือก — เฉพาะส่วนของรุ่นนั้น.
+
+    ใช้ get_agent_context_text ของแต่ละสินค้า ซึ่งเคารพ scope
+    (ตัดเฉพาะส่วนของรุ่นนั้นจาก catalog แทนที่จะส่งไฟล์ดิบทั้งไฟล์).
+    รองรับหลายสินค้า (combined mode) — รวม scoped context ของแต่ละตัว
+    โดยแต่ละตัวมี header บอกรหัสสินค้า ไม่ปนกัน.
+
+    คืน "" ถ้าไม่มีสินค้าใดมีข้อมูล (caller จัดการกรณีนี้เอง).
+    """
+    parts = []
+    for folder in folders:
+        ctx = get_agent_context_text(folder)
+        if ctx.strip():
+            parts.append(ctx)
+    return "\n\n".join(parts)
+
+
 def get_agent_context(product_id: str) -> dict[str, Any]:
     """ดึง context สำหรับ agent การตลาด — แบบ multimodal (retrieve-then-read).
 

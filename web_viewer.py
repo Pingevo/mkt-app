@@ -2311,6 +2311,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                             auto_image=auto_image, auto_video=auto_video, platforms=platforms,
                             media_type=media_type,
                             status_callback=_status_cb,
+                            folders=[folder],
                         )
                         for i, (result, filepath) in enumerate(results):
                             set_num = i + 1 if len(results) > 1 else None
@@ -2458,7 +2459,8 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                       auto_image: bool | None = None, auto_video: bool | None = None,
                       platforms: list[str] | None = None,
                       media_type: str = "",
-                      status_callback=None) -> list[tuple[str, str | None]]:
+                      status_callback=None,
+                      folders: list[str] | None = None) -> list[tuple[str, str | None]]:
     """Run one agent, return list of (result_text, filepath) tuples.
 
     context: {use_competitor: bool, use_campaign: bool} — user เลือกว่าจะใช้ context อะไร
@@ -2475,7 +2477,15 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
     orch.product_images = image_paths
 
     if agent_key == "product_spec":
-        raw_data = "\n\n".join(raw_contents) if raw_contents else ""
+        # ดึง scoped context จาก product DB — เคารพ scope ที่ตัดเฉพาะรุ่นจาก catalog
+        # ไม่ใช้ raw_contents (ไฟล์ดิบทั้งไฟล์) เพราะอาจเป็น catalog หลายรุ่น → LLM เขียนสเปคทั้งซีรีส์
+        # ถ้า product DB ยังไม่มี scoped text (เช่น สินค้ายังไม่ ingest) → ใช้ raw_contents แทน
+        raw_data = ""
+        if folders:
+            from src import product_db
+            raw_data = product_db.get_scoped_context_text(folders)
+        if not raw_data.strip():
+            raw_data = "\n\n".join(raw_contents) if raw_contents else ""
         # ถ้าไม่มี text แต่มีรูป → ใช้รูปเป็นข้อมูลหลัก (agent เห็นรูปจริงผ่าน multimodal)
         if not raw_data and not image_paths:
             raise ValueError(f"ไม่พบข้อมูลในโฟลเดอร์ {folder} — ต้องมีไฟล์ text หรือรูปอย่างน้อย 1 ไฟล์")
@@ -2847,6 +2857,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                                 auto_image=auto_image, auto_video=auto_video,
                                 platforms=platforms, media_type=media_type,
                                 status_callback=_status_cb_combined,
+                                folders=folders,
                             )
                             for i, (result, filepath) in enumerate(results):
                                 set_num = i + 1 if len(results) > 1 else None
@@ -2881,6 +2892,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                                     auto_image=auto_image, auto_video=auto_video,
                                     platforms=platforms, media_type=media_type,
                                     status_callback=_status_cb_sep,
+                                    folders=[folder],
                                 )
                                 for i, (result, filepath) in enumerate(results):
                                     set_num = i + 1 if len(results) > 1 else None
@@ -3048,6 +3060,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                             auto_image=auto_image, auto_video=auto_video,
                             platforms=platforms, media_type=media_type,
                             status_callback=_status_cb,
+                            folders=folders,
                         )
                         result_text = results[0][0] if results else ""
                         file_path = results[0][1] if results else None
@@ -3386,6 +3399,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                 auto_image=auto_image, auto_video=auto_video,
                                 platforms=platforms, media_type=media_type,
                                 status_callback=_agent_status,
+                                folders=chosen_pids,
                             )
                             result_text = results_list[0][0] if results_list else ""
                             file_path = results_list[0][1] if results_list else None

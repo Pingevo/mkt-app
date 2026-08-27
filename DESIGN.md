@@ -68,14 +68,27 @@
 
 | Agent | ดึงข้อมูลจาก | ผลลัพธ์ | เก็บที่ไหน |
 |---|---|---|---|
-| product_spec | raw data (data/) | เอกสารสเปคสินค้า | cache/ + output/ |
+| product_spec | product DB (scoped raw_text) | เอกสารสเปคสินค้า | cache/ + output/ |
 | competitor_analysis | product DB | วิเคราะห์คู่แข่ง (ค้น web เอง) | cache/ + output/ |
 | campaign_strategy | product DB + competitor_analysis | กลยุทธ์แคมเปญ + ราคาแนะนำ | output/ |
 | content_creator | product DB + (เลือก: competitor/campaign) | คอนเทนต์ + prompt + hashtag | output/ |
 
-**สำคัญ:** product_spec ไม่ใช่ data source ของ agent อื่นอีกต่อไป — มันเป็น deliverable สำหรับ user เท่านั้น agent การตลายดึงข้อมูลสินค้าจาก product DB ตรงๆ
+**สำคัญ:** product_spec ไม่ใช่ data source ของ agent อื่นอีกต่อไป — มันเป็น deliverable สำหรับ user เท่านั้น agent การตลาดดึงข้อมูลสินค้าจาก product DB ตรงๆ
+
+**หมายเหตุ:** product_spec อ่าน scoped raw_text จาก product DB (ไม่ใช่ไฟล์ดิบใน data/) เพราะไฟล์ดิบอาจเป็น catalog หลายรุ่น — scope ใน product DB ตัดเฉพาะส่วนของรุ่นนั้นให้ ป้องกัน LLM เขียนสเปคทั้งซีรีส์แทนที่จะเขียนเฉพาะรุ่นที่เลือก
+
+**Pipeline ของ product_spec (Generate → Blank check → Review → Validate):**
+
+1. **Generate:** LLM สร้าง draft จาก scoped raw_text + รูปจริง (multimodal)
+2. **Blank check:** ตรวจ generate ว่าง **ก่อน** เรียก reviewer — ถ้าว่าง raise ทันที ไม่เรียก reviewer (ป้องกัน reviewer สร้าง "ไม่มีข้อมูล" ปลอม)
+3. **Review:** reviewer เห็น source prompt (มี raw_text) + รูปชุดเดียวกับ generator → ตรวจข้อเท็จจริงได้ ถ้า reviewer ว่าง/exception → คืน draft พร้อม warning ไม่ทิ้งงาน
+4. **Validate:** ตรวจรูปแบบ + ซ่อมถ้าไม่ผ่าน
+
+**Empty LLM response:** OpenRouter อาจคืน HTTP 200 แต่ content ว่าง — ระบบ retry ตาม `max_retry_limit` เหมือน transient error ไม่คืน `""` ให้ agent เข้าใจผิดว่าสำเร็จ
 
 ## การเลือก Context — สิทธิ์อยู่ที่ User
+
+> **Architecture update:** รายละเอียดในหัวข้อนี้และหัวข้อ Hub & Spoke เดิมไม่ใช่ข้อกำหนดของ orchestration อีกต่อไป ให้ยึด `AGENT_ORCHESTRATION_SPEC.md` เป็น source of truth ระบบเป้าหมายต้องให้ user เรียง agent ได้ทุกลำดับ ใช้ agent ซ้ำได้ และเลือก artifact context ราย step โดยไม่บังคับ flow 1→2→3→4
 
 User เลือกเองว่าจะใช้ context อะไรตอนรัน agent ไม่บังคับ dependency:
 
@@ -135,14 +148,14 @@ raw → A → B → C → D         raw → ingestion → DB
 | ปรับแต่ง | ปรับ Manager กระทบทั้งทีม | ปรับ agent แต่ละตัวอิสระ | ควบคุมเฉพาะตัว |
 | ทำ 10 ชุด | ต้องมีหลาย agent คุยกัน | loop 1 agent ส่งผลก่อนหน้า | เร็ว + coherent |
 
-**เลือกแบบนี้เพราะ:** งานการตลาดของเรามีลำดับคงที่ ไม่ต้องตัดสินใจแบบ dynamic ความแน่นอนและความประหยัดสำคัญกว่าความยืดหยุ่น
+**สถานะข้อความเดิม:** แนวคิดที่ว่างานมีลำดับคงที่ถูกยกเลิกแล้ว ดู target architecture และขอบเขต v1 ใน `AGENT_ORCHESTRATION_SPEC.md`
 
 **เมื่อไหร่ถึงควร CrewAI:**
 - มี image API จริง (DALL-E, Midjourney) → แยก graphic designer เป็น agent ใหม่ ใช้ tool คนละแบบ
 - ต้องการ feedback loop → copywriter เขียน → designer ดูแล้วบอกแก้ → copywriter แก้
 - ต้องการ dynamic routing → ถ้าสินค้าเป็นอาหารใช้ agent A ถ้าเป็นเสื้อผ้าใช้ agent B
 
-ตอนนี้ยังไม่มีเงื่อนไขข้อใด → ไม่ต้อง CrewAI
+Dynamic routing เป็น requirement แล้ว แต่ v1 ยังไม่จำเป็นต้องใช้ CrewAI: user เป็นผู้กำหนด steps และ input artifacts ตาม `AGENT_ORCHESTRATION_SPEC.md`
 
 ## Trade-off: ทำไม content_creator ไม่แยกเป็น copywriter + graphic designer
 

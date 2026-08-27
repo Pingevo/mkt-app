@@ -19,6 +19,15 @@ except ImportError:
 console = Console()
 
 
+class _EmptyResponseError(Exception):
+    """Internal signal: OpenRouter returned HTTP 200 but content was empty.
+
+    Treated like a transient failure — retried up to ``max_retry_limit``
+    using the same config value as HTTP/timeout retries. No new status enum
+    is added; logged as ``status="error"`` with the message as-is.
+    """
+
+
 def _system_cfg() -> dict:
     """อ่าน system section จาก config — fallback {} ถ้าโหลดไม่ได้ (lazy, กัน circular import)."""
     try:
@@ -121,7 +130,6 @@ class LLMClient:
                 if stream:
                     text, usage, request_id = self._chat_stream(payload)
                     self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
-                    return text
                 else:
                     resp = self._client.post("/chat/completions", json=payload)
                     resp.raise_for_status()
@@ -133,20 +141,36 @@ class LLMClient:
                     text = msg.get("content", "")
                     if return_annotations:
                         annotations = self._extract_url_annotations(msg.get("annotations", []))
+                        # Empty content = failed attempt — retry like transient errors
+                        if not (text and text.strip()) and not annotations:
+                            raise _EmptyResponseError("empty response (no content and no annotations)")
                         return text, annotations
+                    # Empty content = failed attempt — retry like transient errors
+                    if not (text and text.strip()):
+                        raise _EmptyResponseError("empty response (no content)")
                     return text
-            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
+
+                # Stream path: empty content = failed attempt — retry
+                if not (text and text.strip()):
+                    raise _EmptyResponseError("empty response (no content from stream)")
+                return text
+
+            except (_EmptyResponseError, httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
                 last_error = exc
-                # log error path ด้วย
-                status = "timeout" if isinstance(exc, httpx.TimeoutException) else "error"
-                http_status: int | None = None
-                request_id: str | None = None
-                if isinstance(exc, httpx.HTTPStatusError):
-                    http_status = exc.response.status_code
-                    try:
-                        request_id = exc.response.json().get("id")
-                    except Exception:
-                        pass
+                # log error path ด้วย — empty response ใช้ status "error" เดิม + message บอกสาเหตุ
+                if isinstance(exc, _EmptyResponseError):
+                    status = "error"
+                    http_status = None
+                    request_id = None
+                else:
+                    status = "timeout" if isinstance(exc, httpx.TimeoutException) else "error"
+                    http_status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                    request_id = None
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        try:
+                            request_id = exc.response.json().get("id")
+                        except Exception:
+                            pass
                 self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status=status, http_status=http_status, error_message=str(exc), request_id=request_id)
                 if self._aborted:
                     raise RuntimeError("Request aborted")
@@ -305,6 +329,7 @@ class LLMClient:
             try:
                 usage: dict[str, Any] | None = None
                 request_id: str | None = None
+                yielded_any = False
                 with self._client.stream("POST", "/chat/completions", json=payload) as resp:
                     resp.raise_for_status()
                     for line in resp.iter_lines():
@@ -322,22 +347,31 @@ class LLMClient:
                             delta = chunk.get("choices", [{}])[0].get("delta", {})
                             content = delta.get("content", "")
                             if content:
+                                yielded_any = True
                                 yield content
                         except (json.JSONDecodeError, IndexError, KeyError):
                             continue
                 self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
+                # Empty content = failed attempt — retry like chat() does
+                # (can only retry if nothing was yielded yet)
+                if not yielded_any:
+                    raise _EmptyResponseError("empty response (no content from stream)")
                 return
-            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
+            except (_EmptyResponseError, httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
                 last_error = exc
-                status = "timeout" if isinstance(exc, httpx.TimeoutException) else "error"
-                http_status: int | None = None
-                request_id: str | None = None
-                if isinstance(exc, httpx.HTTPStatusError):
-                    http_status = exc.response.status_code
-                    try:
-                        request_id = exc.response.json().get("id")
-                    except Exception:
-                        pass
+                if isinstance(exc, _EmptyResponseError):
+                    status = "error"
+                    http_status = None
+                    request_id = None
+                else:
+                    status = "timeout" if isinstance(exc, httpx.TimeoutException) else "error"
+                    http_status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                    request_id = None
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        try:
+                            request_id = exc.response.json().get("id")
+                        except Exception:
+                            pass
                 self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status=status, http_status=http_status, error_message=str(exc), request_id=request_id)
                 if attempt < max_retry_limit:
                     time.sleep(2**attempt)

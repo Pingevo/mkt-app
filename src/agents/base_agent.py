@@ -352,22 +352,52 @@ class BaseAgent:
                 source=f"{self.agent_name}.generate",
             )
 
+        # --- Phase 2: Blank check — ตรวจ generate ว่างก่อนเรียก reviewer ---
+        # ถ้า generate คืนว่าง → ไม่เรียก reviewer เลย เพราะ reviewer ไม่มี source
+        # จะสร้างแบบฟอร์ม "ไม่มีข้อมูล" ปลอมแทน (เห็นใน Flow 2: K69+K72)
+        if _output_is_blank(output):
+            raise ValueError("model คืนคำตอบว่างเปล่า — อาจเกิดจาก model ไม่รองรับ web_search tool, prompt ยาวเกินไป หรือถูกปฏิเสธ")
+
+        # เก็บ draft ก่อน review — ถ้า reviewer ล้มเหลว จะได้คืน draft ไม่ใช่ว่าง
+        draft = output
+
         # --- Phase 3: Review & Refine (optional) ---
         # ถ้า max_review_iterations > 0 → สั่ง LLM ตรวจงานตัวเองรอบที่ 2
         # ถ้า = 0 → agent ตรวจเองในการเรียกครั้งเดียว (self-check ใน system_prompt)
         max_review = self.config.get("max_review_iterations", 1)
         if max_review and max_review > 0:
             instruction_block = self._format_instructions()
-            output = self._review_and_refine(
-                output, system_prompt,
-                instruction_block=instruction_block,
-                quick_brief=quick_brief,
-                response_format=response_format,
-            )
-
-        # ถ้า model คืน output ว่างตั้งแต่แรก ไม่ต้องซ่อม บอกผู้ใช้ชัดเจนเลย
-        if _output_is_blank(output):
-            raise ValueError("model คืนคำตอบว่างเปล่า — อาจเกิดจาก model ไม่รองรับ web_search tool, prompt ยาวเกินไป หรือถูกปฏิเสธ")
+            try:
+                reviewed = self._review_and_refine(
+                    output, system_prompt,
+                    instruction_block=instruction_block,
+                    quick_brief=quick_brief,
+                    response_format=response_format,
+                    user_prompt=user_prompt,
+                    image_paths=image_paths,
+                )
+            except Exception as review_exc:
+                # reviewer ล้มเหลว (timeout, exception) → คืน draft พร้อม warning
+                console.print(f"[yellow]reviewer ล้มเหลว: {review_exc} — คืน draft พร้อม warning[/yellow]")
+                output = (
+                    f"⚠️ **การตรวจทานอัตโนมัติล้มเหลว** — {review_exc}\n"
+                    f"ผลงานด้านล่างเป็น draft จาก generator กรุณาตรวจสอบด้วยตนเองก่อนใช้งาน\n"
+                    f"---\n\n"
+                    f"{draft}"
+                )
+            else:
+                # reviewer คืนว่าง → คืน draft พร้อม warning (ไม่ใช่ว่าง)
+                if _output_is_blank(reviewed):
+                    console.print("[yellow]reviewer คืนคำตอบว่าง — คืน draft พร้อม warning[/yellow]")
+                    output = (
+                        f"⚠️ **การตรวจทานอัตโนมัติล้มเหลว** — reviewer คืนคำตอบว่างเปล่า "
+                        f"(อาจเป็น timeout, rate limit หรือ model ปฏิเสธ)\n"
+                        f"ผลงานด้านล่างเป็น draft จาก generator กรุณาตรวจสอบด้วยตนเองก่อนใช้งาน\n"
+                        f"---\n\n"
+                        f"{draft}"
+                    )
+                else:
+                    output = reviewed
 
         # ตรวจ output ตามรูปแบบของ agent แล้วซ่อมถ้าไม่ผ่าน
         max_repair = self.config.get("max_retry_limit", 3)
@@ -580,13 +610,19 @@ class BaseAgent:
         instruction_block: str = "",
         quick_brief: str = "",
         response_format: dict | None = None,
+        user_prompt: str = "",
+        image_paths: list[str] | None = None,
     ) -> str:
         """ตรวจงานเทียบกับ instructions เป็น checklist รายข้อ.
 
-        Reviewer เห็น 3 ส่วนแยกกันชัดเจน:
+        Reviewer เห็น 4 ส่วนแยกกันชัดเจน:
           1. ข้อกำหนดหลัก (system_prompt — role + format)
-          2. Checklist จาก user instructions (rules_must, rules_forbid, custom, ฯลฯ)
-          3. คำสั่งเฉพาะรอบนี้ (quick_brief)
+          2. ข้อมูลต้นทาง (user_prompt — มี raw data ของสินค้า) เพื่อตรวจข้อเท็จจริง
+          3. Checklist จาก user instructions (rules_must, rules_forbid, custom, ฯลฯ)
+          4. คำสั่งเฉพาะรอบนี้ (quick_brief)
+
+        ถ้ามี image_paths → reviewer ได้รูปชุดเดียวกับ generator (multimodal)
+        เพื่อตรวจข้อเท็จจริงของรูปได้ ไม่ใช่ตรวจแค่จาก text output
 
         วิธีทำงาน:
           - รอบที่ 1: review → ถ้าเจอปัญหา → แก้ → ส่งกลับ
@@ -654,10 +690,21 @@ class BaseAgent:
                 f"ถ้าทุกข้อผ่านแล้ว ส่ง JSON เดิมกลับมาเป๊ะๆ ห้ามเปลี่ยนแปลงอะไรเลย\n"
             )
 
+        # ส่วนข้อมูลต้นทาง — reviewer ต้องเห็น source เดียวกับ generator
+        # เพื่อตรวจข้อเท็จจริงได้ (เช่น ตัด claim ที่เกิน source)
+        source_section = ""
+        if user_prompt:
+            source_section = (
+                f"\n--- ข้อมูลต้นทาง (ใช้ตรวจข้อเท็จจริงของผลงาน) ---\n"
+                f"{user_prompt}\n"
+                f"--- สิ้นสุดข้อมูลต้นทาง ---\n"
+            )
+
         for i in range(max_iterations):
             review_user_msg = (
                 f"--- ข้อกำหนดหลักของ agent ---\n"
                 f"{system_prompt}\n"
+                f"{source_section}"
                 f"{checklist_section}"
                 f"{evidence_section}"
                 f"{brief_section}\n"
@@ -667,13 +714,16 @@ class BaseAgent:
                 f"{json_instruction}"
                 f"วิธีตรวจ:\n"
                 f"1. อ่าน CHECKLIST + EVIDENCE DISCIPLINE ทุกข้อ\n"
-                f"2. ถ้ามี claim ใดไม่มีหลักฐานตาม evidence_policy หรือใช้แหล่งทีผิด ให้แก้หรือลบ\n"
-                f"3. ถ้าครบถ้วนทุกข้อ ส่งผลงานเดิมกลับมาเลย ไม่ต้องเปลี่ยนแปลง\n"
+                f"2. เทียบทุก claim ในผลงานกับข้อมูลต้นทาง — ถ้าเกิน source ให้ลบหรือแก้\n"
+                f"3. ถ้ามี claim ใดไม่มีหลักฐานตาม evidence_policy หรือใช้แหล่งทีผิด ให้แก้หรือลบ\n"
+                f"4. ถ้าครบถ้วนทุกข้อ ส่งผลงานเดิมกลับมาเลย ไม่ต้องเปลี่ยนแปลง\n"
                 f"ส่งกลับเฉพาะผลงานฉบับสุดท้ายเท่านั้น ไม่ต้องอธิบายว่าแก้อะไร"
             )
+            # ส่งรูปชุดเดียวกับ generator ให้ reviewer (multimodal) เพื่อตรวจข้อเท็จจริงของรูป
+            review_content = self._build_multimodal_content(review_user_msg, image_paths)
             messages = [
                 {"role": "system", "content": review_prompt},
-                {"role": "user", "content": review_user_msg},
+                {"role": "user", "content": review_content},
             ]
             console.print(f"\n[cyan]กำลังตรวจงาน... (รอบที่ {i+1})[/cyan]\n")
             refined = self.llm.chat(
