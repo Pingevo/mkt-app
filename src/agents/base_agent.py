@@ -733,7 +733,8 @@ class BaseAgent:
     def validate_output(self, output: str) -> tuple[bool, str]:
         """ตรวจ output ของ agent ว่าตรงกับรูปแบบที่กำหนดไหม."""
         required = self.config.get("required_output_sections")
-        return _validate_output(self.agent_name, output, required)
+        quality = self.config.get("output_quality")
+        return _validate_output(self.agent_name, output, required, output_quality=quality)
 
     def _repair_output(
         self,

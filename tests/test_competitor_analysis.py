@@ -23,10 +23,11 @@ from src.config_loader import load_config, get_agent_config
 class FakeLLM:
     """Deterministic LLM double that captures the request and returns scripted output."""
 
-    def __init__(self, generate_output: str = "", annotations: list | None = None, fetch_output: str = ""):
+    def __init__(self, generate_output: str = "", annotations: list | None = None, fetch_output: str = "", repair_output: str = ""):
         self.generate_output = generate_output
         self.annotations = annotations or []
         self.fetch_output = fetch_output
+        self.repair_output = repair_output
         self.calls: list[dict] = []
 
     def chat(self, messages, **kwargs):
@@ -34,6 +35,8 @@ class FakeLLM:
         source = kwargs.get("source", "")
         if ".fetch" in source:
             return self.fetch_output
+        if ".repair" in source:
+            return self.repair_output
         if kwargs.get("return_annotations"):
             return self.generate_output, self.annotations
         return self.generate_output
@@ -60,6 +63,7 @@ def test_build_prompt_includes_product_and_user_input():
 
 def test_run_sends_web_search_and_fetch_tools():
     cfg = _competitor_config()
+    cfg.pop("output_quality", None)
     cfg["max_review_iterations"] = 0
     cfg["web_search"] = True
     llm = FakeLLM(
@@ -80,6 +84,7 @@ def test_run_sends_web_search_and_fetch_tools():
 
 def test_run_appends_citations_for_non_empty_output():
     cfg = _competitor_config()
+    cfg.pop("output_quality", None)
     cfg["max_review_iterations"] = 0
     cfg["web_search"] = True
     annotations = [
@@ -105,6 +110,7 @@ def test_run_appends_citations_for_non_empty_output():
 
 def test_run_skips_validation_when_no_required_sections():
     cfg = _competitor_config()
+    cfg.pop("output_quality", None)
     cfg["max_review_iterations"] = 0
     cfg["web_search"] = False
     # Ensure no required sections remain.
@@ -132,6 +138,7 @@ def test_run_raises_for_blank_output():
 
 def test_run_plain_text_headings_pass_without_repair():
     cfg = _competitor_config()
+    cfg.pop("output_quality", None)
     cfg["max_review_iterations"] = 0
     cfg["web_search"] = False
     # Simulate a response like the one the real model produced.
@@ -162,6 +169,33 @@ def test_run_plain_text_headings_pass_without_repair():
 
     assert "ภาพรวมตลาด" in result
     assert not any("repair" in c["kwargs"].get("source", "") for c in llm.calls)
+
+
+def test_run_triggers_repair_when_output_quality_fails():
+    """ถ้า fake output ไม่ผ่าน output_quality contract → BaseAgent.run() ต้องเข้า repair flow."""
+    cfg = _competitor_config()
+    cfg["max_review_iterations"] = 0
+    cfg["web_search"] = False
+
+    bad_output = "นี่คือรายงานสั้น ๆ ทีไม่มี structure ใด ๆ"
+    good_output = (
+        "## ภาพรวมตลาด\n\n"
+        "ตลาดสมาร์ทวอทช์เด็กเติบโตขึ้นอย่างต่อเนื่องจากความต้องการติดต่อลูกของผู้ปกครอง "
+        "ทำให้สินค้ากลุ่มนี้มาแรงในหลายประเทศเอเชียตะวันออกเฉียงใต้ "
+        "โดยเฉพาะในเมืองใหญ่ทีผู้ปกครองมีงานประจำและต้องการติดตามลูกน้อย\n\n"
+        "## คำแนะนำ\n\n"
+        "ควรเน้นจุดขายด้านแบตเตอรี่และกล้องหน้าคมชัดเพื่อแข่งขันกับคู่แข่ง "
+        "โดยเฉพาะการสื่อสารความปลอดภัยและใช้งานง่ายให้ชัดเจน "
+        "นอกจากนี้ควรยกระดับข้อความทีเน้นความโปร่งใสของข้อมูลและการดูแลลูกแบบ real-time "
+        "เพื่อสร้างความมั่นใจให้ผู้ปกครองและเพิ่มโอกาสในการตัดสินใจซื้าอย่างรวดเร็ว\n\n"
+    )
+    llm = FakeLLM(generate_output=bad_output, repair_output=good_output)
+    agent = CompetitorAnalysisAgent(cfg, llm)
+
+    result = agent.run("วิเคราะห์คู่แข่ง K2")
+
+    assert any("repair" in c["kwargs"].get("source", "") for c in llm.calls)
+    assert "## ภาพรวมตลาด" in result
 
 
 def test_brand_reference_includes_silent_application_reminder():

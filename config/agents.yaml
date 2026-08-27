@@ -179,6 +179,11 @@ competitor_analysis:
   citation_policy:
     mode: inline_first
     fallback_annotations_when_no_inline: true
+  output_quality:
+    min_total_chars: 500
+    min_non_citation_chars: 300
+    min_analysis_blocks: 2
+    forbid_citation_only: true
   system_prompt: |
     คุณคือ Competitor Analyst
 

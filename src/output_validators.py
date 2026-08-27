@@ -137,10 +137,95 @@ def _validate_markdown(output: str, required_sections: list[str] | None = None) 
     return True, ""
 
 
+_CITATION_KEYWORDS = [
+    "แหล่งอ้างอิง",
+    "อ้างอิง",
+    "url",
+    "verify",
+    "citation",
+    "source",
+    "reference",
+    "แหล่งที่มา",
+    "เครดิต",
+    "link",
+]
+
+
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_BARE_URL_RE = re.compile(r"https?://\S+")
+
+
+def _is_citation_label(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in _CITATION_KEYWORDS)
+
+
+def _strip_citations_and_urls(output: str) -> str:
+    """ลบ markdown links, bare URLs ออกเพื่อวัดเนื้อหาจริง."""
+    text = _MD_LINK_RE.sub("", output)
+    text = _BARE_URL_RE.sub("", text)
+    return text
+
+
+def _count_analysis_blocks(output: str) -> int:
+    """นับ structural analysis signals หลายรูปแบบ (heading, bold label, table)."""
+    lines = output.split("\n")
+    blocks = 0
+    in_table = False
+
+    for line in lines:
+        # Markdown heading: ## หรือ ###
+        if re.match(r"^#{1,3}\s+\S", line):
+            blocks += 1
+            continue
+
+        # Bold section label: **หัวข้อ:** หรือ **หัวข้อ**
+        m = re.match(r"^\s*\*\*(.+?)\*\*\s*$", line)
+        if m and not _is_citation_label(m.group(1)):
+            blocks += 1
+            continue
+
+        # Table block: นับต่อเนื่องเป็นกลุ่มเดียว
+        if re.match(r"^\s*\|.*\|.*\|", line):
+            if not in_table:
+                in_table = True
+                blocks += 1
+            continue
+        in_table = False
+
+    return blocks
+
+
+def _validate_quality(output: str, quality: dict[str, Any]) -> tuple[bool, str]:
+    """Validate against an output_quality contract (minimum quality gate)."""
+    min_total = quality.get("min_total_chars", 0)
+    if min_total and len(output) < min_total:
+        return False, f"output สั้นเกินไป ({len(output)} < {min_total})"
+
+    stripped = _strip_citations_and_urls(output)
+    non_citation_len = len(stripped.replace(" ", "").replace("\n", ""))
+
+    if quality.get("forbid_citation_only", False) and non_citation_len == 0:
+        return False, "output มากกว่าครึ่งเป็น citations/URLs ไม่มีเนื้อหาวิเคราะหา"
+
+    min_non = quality.get("min_non_citation_chars", 0)
+    if min_non and non_citation_len < min_non:
+        return False, f"เนื้อหาทีไม่ใช่ citations น้อยเกินไป ({non_citation_len} < {min_non})"
+
+    min_blocks = quality.get("min_analysis_blocks", 0)
+    if min_blocks:
+        block_count = _count_analysis_blocks(output)
+        if block_count < min_blocks:
+            return False, f"output ขาด structural analysis blocks ({block_count} < {min_blocks})"
+
+    return True, ""
+
+
 def validate_output(
     agent_name: str,
     output: str,
     required_sections: list[str] | None = None,
+    output_quality: dict[str, Any] | None = None,
     context_flags: dict | None = None,
 ) -> tuple[bool, str]:
     """Return (ok, error_message) for an agent's raw text output.
@@ -158,6 +243,11 @@ def validate_output(
             return ok, err
     elif agent_cfg.get("output_format") == "json":
         ok, err = _validate_json(output)
+        if not ok:
+            return ok, err
+
+    if output_quality:
+        ok, err = _validate_quality(output, output_quality)
         if not ok:
             return ok, err
 
