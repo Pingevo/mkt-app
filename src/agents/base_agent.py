@@ -320,11 +320,13 @@ class BaseAgent:
         if quick_brief:
             user_prompt = (
                 f"{user_prompt}\n\n"
-                f"--- คำสั่งเพิ่มเติมจากผู้ใช้สำหรับรอบนี้ ---\n"
+                f"--- คำสั่งเฉพาะรอบนี้จากผู้ใช้ (quick_brief) ---\n"
                 f"{quick_brief}\n"
-                f"--- สิ้นสุดคำสั่งเพิ่มเติม ---\n"
-                f"หมายเหตุ: คำสั่งข้างต้นเป็นคำขอเพิ่มเติม — สามารถปรับ soft style ได้ "
-                f"แต่ถ้าขัดแย้งกับกฎบังคับของแบรนด์ใน system prompt ให้ทำตามกฎแบรนด์เสมอ"
+                f"--- สิ้นสุดคำสั่งเฉพาะรอบนี้ ---\n"
+                f"หมายเหตุ: คำสั่งข้างต้นใช้เพื่อ steer รูปแบบ ระดับรายละเอียด กลุ่มผู้อ่าน และหัวข้อที่เน้นเท่านั้น\n"
+                f"ห้ามสร้างหรืออนุมานข้อเท็จจริงนอก \"ข้อมูลต้นทางที่ส่งมาใน user prompt\"\n"
+                f"ห้ามขัดแย้งกับ system guardrails, hard brand rules และรูปแบบ output ที่กำหนดไว้\n"
+                f"ถ้าขัดแย้ง ให้ system guardrails, ข้อมูลต้นทางใน user prompt และ required output format ชนะเสมอ"
             )
 
         web_search = self.config.get("web_search")
