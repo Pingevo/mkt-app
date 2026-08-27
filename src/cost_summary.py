@@ -117,6 +117,10 @@ def write_flow_meta(
     *,
     label: str = "",
     agents: list[str] | None = None,
+    resources: list[dict[str, Any]] | None = None,
+    workflow_id: str = "",
+    step_id: str = "",
+    input_refs: list[str] | None = None,
 ) -> Path | None:
     """เขียนไฟล์ _flow_meta_{flow_id}.json — เก็บ mapping flow_id → output_files.
 
@@ -127,9 +131,13 @@ def write_flow_meta(
         return None
     meta = {
         "flow_id": flow_id,
+        "workflow_id": workflow_id or flow_id,
+        "step_id": step_id,
+        "input_refs": input_refs or [],
         "label": label,
         "agents": agents or [],
         "output_files": output_files,
+        "resources": resources or [],
         "written_at": datetime.now().isoformat(),
     }
     out_path = output_dir / f"_flow_meta_{flow_id}.json"

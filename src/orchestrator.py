@@ -202,7 +202,8 @@ class Orchestrator:
 
     def run_product_spec(
         self, raw_data: str, product_images: list[str] | None = None, llm: LLMClient | None = None,
-        quick_brief: str = "",
+        quick_brief: str = "", resource_context: str = "",
+        extra_image_paths: list[str] | None = None,
     ) -> str:
         """Run product_spec agent — สร้างเอกสารสเปคสินค้าเป็น deliverable สำหรับ user.
 
@@ -220,7 +221,10 @@ class Orchestrator:
             prompt = agent.build_prompt(raw_data, product_images or self.product_images)
             # ส่งรูปจริงให้ agent (retrieve-then-read — agent เห็นรูปเหมือนมนุษย์)
             image_paths = self._get_product_image_paths() if self.product_id else (product_images or [])
-            result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
+            result = agent.run(
+                prompt, quick_brief=quick_brief, image_paths=image_paths,
+                resource_context=resource_context, extra_image_paths=extra_image_paths,
+            )
             self.results["product_spec"] = result
 
             return result
@@ -277,7 +281,8 @@ class Orchestrator:
 
     def run_competitor_analysis(
         self, product_spec: str, competitor_data: str | None = None, llm: LLMClient | None = None,
-        quick_brief: str = "",
+        quick_brief: str = "", resource_context: str = "",
+        extra_image_paths: list[str] | None = None,
     ) -> str:
         own = llm is None
         if own:
@@ -289,7 +294,10 @@ class Orchestrator:
             # If competitor_data is None or empty, agent will search web itself
             prompt = agent.build_prompt(product_data, competitor_data or "")
             image_paths = self._get_product_image_paths()
-            result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
+            result = agent.run(
+                prompt, quick_brief=quick_brief, image_paths=image_paths,
+                resource_context=resource_context, extra_image_paths=extra_image_paths,
+            )
             self.results["competitor_analysis"] = result
 
             return result
@@ -299,7 +307,8 @@ class Orchestrator:
 
     def run_campaign_strategy(
         self, product_spec: str, competitor_analysis: str, llm: LLMClient | None = None,
-        quick_brief: str = "",
+        quick_brief: str = "", resource_context: str = "",
+        extra_image_paths: list[str] | None = None,
     ) -> str:
         own = llm is None
         if own:
@@ -317,7 +326,10 @@ class Orchestrator:
             }
             prompt = agent.build_prompt(context)
             image_paths = self._get_product_image_paths()
-            result = agent.run(prompt, quick_brief=quick_brief, image_paths=image_paths)
+            result = agent.run(
+                prompt, quick_brief=quick_brief, image_paths=image_paths,
+                resource_context=resource_context, extra_image_paths=extra_image_paths,
+            )
             self.results["campaign_strategy"] = result
             return result
         finally:
@@ -333,6 +345,8 @@ class Orchestrator:
         quick_brief: str = "",
         media_type: str = "",
         asset_summary: str = "",
+        resource_context: str = "",
+        extra_image_paths: list[str] | None = None,
     ) -> str:
         own = llm is None
         if own:
@@ -408,6 +422,7 @@ class Orchestrator:
             import json as _json_cc
             raw_result = agent.run(
                 prompt, quick_brief=quick_brief, image_paths=image_paths,
+                resource_context=resource_context, extra_image_paths=extra_image_paths,
                 response_format=CONTENT_RESPONSE_FORMAT,
             )
             # แปลง JSON → markdown สำหรับ display + เก็บ JSON ดิบไว้สำหรับ parse_media_prompts
@@ -1014,6 +1029,8 @@ class Orchestrator:
         platforms: list[str] | None = None,
         product_count: int = 1,
         status_callback=None,
+        resource_context: str = "",
+        extra_image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """Auto mode — agent เลือกสินค้าเอง + สร้างคอนเทนต์ที่ไม่ซ้ำ.
 
@@ -1143,6 +1160,8 @@ class Orchestrator:
                         llm=llm, quick_brief=attempt_brief,
                         media_type=media_type,
                         asset_summary=asset_summary,
+                        resource_context=resource_context,
+                        extra_image_paths=extra_image_paths,
                     )
 
                     # ดึง caption เพื่อตรวจซ้ำ

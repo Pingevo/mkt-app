@@ -1,0 +1,25 @@
+# ============================================================
+# Run-scoped file attachments
+# ไฟล์ที่ user แนบติดกับการรัน ไม่เข้า Product DB หรือ Brand Asset Library
+# ============================================================
+
+enabled: true
+storage_dir: cache/run_resources
+ttl_hours: 24
+max_files_per_flow: 5
+max_file_size_mb: 15
+max_total_size_mb: 30
+max_extracted_chars_total: 120000
+max_extracted_chars_per_file: 50000
+allowed_extensions:
+  - .txt
+  - .md
+  - .csv
+  - .pdf
+  - .xlsx
+  - .xls
+  - .docx
+  - .png
+  - .jpg
+  - .jpeg
+  - .webp

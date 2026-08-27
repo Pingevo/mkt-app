@@ -37,6 +37,7 @@ _AUX_CONFIG_FILES = {
     "media_gen":       ("media.yaml",           True),
     "ingestion":       ("ingestion.yaml",       True),
     "web_search":      ("web_search.yaml",      True),
+    "run_resources":   ("run_resources.yaml",   True),
 }
 
 

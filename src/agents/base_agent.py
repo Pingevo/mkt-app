@@ -271,7 +271,8 @@ class BaseAgent:
         return "\n\n".join(sections)
 
     def run(self, user_prompt: str, quick_brief: str = "", image_paths: list[str] | None = None,
-            response_format: dict | None = None) -> str:
+            extra_image_paths: list[str] | None = None,
+            resource_context: str = "", response_format: dict | None = None) -> str:
         """Generate output then review/refine it.
 
         Returns the final (possibly refined) text response.
@@ -295,6 +296,16 @@ class BaseAgent:
         """
         system_prompt = self._build_system_prompt()
 
+        if extra_image_paths is None:
+            extra_image_paths = []
+        if image_paths is None:
+            image_paths = []
+        all_image_paths = image_paths + extra_image_paths
+
+        # Append resource context as untrusted user-provided documents
+        if resource_context:
+            user_prompt = f"{user_prompt}\n\n{resource_context}"
+
         # Append quick brief (per-run instruction) to user prompt
         # ถือว่าเป็นคำสั่งบังคับจากผู้ใช้ ไม่ใช่แค่บริบทเสริม
         if quick_brief:
@@ -315,7 +326,7 @@ class BaseAgent:
             # OpenRouter จะรัน agentic loop ให้: model ค้น → อ่านผล → คิด → ปรับ query → ค้นต่อเอง
             # จนหมด budget (max_uses / max_total_results) แล้วคืน final response พร้อม citations
             console.print(f"\n[cyan]กำลังสร้างผลงาน (web search agentic)... ({self.display_name})[/cyan]\n")
-            user_content = self._build_multimodal_content(user_prompt, image_paths)
+            user_content = self._build_multimodal_content(user_prompt, all_image_paths)
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -337,7 +348,7 @@ class BaseAgent:
         else:
             # --- Non-web-search flow (เช่น content_creator ที่ไม่ค้น) ---
             console.print(f"\n[cyan]กำลังสร้างผลงาน... ({self.display_name})[/cyan]\n")
-            user_content = self._build_multimodal_content(user_prompt, image_paths)
+            user_content = self._build_multimodal_content(user_prompt, all_image_paths)
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -374,7 +385,7 @@ class BaseAgent:
                     quick_brief=quick_brief,
                     response_format=response_format,
                     user_prompt=user_prompt,
-                    image_paths=image_paths,
+                    image_paths=all_image_paths,
                 )
             except Exception as review_exc:
                 # reviewer ล้มเหลว (timeout, exception) → คืน draft พร้อม warning

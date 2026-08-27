@@ -19,14 +19,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request, UploadFile, File, Form
+from fastapi import FastAPI, Request, UploadFile, File, Form, Query
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse, Response
 import uvicorn
 
 from src.orchestrator import Orchestrator
 from src.data_loader import detect_data_files
 from src.file_loader import load_file
-from src.config_loader import get_env
+from src.run_resources import RunResourceStore
+from src.config_loader import get_env, load_config, get_section
 from src.brand_loader import load_brand_visual, load_product_profile
 from src import media_gen
 from src import product_db
@@ -58,6 +59,12 @@ BRAND_DIR = PROJECT_ROOT / "brand"
 CACHE_DIR = PROJECT_ROOT / "cache"
 
 app = FastAPI(title="MKTApp Viewer")
+
+# Run-scoped attachment store
+_resource_store = RunResourceStore(
+    PROJECT_ROOT,
+    config=get_section(load_config(), "run_resources", {}),
+)
 
 # Central conflict cache — ตรวจครั้งเดียวตอน brand/agent settings เปลี่ยน
 # ทุก UI ดึงจาก GET /api/conflicts แทนการตรวจใหม่ทุกครั้ง
@@ -2460,7 +2467,9 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                       platforms: list[str] | None = None,
                       media_type: str = "",
                       status_callback=None,
-                      folders: list[str] | None = None) -> list[tuple[str, str | None]]:
+                      folders: list[str] | None = None,
+                      resource_context: str = "",
+                      extra_image_paths: list[str] | None = None) -> list[tuple[str, str | None]]:
     """Run one agent, return list of (result_text, filepath) tuples.
 
     context: {use_competitor: bool, use_campaign: bool} — user เลือกว่าจะใช้ context อะไร
@@ -2471,6 +2480,8 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
     """
     if context is None:
         context = {"use_competitor": True, "use_campaign": True}
+    if extra_image_paths is None:
+        extra_image_paths = []
 
     # Set product_id for ALL agents so _save_to_ready and save_result use the correct folder
     orch.product_id = folder
@@ -2489,7 +2500,14 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
         # ถ้าไม่มี text แต่มีรูป → ใช้รูปเป็นข้อมูลหลัก (agent เห็นรูปจริงผ่าน multimodal)
         if not raw_data and not image_paths:
             raise ValueError(f"ไม่พบข้อมูลในโฟลเดอร์ {folder} — ต้องมีไฟล์ text หรือรูปอย่างน้อย 1 ไฟล์")
-        result = orch.run_product_spec(raw_data, image_paths, llm=llm, quick_brief=quick_brief)
+        run_kwargs: dict[str, Any] = {}
+        if resource_context:
+            run_kwargs["resource_context"] = resource_context
+        if extra_image_paths:
+            run_kwargs["extra_image_paths"] = extra_image_paths
+        result = orch.run_product_spec(
+            raw_data, image_paths, llm=llm, quick_brief=quick_brief, **run_kwargs
+        )
         orch.results["product_spec"] = result
         if save_output:
             saved = orch.save_result("product_spec", str(output_dir))
@@ -2498,7 +2516,14 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
 
     elif agent_key == "competitor_analysis":
         # ดึงข้อมูลสินค้าจาก DB (orchestrator จัดการเอง) — ไม่ต้องมี product_spec.txt ใน cache/
-        result = orch.run_competitor_analysis("", None, llm=llm, quick_brief=quick_brief)
+        run_kwargs: dict[str, Any] = {}
+        if resource_context:
+            run_kwargs["resource_context"] = resource_context
+        if extra_image_paths:
+            run_kwargs["extra_image_paths"] = extra_image_paths
+        result = orch.run_competitor_analysis(
+            "", None, llm=llm, quick_brief=quick_brief, **run_kwargs
+        )
         orch.results["competitor_analysis"] = result
         if save_output:
             saved = orch.save_result("competitor_analysis", str(output_dir))
@@ -2511,7 +2536,14 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
             analysis_text = context["competitor_analysis"]
         else:
             analysis_text = ""
-        result = orch.run_campaign_strategy("", analysis_text, llm=llm, quick_brief=quick_brief)
+        run_kwargs: dict[str, Any] = {}
+        if resource_context:
+            run_kwargs["resource_context"] = resource_context
+        if extra_image_paths:
+            run_kwargs["extra_image_paths"] = extra_image_paths
+        result = orch.run_campaign_strategy(
+            "", analysis_text, llm=llm, quick_brief=quick_brief, **run_kwargs
+        )
         orch.results["campaign_strategy"] = result
         if save_output:
             saved = orch.save_result("campaign_strategy", str(output_dir))
@@ -2589,10 +2621,15 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                 if platform_label:
                     multi_brief = (multi_brief or "") + f"\nแพลตฟอร์มที่ต้องสร้างสำหรับโพสต์นี้: {platform_label} เท่านั้น"
 
+                run_kwargs: dict[str, Any] = {}
+                if resource_context:
+                    run_kwargs["resource_context"] = resource_context
+                if extra_image_paths:
+                    run_kwargs["extra_image_paths"] = extra_image_paths
                 result = orch.run_content_creator(
                     "", analysis_text, campaign_text,
                     llm=llm, quick_brief=multi_brief,
-                    media_type=media_type,
+                    media_type=media_type, **run_kwargs
                 )
 
                 # parse + script review (เหมือน auto mode)
@@ -2997,6 +3034,8 @@ async def api_run_flows(request: Request) -> StreamingResponse:
             # ผูก LLM call ทั้งหมดใน thread นี้เข้ากับ flow_id
             flow_id = f"flow_{uuid.uuid4().hex[:8]}"
             set_flow_id(flow_id)
+            workflow_id = flow_id
+            step_id = f"{workflow_id}_step_0"
             flow_output_files: list[str] = []  # เก็บ output file paths ของ flow นี้
 
             llm = None
@@ -3039,6 +3078,35 @@ async def api_run_flows(request: Request) -> StreamingResponse:
 
                 target_label = folder_label if is_combined else single_folder
 
+                # Resolve run-scoped resources for this flow
+                upload_session_id = flow.get("upload_session_id", "")
+                resource_refs = flow.get("resource_refs", [])
+                input_refs: list[str] = [f"product:{f}" for f in folders] + resource_refs
+                resource_context = ""
+                extra_image_paths: list[str] = []
+                resource_trace: list[dict[str, Any]] = []
+                if resource_refs:
+                    if not upload_session_id:
+                        raise ValueError("resource_refs ต้องระบุ upload_session_id")
+                    if not upload_session_id:
+                        raise ValueError("resource_refs ต้องระบุ upload_session_id")
+                    records: list[dict[str, Any]] = []
+                    missing: list[str] = []
+                    for ref in resource_refs:
+                        rec = _resource_store.resolve_input_ref(ref, upload_session_id)
+                        if rec:
+                            records.append(rec)
+                        else:
+                            missing.append(ref)
+                    if missing:
+                        raise ValueError(f"resource_refs ไม่ถูกต้องหรือหมดอายุ: {missing}")
+                    ctx = _resource_store.build_resource_context(
+                        records, workflow_id=workflow_id, step_id=step_id,
+                    )
+                    resource_context = ctx["text"]
+                    extra_image_paths = ctx["image_paths"]
+                    resource_trace = ctx["trace"]
+
                 def run_one_agent(agent_key: str, product: str, context: dict) -> str:
                     nonlocal orch, llm, output_dir
                     if _cancel_requested:
@@ -3061,6 +3129,8 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                             platforms=platforms, media_type=media_type,
                             status_callback=_status_cb,
                             folders=folders,
+                            resource_context=resource_context,
+                            extra_image_paths=extra_image_paths,
                         )
                         result_text = results[0][0] if results else ""
                         file_path = results[0][1] if results else None
@@ -3106,11 +3176,15 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                         agents=flow.get("agents", []),
                         products=product_label,
                     )
-                    # เก็บ mapping output_file → flow_id เพื่อให้ "สร้างสื่อภายหลัง" หา flow_id ได้
+                    # เก็บ mapping output_file → flow_id พร้อม workflow + resource trace
                     write_flow_meta(
                         output_dir, flow_id, flow_output_files,
                         label=f"Flow {flow_idx+1}: {agent_label} — {product_label}",
                         agents=flow.get("agents", []),
+                        resources=resource_trace,
+                        workflow_id=workflow_id,
+                        step_id=step_id,
+                        input_refs=input_refs,
                     )
                 except Exception:
                     pass
@@ -3151,6 +3225,52 @@ async def api_run_flows(request: Request) -> StreamingResponse:
             yield event
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/run-resources/upload")
+async def api_run_resources_upload(
+    files: list[UploadFile] = File(...),
+    upload_session_id: str = Form(""),
+) -> JSONResponse:
+    """Upload run-scoped attachments. Returns upload_session_id + resource list."""
+    if not _resource_store.config.get("enabled", True):
+        return JSONResponse({"error": "run resources disabled"}, status_code=503)
+
+    if not upload_session_id:
+        upload_session_id = _resource_store.create_upload_session()
+
+    items: list[dict[str, Any]] = []
+    for f in files:
+        content = await f.read()
+        items.append({
+            "filename": f.filename or "upload",
+            "content": content,
+            "media_type": f.content_type,
+        })
+
+    result = _resource_store.upload_files(items, session_id=upload_session_id)
+    return JSONResponse(result)
+
+
+@app.delete("/api/run-resources/{resource_id}")
+async def api_run_resources_delete(
+    resource_id: str,
+    upload_session_id: str = Query(...),
+) -> JSONResponse:
+    """Delete a run-scoped resource."""
+    ok = _resource_store.delete_resource(resource_id, upload_session_id)
+    if not ok:
+        return JSONResponse({"error": "resource not found or access denied"}, status_code=404)
+    return JSONResponse({"deleted": True, "resource_id": resource_id})
+
+
+@app.on_event("startup")
+async def _run_resource_cleanup() -> None:
+    """Remove expired run-scoped resources at server startup."""
+    try:
+        _resource_store.cleanup_expired()
+    except Exception as e:
+        print(f"[run_resources] cleanup ไม่สำเร็จ: {e}", flush=True)
 
 
 # ============================================================
@@ -3323,6 +3443,33 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                 llm = orch.make_client()
                 _active_llms.append(llm)
 
+                # Resolve run-scoped resources for auto flow
+                workflow_id = flow_id
+                step_id = f"{workflow_id}_step_0"
+                upload_session_id = body.get("upload_session_id", "")
+                resource_refs = body.get("resource_refs", [])
+                resource_context = ""
+                extra_image_paths: list[str] = []
+                resource_trace: list[dict[str, Any]] = []
+                input_refs: list[str] = list(resource_refs)
+                if resource_refs:
+                    records: list[dict[str, Any]] = []
+                    missing: list[str] = []
+                    for ref in resource_refs:
+                        rec = _resource_store.resolve_input_ref(ref, upload_session_id)
+                        if rec:
+                            records.append(rec)
+                        else:
+                            missing.append(ref)
+                    if missing:
+                        raise ValueError(f"resource_refs ไม่ถูกต้องหรือหมดอายุ: {missing}")
+                    ctx = _resource_store.build_resource_context(
+                        records, workflow_id=workflow_id, step_id=step_id,
+                    )
+                    resource_context = ctx["text"]
+                    extra_image_paths = ctx["image_paths"]
+                    resource_trace = ctx["trace"]
+
                 def _status_cb(msg):
                     q.put_nowait(_sse("status", msg, agent="content_creator"))
 
@@ -3367,6 +3514,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
 
                     # อ่านข้อมูลสินค้าที่เลือก
                     folder_label = " + ".join(chosen_pids)
+                    input_refs = [f"product:{p}" for p in chosen_pids] + list(resource_refs)
                     all_raw = []
                     all_images = []
                     all_ready = {}
@@ -3400,6 +3548,8 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                 platforms=platforms, media_type=media_type,
                                 status_callback=_agent_status,
                                 folders=chosen_pids,
+                                resource_context=resource_context,
+                                extra_image_paths=extra_image_paths,
                             )
                             result_text = results_list[0][0] if results_list else ""
                             file_path = results_list[0][1] if results_list else None
@@ -3458,6 +3608,8 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                         platforms=current_platform,
                         product_count=product_count,
                         status_callback=_status_cb,
+                        resource_context=resource_context,
+                        extra_image_paths=extra_image_paths,
                     )
 
                     if "error" in result:
@@ -3479,6 +3631,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     markdown = result.get("markdown", content)
                     chosen_pids = result.get("product_ids", [result.get("product_id", "AUTO")])
                     chosen_pid = " + ".join(chosen_pids) if len(chosen_pids) > 1 else chosen_pids[0]
+                    input_refs = [f"product:{p}" for p in chosen_pids] + list(resource_refs)
 
                     # เซฟไฟล์
                     run_id = _make_run_id()
@@ -3596,11 +3749,15 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                         label=f"AUTO — {', '.join(agents)}",
                         agents=agents,
                     )
-                    # เก็บ mapping output_file → flow_id เพื่อให้ "สร้างสื่อภายหลัง" หา flow_id ได้
+                    # เก็บ mapping output_file → flow_id พร้อม workflow + resource trace
                     write_flow_meta(
                         output_dir_for_cost, flow_id, flow_output_files,
                         label=f"AUTO — {', '.join(agents)}",
                         agents=agents,
+                        resources=resource_trace,
+                        workflow_id=workflow_id,
+                        step_id=step_id,
+                        input_refs=input_refs,
                     )
                 except Exception:
                     pass

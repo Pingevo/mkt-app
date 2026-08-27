@@ -147,9 +147,13 @@
     html += '<div class="wizard-nav flow-box-nav" style="align-items:center">';
     html += '<button class="btn btn-secondary" id="flow-back-' + idx + '" data-flow-idx="' + idx + '" onclick="wizardPrevStep(this.dataset.flowIdx)">← กลับ</button>';
     html += '<input type="text" id="flow-quick-brief-' + idx + '" data-flow-idx="' + idx + '" value="' + escapeHtml(flow.quickBrief || '') + '" ' + (_isFlowActive(idx) ? 'disabled ' : '') + 'oninput="onWizardQuickBrief(parseInt(this.dataset.flowIdx))" placeholder="คำสั่งเพิ่มเติมสำหรับ flow นี้..." style="flex:1;min-width:0;background:#161922;border:1px solid #252a3a;border-radius:6px;padding:6px 10px;color:#e4e4e7;font-size:13px;margin:0 8px;">';
+    html += '<input type="file" id="flow-file-input-' + idx + '" data-flow-idx="' + idx + '" multiple onchange="onWizardAttachFiles(parseInt(this.dataset.flowIdx), this.files)" style="display:none">';
+    html += '<button class="btn btn-secondary" id="flow-attach-' + idx + '" data-flow-idx="' + idx + '" onclick="document.getElementById(\'flow-file-input-' + idx + '\').click()" ' + (_isFlowActive(idx) ? 'disabled ' : '') + '>📎 แนบไฟล์</button>';
     html += '<button class="btn btn-secondary" id="flow-schedule-' + idx + '" data-flow-idx="' + idx + '" onclick="openScheduleModal(this.dataset.flowIdx)">📅 ตั้งเวลา</button>';
     html += '<button class="btn btn-primary" id="flow-next-' + idx + '" data-flow-idx="' + idx + '" onclick="wizardNextStep(this.dataset.flowIdx)">ถัดไป →</button>';
     html += '</div>';
+
+    html += '<div id="flow-attachments-' + idx + '" style="margin-top:8px;font-size:13px;color:#a1a1aa;"></div>';
 
     html += '</div>';
     return html;
@@ -230,12 +234,14 @@
     if (step === 2) renderStep2(idx);
     if (step === 3) renderStep3(idx);
     if (step === 4) renderStep4(idx);
+    renderAttachments(idx);
   };
 
   function wizardCanNext(idx) {
     const flow = flows[idx];
     if (!flow) return false;
     const step = flowSteps[idx] || 1;
+    if (hasUploadingResources(flow)) return false;
     if (step === 1) return flow.isAuto ? true : flow.products.length > 0;
     if (step === 2) return flow.agents.length > 0;
     return true;
@@ -285,6 +291,8 @@
       autoCount: 2,
       products: [],
       quickBrief: '',
+      resources: [],
+      uploadSessionId: '',
       agents: [],
       options: {
         platform: ['facebook', 'tiktok'],
@@ -690,6 +698,80 @@
     if (el) el.disabled = disabled;
   };
 
+  function renderAttachments(idx) {
+    const flow = getCurrentFlow(idx);
+    if (!flow) return;
+    const el = document.getElementById('flow-attachments-' + idx);
+    if (!el) return;
+    let html = '';
+    for (const r of flow.resources || []) {
+      const size = Math.ceil(((r.size_bytes || r.size) || 0) / 1024);
+      const statusText = r.status === 'ready' ? 'พร้อมใช้' : r.status === 'error' ? 'ผิดพลาด' : r.status;
+      html += '<div style="display:inline-flex;align-items:center;gap:8px;margin-right:12px;margin-bottom:4px;padding:4px 8px;background:#1f2430;border-radius:6px;">';
+      html += escapeHtml(r.name) + ' ' + size + ' KB · ' + statusText;
+      if (r.status !== 'uploading') {
+        html += ' <span style="cursor:pointer;color:#f87171" onclick="removeWizardResource(' + idx + ', \'' + escapeHtml(r.resource_id || r.resourceId) + '\')">×</span>';
+      }
+      html += '</div>';
+    }
+    el.innerHTML = html;
+  }
+
+  window.onWizardAttachFiles = async function (idx, fileList) {
+    idx = parseInt(idx);
+    const flow = getCurrentFlow(idx);
+    if (!flow || !fileList || !fileList.length) return;
+    const uploading = Array.from(fileList).map(f => ({
+      resourceId: '',
+      name: f.name,
+      size: f.size,
+      status: 'uploading'
+    }));
+    flow.resources = (flow.resources || []).concat(uploading);
+    renderAttachments(idx);
+    const form = new FormData();
+    if (flow.uploadSessionId) {
+      form.append('upload_session_id', flow.uploadSessionId);
+    }
+    for (const f of fileList) {
+      form.append('files', f);
+    }
+    try {
+      const res = await fetch('/api/run-resources/upload', { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Upload failed');
+      }
+      flow.uploadSessionId = data.upload_session_id || flow.uploadSessionId;
+      const remaining = (flow.resources || []).filter(r => r.status !== 'uploading');
+      flow.resources = remaining.concat(data.resources || []);
+    } catch (e) {
+      flow.resources = (flow.resources || []).filter(r => r.status !== 'uploading');
+      alert('ผิดพลาดตอนอัปโหลด: ' + e.message);
+    }
+    renderAttachments(idx);
+    updateWizardNav(idx);
+  };
+
+  window.removeWizardResource = async function (idx, resourceId) {
+    idx = parseInt(idx);
+    const flow = getCurrentFlow(idx);
+    if (!flow) return;
+    flow.resources = (flow.resources || []).filter(r => (r.resource_id || r.resourceId) !== resourceId);
+    renderAttachments(idx);
+    if (flow.uploadSessionId) {
+      try {
+        await fetch('/api/run-resources/' + encodeURIComponent(resourceId) + '?upload_session_id=' + encodeURIComponent(flow.uploadSessionId), {
+          method: 'DELETE'
+        });
+      } catch (e) {}
+    }
+  };
+
+  function hasUploadingResources(flow) {
+    return (flow.resources || []).some(r => r.status === 'uploading' || r.status === 'processing');
+  }
+
   // --- Step 4: Review ---
   function renderStep4(idx) {
     const el = document.getElementById('flow-review-content-' + idx);
@@ -732,6 +814,13 @@
       html += '</div>';
     }
 
+    if ((f.resources || []).length) {
+      html += '<div class="review-opts">ไฟล์แนบ: ' + f.resources
+        .filter(r => r.status === 'ready')
+        .map(r => escapeHtml(r.name))
+        .join(', ') + '</div>';
+    }
+
     html += '</div>';
     el.innerHTML = html;
   }
@@ -752,6 +841,10 @@
       auto_count: f.autoCount,
       content_count: f.options.count * f.options.platform.length,
       quick_brief: f.quickBrief || '',
+      upload_session_id: f.uploadSessionId || '',
+      resource_refs: (f.resources || [])
+        .filter(r => r.status === 'ready')
+        .map(r => 'resource:' + r.resource_id),
       platforms: f.options.platform,
       media_type: f.options.media_type,
       media_when: f.options.media_when,
@@ -973,6 +1066,10 @@
           media_when: flow.options.media_when,
           auto_image: flow.options.media_when === 'auto' ? flow.options.auto_image : false,
           auto_video: flow.options.media_when === 'auto' ? flow.options.auto_video : false,
+          upload_session_id: flow.uploadSessionId || '',
+          resource_refs: (flow.resources || [])
+            .filter(r => r.status === 'ready')
+            .map(r => 'resource:' + r.resource_id),
           // content_count = จำนวนโพสต์ต่อแพลตฟอร์ม (ไม่ใช่รวมทุกแพลตฟอร์ม)
           // backend จะวนสร้าง platforms ทั้งหมด × content_count โดยเลือกสินค้าครั้งเดียวต่อรอบ
           content_count: flow.options.count,
