@@ -505,8 +505,9 @@ class BaseAgent:
     def _append_citations_and_verify(self, output: str, annotations: list[dict[str, Any]]) -> str:
         """แปะ URL จริงจาก annotations ต่อท้าย output และ verify ด้วย web_fetch.
 
-        แปะเฉพาะ URL ที่ไม่ซ้ำ. ถ้า verify_urls เปิด → เรียก web_fetch ตรวจทีละ URL
-        แล้วแปะเฉพาะ URL ที่ verify ผ่าน (มีเนื้อหาเกี่ยวข้อง).
+        แปะเฉพาะ URL ที่ไม่ซ้ำ. ถ้า agent มี _assess_source_relevance จะกรอง topic
+        relevance ก่อน: relevant=False ทิ้ง, relevant=True เก็บไม่ fetch,
+        relevant=None ส่งเข้า web_fetch ตรวจแบบเดิม.
         """
         if not annotations:
             return output
@@ -528,15 +529,38 @@ class BaseAgent:
                 seen.add(url)
                 unique_urls.append(a)
 
-        citation_section = "\n\n---\n\n**แหล่งอ้างอิงจริงจากการค้นหา:**\n"
-        citation_section += "\n".join(
-            f"- [{a.get('title') or a.get('url')}]({a.get('url')})"
-            for a in unique_urls
-        )
-        output += citation_section
+        relevant_annotations: list[dict[str, Any]] = []
+        to_verify: list[dict[str, Any]] = []
 
-        if verify_urls:
-            verified = self._verify_urls_with_fetch(unique_urls)
+        assess = getattr(self, "_assess_source_relevance", None)
+        if callable(assess):
+            for a in unique_urls:
+                result = assess(a)
+                rel = result.get("relevant")
+                if rel is False:
+                    continue
+                if rel is True:
+                    relevant_annotations.append(a)
+                else:  # None / unknown
+                    to_verify.append(a)
+        else:
+            to_verify = unique_urls
+
+        # แสดง source ทีไม่ถูก reject ใน section หลัก (relevant=True กับ unknown)
+        # source ที unknown ยังตรวจ verify ต่อถ้า verify_urls เปิด
+        citation_annotations = relevant_annotations + to_verify
+
+        if citation_annotations:
+            output += (
+                "\n\n---\n\n**แหล่งอ้างอิงจริงจากการค้นหา:**\n"
+                + "\n".join(
+                    f"- [{a.get('title') or a.get('url')}]({a.get('url')})"
+                    for a in citation_annotations
+                )
+            )
+
+        if verify_urls and to_verify:
+            verified = self._verify_urls_with_fetch(to_verify)
             if verified:
                 output += f"\n\n**URL ที่ verify ผ่าน (หน้ามีเนื้อหาเกี่ยวข้อง):**\n{verified}"
         return output

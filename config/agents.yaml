@@ -151,6 +151,31 @@ competitor_analysis:
   max_review_iterations: 0
   review_temperature: 0.2
   web_search: true
+  relevance_policy:
+    target_category_keywords:
+      - smartwatch
+      - smart watch
+      - สมาร์ทวอทช์
+      - นาฬิกาอัจฉริยะ
+    mismatch_keywords:
+      - keyboard
+      - mechanical keyboard
+      - gaming keyboard
+      - keycaps
+      - mouse
+      - gaming mouse
+      - headphones
+      - earbuds
+    subcategory_mismatch_keywords:
+      - kids
+      - children
+      - elderly
+    market_keywords:
+      - smart watch
+      - smartwatch
+      - สมาร์ทวอทช์
+      - นาฬิกาอัจฉริยะ
+      - smartband
   system_prompt: |
     คุณคือ Competitor Analyst
 
