@@ -13,11 +13,19 @@ These tests exercise the full `BaseAgent.run()` flow for the
 
 from __future__ import annotations
 
+from pathlib import Path
+from unittest.mock import MagicMock
+
 import pytest
 
 from src.agents.competitor_analysis import CompetitorAnalysisAgent
+from src.agents.base_agent import BaseAgent
 from src.llm_client import LLMClient
 from src.config_loader import load_config, get_agent_config
+from src.brand_priority import load_brand_priority
+from src.brand_loader import load_brand_reference
+
+BRAND_DIR = Path(__file__).resolve().parent.parent / "brand"
 
 
 class FakeLLM:
@@ -220,3 +228,66 @@ def test_system_prompt_forbids_future_extrapolation():
     assert "อนาคต" in system or "คาดการณ์" in system, (
         "system prompt ควรห้ามคาดการณ์อนาคตหรือข้อมูลที่ไม่มีหลักฐาน"
     )
+
+
+def test_competitor_analysis_config_uses_brand_reference_not_brand_context():
+    """competitor_analysis ต้องเปิด brand_reference และปิด brand_context"""
+    cfg = _competitor_config()
+    assert cfg.get("use_brand_context") is False
+    assert cfg.get("use_brand_reference") is True
+
+
+def test_competitor_analysis_system_prompt_has_reference_no_rules():
+    """prompt ของ competitor_analysis ต้องมี brand_reference แต่ไม่มี brand hard/soft rules."""
+    cfg = _competitor_config()
+    brand_rules = load_brand_priority(BRAND_DIR)
+    brand_reference = load_brand_reference(BRAND_DIR, product_id="CACGO K77")
+    agent = CompetitorAnalysisAgent(
+        cfg,
+        FakeLLM(),
+        brand_rules=brand_rules,
+        brand_reference=brand_reference,
+    )
+    system = agent._build_system_prompt()
+
+    # ไม่ควรมี writing rules จาก brand
+    assert "คำ/วลีที่ห้ามใช้" not in system
+    assert "คำที่ควรใช้แทน" not in system
+    assert "บุคลิก" not in system
+    assert "โทนเสียง" not in system
+
+    # ต้องมี analytical context จาก brand_reference
+    assert "Target Audience" in system
+    assert "Product Positioning" in system
+    assert "CACGO K77" in system
+
+
+def test_competitor_analysis_prompt_shorter_without_brand_context():
+    """ปิด brand_context ต้องทำให้ system prompt สั้นลง."""
+    brand_rules = load_brand_priority(BRAND_DIR)
+    brand_reference = load_brand_reference(BRAND_DIR, product_id="CACGO K77")
+    base_cfg = _competitor_config()
+
+    cfg_with_context = {**base_cfg, "use_brand_context": True, "use_brand_reference": False}
+    cfg_without_context = {**base_cfg, "use_brand_context": False, "use_brand_reference": True}
+
+    agent_with = CompetitorAnalysisAgent(cfg_with_context, FakeLLM(), brand_rules=brand_rules, brand_reference=brand_reference)
+    agent_without = CompetitorAnalysisAgent(cfg_without_context, FakeLLM(), brand_rules=brand_rules, brand_reference=brand_reference)
+
+    prompt_with = agent_with._build_system_prompt()
+    prompt_without = agent_without._build_system_prompt()
+
+    assert len(prompt_without) < len(prompt_with)
+
+
+def test_content_creator_still_uses_brand_context():
+    """agent อื่น เช่น content_creator ต้องยังได้รับ brand hard/soft rules."""
+    cfg = get_agent_config(load_config(), "content_creator")
+    brand_rules = load_brand_priority(BRAND_DIR)
+    brand_reference = load_brand_reference(BRAND_DIR)
+    agent = BaseAgent(cfg, MagicMock(), brand_rules=brand_rules, brand_reference=brand_reference)
+    system = agent._build_system_prompt()
+
+    assert "คำ/วลีที่ห้ามใช้" in system
+    assert "บุคลิก" in system
+    assert "คำที่ควรใช้แทน" in system

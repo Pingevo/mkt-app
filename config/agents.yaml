@@ -151,6 +151,8 @@ competitor_analysis:
   max_review_iterations: 0
   review_temperature: 0.2
   web_search: true
+  use_brand_context: false
+  use_brand_reference: true
   relevance_policy:
     target_category_keywords:
       - smartwatch
