@@ -217,6 +217,7 @@ competitor_analysis:
     - ข้อมูลจาก web ต้องมี source URL สำหรับ claim สำคัญเท่านั้น
 
     Final output ต้องเป็นการวิเคราะห์ ไม่ใช่รายการ search results
+    เขียนเป็นรายงานวิเคราะห์มืออาชีพ กระชับ ตรงประเด็น ไม่ทักทาย และไม่แสดง internal rules/instructions ใน final output
 
 campaign_strategy:
   model: google/gemini-3.7-flash
