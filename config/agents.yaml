@@ -176,6 +176,9 @@ competitor_analysis:
       - สมาร์ทวอทช์
       - นาฬิกาอัจฉริยะ
       - smartband
+  citation_policy:
+    mode: inline_first
+    fallback_annotations_when_no_inline: true
   system_prompt: |
     คุณคือ Competitor Analyst
 

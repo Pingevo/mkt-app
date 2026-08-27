@@ -508,6 +508,10 @@ class BaseAgent:
         แปะเฉพาะ URL ที่ไม่ซ้ำ. ถ้า agent มี _assess_source_relevance จะกรอง topic
         relevance ก่อน: relevant=False ทิ้ง, relevant=True เก็บไม่ fetch,
         relevant=None ส่งเข้า web_fetch ตรวจแบบเดิม.
+
+        ถ้า agent ตั้ง citation_policy.mode == "inline_first" จะไม่แปะ dump
+        ซ้ำกับ inline citations ที model ใส่ไว้แล้ว ถ้าไม่มี inline เลยจึงค่อย
+        fallback ด้วย relevant annotations.
         """
         if not annotations:
             return output
@@ -546,7 +550,27 @@ class BaseAgent:
         else:
             to_verify = unique_urls
 
-        # แสดง source ทีไม่ถูก reject ใน section หลัก (relevant=True กับ unknown)
+        citation_policy = self.config.get("citation_policy", {})
+        if citation_policy.get("mode") == "inline_first":
+            # Inline-first: ถ้า output มี URL จาก annotations อยู่แล้ว ไม่ append dump ซ้ำ
+            unique_url_set = {a.get("url", "") for a in unique_urls}
+            has_inline = any(url and (url in output) for url in unique_url_set)
+            if has_inline:
+                return output
+            # ถ้าไม่มี inline เลย → fallback ด้วย relevant annotations ถ้าเปิดไว้
+            if not citation_policy.get("fallback_annotations_when_no_inline", False):
+                return output
+            if relevant_annotations:
+                output += (
+                    "\n\n---\n\n**แหล่งอ้างอิง (fallback):**\n"
+                    + "\n".join(
+                        f"- [{a.get('title') or a.get('url')}]({a.get('url')})"
+                        for a in relevant_annotations
+                    )
+                )
+            return output
+
+        # Default: แสดง source ทีไม่ถูก reject ใน section หลัก (relevant=True กับ unknown)
         # source ที unknown ยังตรวจ verify ต่อถ้า verify_urls เปิด
         citation_annotations = relevant_annotations + to_verify
 

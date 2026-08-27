@@ -92,6 +92,10 @@ def test_run_appends_citations_for_non_empty_output():
         fetch_output="หน้าเกี่ยวข้องจริง",
     )
     agent = CompetitorAnalysisAgent(cfg, llm)
+    agent.build_prompt(
+        "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K2\n---\nK2 smart watch",
+        "imoo Z1",
+    )
 
     result = agent.run("วิเคราะห์คู่แข่ง K2")
 
