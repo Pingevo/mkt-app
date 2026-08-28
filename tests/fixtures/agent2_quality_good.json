@@ -1,0 +1,27 @@
+{
+  "product_spec": "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K77\nCACGO K77 smartwatch 1.7\" IPS",
+  "competitor_data": "Xiaomi Watch S3\nKieslect",
+  "relevant_annotations": [
+    {
+      "url": "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
+      "title": "Xiaomi Watch S3",
+      "content": "Xiaomi Watch S3 1.43 AMOLED 466x466",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.kieslectthailand.com/en/product/72123/kieslect-ai-smartwatch-elite2-noir-edition",
+      "title": "Kieslect AI Smartwatch Elite2 Noir Edition",
+      "content": "Kieslect Elite2 510 mAh battery",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "geography": "thailand"
+      }
+    }
+  ],
+  "output": "# รายงานวิเคราะห์: CACGO K77\n\n## ตารางเปรียบเทียบ\n\n| คุณสมบัติ | CACGO K77 | Xiaomi Watch S3 | Kieslect |\n| :--- | :--- | :--- | :--- |\n| หน้าจอ | 1.7\" IPS | 1.43\" AMOLED [Siamphone](https://www.siamphone.com/smartwatch/xiaomi/watch-s3) | *ไม่มีหลักฐานยืนยัน* |\n| แบต | 1000mAh | *ไม่มีหลักฐานยืนยัน* | 510mAh [Kieslect](https://www.kieslectthailand.com/en/product/72123/kieslect-ai-smartwatch-elite2-noir-edition) |\n\n## ข้อเสนอแนะ\n- ใช้ข้อมูล official Thailand หรือ authorized retailer เท่านั้น\n\nรายงานนี้จัดทำขึ้นจาก product-specific evidence เท่านั้น โดยแยก facts ออกจาก inferences ชัดเจน ถ้าไม่พบข้อมูลของรุ่นใดจะระบุว่าไม่มีหลักฐานยืนยัน\n\nรายงานนี้จัดทำจาก product-specific source ของแต่ละรุ่น โดยอ้างอิง official product page หรือ authorized Thailand retailer เท่านั้น ห้ามใช้ tag page หรือ homepage มายืนยัน technical spec รายงานนี้จัดทำจาก product-specific source ของแต่ละรุ่น โดยอ้างอิง official product page หรือ authorized Thailand retailer เท่านั้น ห้ามใช้ tag page หรือ homepage มายืนยัน technical spec รายงานนี้จัดทำจาก product-specific source ของแต่ละรุ่น โดยอ้างอิง official product page หรือ authorized Thailand retailer เท่านั้น ห้ามใช้ tag page หรือ homepage มายืนยัน technical spec "
+}

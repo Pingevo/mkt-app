@@ -557,3 +557,63 @@ def test_abort_closes_active_attempt_client():
 
     abort_thread.join(timeout=5)
     assert clients[0].close.called, "abort() should have closed the active attempt client"
+
+
+# ---------------------------------------------------------------------------
+# Provider routing preferences (Agent 2 evidence mode)
+# ---------------------------------------------------------------------------
+
+
+def test_payload_includes_provider_when_given():
+    """provider=require_parameters must appear in the OpenRouter payload."""
+    client = _make_client()
+    client._client.post.return_value.json.return_value = {
+        "id": "req-1",
+        "usage": {"total_tokens": 10},
+        "choices": [{"message": {"content": "{}"}}],
+    }
+
+    client.chat(
+        [{"role": "user", "content": "hi"}],
+        response_format={"type": "json_schema"},
+        provider={"require_parameters": True},
+        stream=False,
+    )
+
+    payload = client._client.post.call_args.kwargs["json"]
+    assert payload["provider"] == {"require_parameters": True}
+    assert payload["response_format"] == {"type": "json_schema"}
+
+
+def test_payload_omits_provider_when_not_given():
+    """No provider field is sent unless explicitly requested."""
+    client = _make_client()
+    client._client.post.return_value.json.return_value = {
+        "id": "req-2",
+        "usage": {"total_tokens": 10},
+        "choices": [{"message": {"content": "hi"}}],
+    }
+
+    client.chat(
+        [{"role": "user", "content": "hi"}],
+        stream=False,
+    )
+
+    payload = client._client.post.call_args.kwargs["json"]
+    assert "provider" not in payload
+
+
+def test_routing_failure_422_is_clear_and_not_repaired():
+    """OpenRouter 422 routing failure must raise a clear error and be logged, no output repair."""
+    from httpx import Request, Response, HTTPStatusError
+
+    client = _make_client()
+    req = Request("POST", "http://test")
+    resp = Response(422, json={"error": {"message": "No provider available"}}, request=req)
+    client._client.post.side_effect = HTTPStatusError("routing failure", request=req, response=resp)
+
+    with pytest.raises(RuntimeError, match="No provider available"):
+        client.chat([{"role": "user", "content": "hi"}], max_retry_limit=1, stream=False)
+
+    # Only one attempt; no repair/output fabrication.
+    assert client._client.post.call_count == 1

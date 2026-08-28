@@ -89,6 +89,7 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         plugins: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
+        provider: dict[str, Any] | None = None,
         source: str = "llm_client.chat",
         return_annotations: bool = False,
     ) -> str | tuple[str, list[dict[str, Any]]]:
@@ -138,9 +139,13 @@ class LLMClient:
             payload["plugins"] = plugins
         if response_format:
             payload["response_format"] = response_format
+        if provider:
+            payload["provider"] = provider
 
         last_error: Exception | None = None
-        for attempt in range(1, max_retry_limit + 1):
+        last_error_message: str | None = None
+        # max_retry_limit = number of attempts; ensure at least one try
+        for attempt in range(1, max(1, max_retry_limit) + 1):
             t0 = time.time()
             try:
                 if stream:
@@ -150,13 +155,16 @@ class LLMClient:
                     resp = self._client.post("/chat/completions", json=payload)
                     resp.raise_for_status()
                     data = resp.json()
+                    self._last_raw_response = data
                     request_id = data.get("id")
                     usage = data.get("usage")
                     self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
                     msg = data["choices"][0]["message"]
                     text = msg.get("content", "")
+                    self._last_raw_annotations_count = len(msg.get("annotations") or [])
                     if return_annotations:
                         annotations = self._extract_url_annotations(msg.get("annotations", []))
+                        self._last_annotations_count = len(annotations)
                         # Empty content = failed attempt — retry like transient errors
                         if not (text and text.strip()) and not annotations:
                             raise _EmptyResponseError("empty response (no content and no annotations)")
@@ -178,16 +186,27 @@ class LLMClient:
                     status = "error"
                     http_status = None
                     request_id = None
+                    error_message = str(exc)
                 else:
                     status = "timeout" if isinstance(exc, httpx.TimeoutException) else "error"
                     http_status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                     request_id = None
+                    error_message = str(exc)
                     if isinstance(exc, httpx.HTTPStatusError):
                         try:
-                            request_id = exc.response.json().get("id")
+                            body = exc.response.json()
+                            request_id = body.get("id")
+                            provider_error = body.get("error", {})
+                            if isinstance(provider_error, dict):
+                                detail = provider_error.get("message", "")
+                            else:
+                                detail = str(provider_error)
+                            if detail:
+                                error_message = f"OpenRouter {http_status}: {detail}"
+                                last_error_message = error_message
                         except Exception:
                             pass
-                self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status=status, http_status=http_status, error_message=str(exc), request_id=request_id)
+                self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status=status, http_status=http_status, error_message=error_message, request_id=request_id)
                 if self._aborted:
                     raise RuntimeError("Request aborted")
                 if attempt < max_retry_limit:
@@ -195,7 +214,7 @@ class LLMClient:
                     time.sleep(wait)
                 continue
 
-        raise RuntimeError(f"LLM request failed after {max_retry_limit} retries: {last_error}")
+        raise RuntimeError(f"LLM request failed after {max_retry_limit} retries: {last_error_message or last_error}")
 
     @staticmethod
     def _extract_url_annotations(raw_annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -481,7 +500,8 @@ class LLMClient:
         progress_timeout = float(cfg.get("stream_progress_timeout_seconds", 60))
 
         last_error: Exception | None = None
-        for attempt in range(1, max_retry_limit + 1):
+        # max_retry_limit = number of attempts; ensure at least one try
+        for attempt in range(1, max(1, max_retry_limit) + 1):
             t0 = time.time()
             try:
                 usage: dict[str, Any] | None = None

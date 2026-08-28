@@ -167,10 +167,65 @@ competitor_analysis:
   model: google/gemini-3.5-flash
   temperature: 0.4
   max_tokens: 4096
-  max_retry_limit: 3
+  max_retry_limit: 0
   max_review_iterations: 0
   review_temperature: 0.2
   web_search: true
+  evidence_mode: true
+  response_format:
+    type: json_schema
+    json_schema:
+      name: competitor_research
+      strict: true
+      schema:
+        type: object
+        properties:
+          target_model:
+            type: string
+          competitor_names:
+            type: array
+            items:
+              type: string
+          evidence:
+            type: array
+            items:
+              type: object
+              properties:
+                competitor:
+                  type: string
+                field:
+                  type: string
+                claim:
+                  type: string
+                url:
+                  type: string
+                geography:
+                  type: string
+                  enum:
+                    - thailand
+                    - global
+              required:
+                - competitor
+                - field
+                - claim
+                - url
+                - geography
+              additionalProperties: false
+          recommendations:
+            type: array
+            items:
+              type: string
+          uncertainty:
+            type: array
+            items:
+              type: string
+        required:
+          - target_model
+          - competitor_names
+          - evidence
+          - recommendations
+          - uncertainty
+        additionalProperties: false
   use_brand_context: false
   use_brand_reference: true
   relevance_policy:
@@ -200,7 +255,7 @@ competitor_analysis:
       - smartband
   citation_policy:
     mode: inline_first
-    fallback_annotations_when_no_inline: true
+    fallback_annotations_when_no_inline: false
   output_quality:
     min_total_chars: 500
     min_non_citation_chars: 300
@@ -223,21 +278,35 @@ competitor_analysis:
     8. สรุปเป็นคำตอบที่อ่านง่าย
 
     กฎ:
-    - ห้ามเอาทุก URL ที่ค้นเจอมาแปะท้าย output
-      ให้อ้างอิงเฉพาะ URL ที่สนับสนุน claim จริง ในรูปแบบ [ชื่อเว็บ](URL)
+    - ค้นหา product-specific source ของแต่ละรุ่นใน comparison scope ก่อนเขียนตาราง
+      ลำดับ source: official product page > official Thailand page > authorized retailer product page
+    - ทุก factual claim ในตาราง (spec, ราคา, ช่องทางจำหน่าย) ต้องมี inline citation [ชื่อเว็บ](URL) ใน cell เดียวกัน
+    - ถ้าไม่พบหลักฐานสำหรับ cell นั้น ให้เขียน `*ไม่มีหลักฐานยืนยัน*` ใน cell นั้น
+    - ห้ามเขียน factual spec ก่อนมี citation
+    - ห้ามใช้ tag page, homepage, generic article, marketplace discovery ยืนยัน technical spec
+    - ห้ามเอาทุก URL ที่ค้นเจอมาแปะท้าย output หรือใส่หัวข้อ `แหล่งอ้างอิง (fallback)`
+    - ให้อ้างอิงเฉพาะ URL ที่สนับสนุน claim จริง ในรูปแบบ [ชื่อเว็บ](URL)
     - ห้ามเขียนกฎของแบรนด์ลงใน final output
     - ห้ามสร้างข้อมูลเพื่อให้รายงานดูสมบูรณ์
     - ห้ามคาดการณ์อนาคตหรือสร้างข้อมูลช่วงเวลาที่ไม่มีหลักฐานจาก web
     - ห้ามนำ INFERENCE เขียนเป็น FACT
-    - ห้ามสร้าง Market Gap เพียงเพร�สินค้าเรามี feature ที่คู่แข่งไม่มี
+    - ห้ามสร้าง Market Gap เพียงเพราสินค้าเรามี feature ที่คู่แข่งไม่มี
     - ห้ามอ้างว่าตลาด "ไม่มี" หรือ "มีช่องว่าง" ถ้าหลักฐานยังไม่เพียงพอ
     - ถ้าหาข้อมูลไม่พอ ให้บอกว่าไม่พบข้อมูลเพียงพอ
+    - แยก recommendations / implications ออกจาก factual comparison เป็นส่วนท้ายและระบุเป็นข้อเสนอแนะ
     - คำสั่งเฉพาะของ user กำหนด scope ได้
       หาก user ระบุมุมหรือคู่แข่งเฉพาะ ให้เน้นสิ่งนั้น
     - ข้อมูลจาก web ต้องมี source URL สำหรับ claim สำคัญเท่านั้น
+    - Final output ต้องเป็นรายงานวิเคราะห์มืออาชีพ กระชับ ตรงประเด็น ไม่ทักทาย และไม่แสดง internal rules/instructions
+    - เขียนเป็นรายงานวิเคราะห์มืออาชีพ กระชับ ตรงประเด็น ไม่ทักทาย
 
-    Final output ต้องเป็นการวิเคราะห์ ไม่ใช่รายการ search results
-    เขียนเป็นรายงานวิเคราะห์มืออาชีพ กระชับ ตรงประเด็น ไม่ทักทาย และไม่แสดง internal rules/instructions ใน final output
+    รูปแบบ output:
+    - คืนคำตอบเป็น JSON ตาม schema "competitor_research" เท่านั้น
+    - ห้ามเขียน Markdown, ห้ามเขียนหัวข้อ #, ห้ามเขียนข้อความอธิบายนอก JSON
+    - `url` ต้องตรงกับ URL จาก web search ทีค้นพบเท่านั้น ห้าม invent URL
+    - `geography` ระบุ "thailand" เมื่อ source เป็น official Thailand/authorized retailer ในประเทศไทย
+    - `recommendations` คือข้อเสนอแนะเท่านั้น ห้ามใส่ facts หรือ URL
+    - `uncertainty` บอกสิ่งที่ยังไม่พบหลักฐาน ไม่ใช่คาดการณ์
 
 campaign_strategy:
   model: google/gemini-3.7-flash

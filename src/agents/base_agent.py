@@ -274,7 +274,8 @@ class BaseAgent:
     def run(self, user_prompt: str, quick_brief: str = "", image_paths: list[str] | None = None,
             extra_image_paths: list[str] | None = None,
             resource_context: str = "", response_format: dict | None = None,
-            step_context: "StepRunContext" | None = None) -> str:
+            step_context: "StepRunContext" | None = None,
+            provider: dict | None = None) -> str:
         """Generate output then review/refine it.
 
         Returns the final (possibly refined) text response.
@@ -331,7 +332,7 @@ class BaseAgent:
 
         web_search = self.config.get("web_search")
 
-        if web_search and not response_format:
+        if web_search:
             # --- Market parity: agentic server tool loop ---
             # ส่ง openrouter:web_search + openrouter:web_fetch ให้ model ในครั้งเดียว
             # OpenRouter จะรัน agentic loop ให้: model ค้น → อ่านผล → คิด → ปรับ query → ค้นต่อเอง
@@ -351,6 +352,7 @@ class BaseAgent:
                 max_retry_limit=self.config.get("max_retry_limit", 3),
                 tools=tools,
                 response_format=response_format,
+                provider=provider,
                 source=f"{self.agent_name}.generate",
                 return_annotations=True,
             )
@@ -371,6 +373,7 @@ class BaseAgent:
                 max_tokens=self.config.get("max_tokens", 4096),
                 max_retry_limit=self.config.get("max_retry_limit", 3),
                 response_format=response_format,
+                provider=provider,
                 source=f"{self.agent_name}.generate",
             )
 
@@ -424,6 +427,9 @@ class BaseAgent:
         # ตรวจ output ตามรูปแบบของ agent แล้วซ่อมถ้าไม่ผ่าน
         max_repair = self.config.get("max_retry_limit", 3)
         ok, error = self.validate_output(output)
+        # บันทึก draft ก่อน repair เพื่อ acceptance diagnostics
+        self._last_draft_output = output
+        self._last_first_validation_error = error if not ok else ""
         for _ in range(max_repair):
             if ok:
                 break

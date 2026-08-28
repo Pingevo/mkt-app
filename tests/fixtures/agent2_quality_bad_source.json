@@ -1,0 +1,17 @@
+{
+  "product_spec": "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K77\nCACGO K77 smartwatch 1.7\" IPS",
+  "competitor_data": "Xiaomi Watch S3\nKieslect",
+  "relevant_annotations": [
+    {
+      "url": "https://www.kieslectthailand.com/en/tag/Elite2",
+      "title": "Tag - Elite2",
+      "content": "Elite2 tag page listing",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "homepage",
+        "geography": "thailand"
+      }
+    }
+  ],
+  "output": "# รายงานวิเคราะห์: CACGO K77\n\n## ตารางเปรียบเทียบ\n\n| คุณสมบัติ | CACGO K77 | Xiaomi Watch S3 | Kieslect |\n| :--- | :--- | :--- | :--- |\n| แบต | 1000mAh | *ไม่มีหลักฐานยืนยัน* | 510mAh [Tag](https://www.kieslectthailand.com/en/tag/Elite2) |\n\nรายงานนี้จัดทำขึ้นจาก product-specific evidence เท่านั้น โดยแยก facts ออกจาก inferences ชัดเจน ถ้าไม่พบข้อมูลของรุ่นใดจะระบุว่าไม่มีหลักฐานยืนยัน\n\nรายงานนี้จัดทำจาก product-specific source ของแต่ละรุ่น โดยอ้างอิง official product page หรือ authorized Thailand retailer เท่านั้น ห้ามใช้ tag page หรือ homepage มายืนยัน technical spec รายงานนี้จัดทำจาก product-specific source ของแต่ละรุ่น โดยอ้างอิง official product page หรือ authorized Thailand retailer เท่านั้น ห้ามใช้ tag page หรือ homepage มายืนยัน technical spec รายงานนี้จัดทำจาก product-specific source ของแต่ละรุ่น โดยอ้างอิง official product page หรือ authorized Thailand retailer เท่านั้น ห้ามใช้ tag page หรือ homepage มายืนยัน technical spec "
+}

@@ -1,0 +1,302 @@
+{
+  "request_id": "gen-1787889534-CKyXAweE66I9Rbn0KjVD",
+  "case_id": 10,
+  "case_name": "k77_thailand_web_search",
+  "model": "google/gemini-3.5-flash",
+  "validation_ok": true,
+  "validation_error": "",
+  "runtime_error": null,
+  "outcome": {
+    "not_blank": true,
+    "no_truncated_table": true,
+    "no_url_dump": true,
+    "no_verify_dump": true,
+    "mentions_k77": true,
+    "mentions_k771_if_relevant": null,
+    "has_section_headings": true,
+    "limited_analysis": false,
+    "has_selected_evidence": true,
+    "defects": [],
+    "passed": true
+  },
+  "relevant_annotations": [
+    {
+      "url": "https://fccid.io/2BGT5",
+      "title": "SHENZHEN CACGO INTELLIGENT CO.,LTD FCC ID Applications (2BGT5)",
+      "content": "to\n\n...\n\n# SHENZHEN CACGO INTELLIGENT CO.,LTD\n\n...\n\n#### FCC Grantee Code 2BGT5\n\n...\n\n13 FCC IDs · Longhua district, ShenZhen,, N/A, China\n\n...\n\nWebsite cacgo.net\n\n...\n\n| Company | SHENZHEN CACGO INTELLIGENT CO.,LTD |\n| --- | --- |\n| Grantee Code | 2BGT5 |\n| Mailing Address | 1105 Yifenghua Bld, 28 Yifenghua Innovation Industrial Park, Dalang street, |\n| City | Longhua district, ShenZhen, |\n| Country | China |\n| Contact | Maggie Kuang |\n| Date Received | 2024-06-04 |\n| FCC Registration Numbers | FRN 0035518349 |\n\n...\n\n## FCC ID applications by 2BGT5 (SHENZHEN CACGO INTELLIGENT CO.,LTD) - Page 1 of 1\n\n...\n\n| FCC IDApplication Date | Product PurposeApplication Type |\n| --- | --- |\n| ** 2BGT5-K78**2026-07-24 | SMART WATCHOriginal Equipment |\n| ** 2BGT5-K77**2026-06-09 | SMART WATCHOriginal Equipment |\n| ** 2BGT5-K76A**2026-01-21 | SMART WATCHOriginal Equipment |\n| ** 2BGT5-K73**2025-11-28 | SMART WATCHOriginal Equipment |\n| ** 2BGT5-K72**2025-09-02 | smart watchOriginal Equipment |\n| ** 2BGT5-K71**2025-07-07 | smart watchOriginal Equipment |\n| ** 2BGT5-K70A**2025-05-07 | smart watchOriginal Equipment |\n| ** 2BGT5-K68**2025-04-14 | smart watchOriginal Equipment |\n| ** 2BGT5-K69**2025-01-01 | SMART WATCHOriginal Equipment |\n| ** 2BGT5-K67**2024-10-22 | smart watchOriginal Equipment |\n| ** 2BGT5-K66**2024-07-16 | smart watchOriginal Equipment |\n| ** 2BGT5-K65**2024-06-12 | SMART WATCHOriginal Equipment |",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.amazon.com/BOVUGAC-Compatible-Smartwatch-Anti-Scratch-Ultra-Thin/dp/B0GSFDDW8X",
+      "title": "",
+      "content": "# [5 Pack] for HOMOGO K77 1.83 Inch Smart Watch Screen Protector, Clear TPU Soft Film Compatible with HOMOGO K77 1.83 Inch Smartwatch,Anti-Scratch Ultra-Thin\nBrand: BOVUGAC\nCategory: Smartwatch Accessories > Smartwatch Screen Protectors\n\n...\n\n## Features\n[5 Pack] This product includes 5 Pack screen protectors. Specially designed for HOMOGO K77 1.83 Inch Smart Watches,not compatible with other models; High Transparency High-Transparency maintains the original viewing experience.provides you superb transmittance and high restoration of the original color of the screen.; Scratch ResistanceMade of 6H hardness TPU Film and could effectively protect the device from unwanted scratches and rubs; Touchscreen Sensitivity Maintain the original response sensitivity, which ensures quick and accurate typing, smooth games and video playing.; Easy installationIt's easy to install and we also send cleaing-up accessories in the package And we can provide friendly reply for any questions. pls feel free to contact us .\n\n...\n\n## Specifications\nMaterial: Thermoplastic Polyurethane; Product Dimensions: 0.1\"L x 0.1\"W; Special Features: Touch Sensitive; Compatible Devices: K77-B; Item Hardness: 6H\n\n...\n\n## Pricing & Reviews\nPrice: 8.88 USD.\n\n...\n\n## Details\nModel: K77-B\n\n...\n\nB0GSFDDW8",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.instagram.com/",
+      "title": "Newest K77 Smart Watch With Flashlight and Large Power 🔋 ...",
+      "content": "71x8iqRD\n...\n7FKIPBIjZ\n...\nTeairawjGOTo\n...\nm2chHG6c\n...\neSe7r4\n...\n7Ez7rzf1mg8j3e\n...\n**\nSee everyday moments from your close friends.\n...\ninstagram.com/rsrc\n...\nphp/y\n...\n53X3pk\n...\nLog into Instagram",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://shop.11665.com/list0/1512/n_41603013215.html",
+      "title": "Konka/康佳 K77 经典高端商务实体按键超薄屏幕双面接听手表锁屏_康佳手机旗舰店",
+      "content": "Konka/康佳 K77 经典高端商务实体按键超薄屏幕双面接听手表锁屏_康佳手机旗舰店\n...\n| (大图) | Konka/康佳 K77 经典高端商务实体按键超薄屏幕双面接听手表锁屏 价格：2977 |\n| --- | --- |\n| |\n\n手机/Konka/",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.instagram.com/",
+      "title": "Newest K77 Smart Watch With Flashlight and Large Power 🔋 ...",
+      "content": "5eD1lu6t1/\n...\nbxWX71x8\n...\nRDskRjoNlqk\n...\nFoyW9yUj\n...\nYwgmxdIqMRzRoNNuiEjmYIIqQm\n...\nQQaltJvft/gFLnNDX3OIb\n...\nFKIPBIjZAbTjz\n...\nairawjGOToYm2chHG6c\n...\n1y8\n...\n7r49\n...\n8EM7/7Ez7rzf1mg8j3eUVKd1N9ZVX\n...\n**\nSee everyday moments from your close friends.",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.amazon.com/PODOEIL-Military-Touchscreen-Bluetooth-Waterproof/dp/B0GTZBJ9DS",
+      "title": "Military Smart Watch for Men, 1.7\" HD Touchscreen, Bluetooth Calling, 1000mAh Battery, Heart Rate/SpO2, 110+ Sports Modes, IP68 Waterproof Fitness Watch for Android & iPhone (Silver, Orange)",
+      "content": "# Military Smart Watch for Men, 1.7\" HD Touchscreen, Bluetooth Calling, 1000mAh Battery, Heart Rate/SpO2, 110+ Sports Modes, IP68 Waterproof Fitness Watch for Android & iPhone (Silver, Orange)\nBrand: PODOEIL\nCategory: Wearable Technology > Smartwatches\n\n...\n\n## Features\nStylish Design & Custom Watch Faces Military watches for men is made from special metal material,digital watch men has undergone rigorous military-grade testing,including extreme temperature,low pressure,and dustproof. 1.7-inch HD touchscreen, 300+ watch faces or set your favorite photo for a custom style. Elegant design suitable for daily wear, office, or outdoor activities.; Bluetooth Calls & Message Notification Equipped with an integrated microphone and high-fidelity speaker, the PODOEIL smart watch for men allows you to make/receive/reject calls, view call logs, and add contacts. This smart watch supports notifications from popular apps such as Facebook, WhatsApp, Instagram, and Twitter. All notifications are displayed on your wrist with vibration alerts, ensuring you never miss important calls or messages.; 24 Hour Health Monitoring This fitness tracker smart watch is equipped with advanced built-in sensors to accurately monitor heart rate and blood oxygen. It automatically tracks your sleep stages (deep, light, awake), allowing you to better understand your physical condition, make timely adjustments, and move toward a healthier lifestyle.; 1000mAh Large Capacity Battery & LED Flashlight This military smart watch is equipped with a high-capacity 1000mAh battery, supporting up to 15 days of typical usage and up to 100 days of standby time. Designed for long-lasting battery life, it minimizes frequent charging and is perfect for daily wear and outdoor activities. This men’s watch features an LED flashlight, providing great convenience for nighttime activities or outdoor adventures. The smartwatch also includes weather forecast, music & camera control, alarm, stopwatch, find phone, and many other practical functions.; Military Grade Standard & IP68 Waterproof This men's military smart watch is made of special composite materials and a metal shell, making it rugged and durable. The PODOEIL smart watch has passed various durability tests, including drilling, crushing, exposure to hot steam, salt spray, and liquid contamination. It can even continue to function normally in extremely low temperatures.; Fitness Watch for Men with 110+ Sports Modes This fitness tracker supports 110+ sports modes, including walking, running, baseball, hiking, cycling, soccer, and yoga. It provides more accurate workout data by tracking your steps, calories burned, and distance traveled, helping you better understand your activity levels and plan your exercise schedule accordingly.; Wide Compatibility & Efficient After-Sales Service The PODOEIL Bluetooth Calling Smartwatch is compatible with iPhone and Android phones, supporting Android 5.0, iOS 11.0, Bluetooth 5.0 and above. If you encounter any issues during use, please contact us via email. Our professional support team will reply promptly and provide you with a solution!\n\n...\n\n## Specifications\nColor: silver; Band Material Type: Silicone; Screen Size: 1.7 Inches; Additional Features: Activity Tracker, Alarm Clock; Operating System: Bluetooth\n\n...\n\n## Pricing & Reviews\nPrice: 79.99 USD.\n\n...\n\n## Details\nModel: K77\n\n...\n\nASIN: B0GTZBJ9DS",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.gsmchoice.com/zh-tw/catalogue/kechaoda/k77/",
+      "title": "Kechaoda K77  手機技術數據 :: GSMchoice.com",
+      "content": "Kechaoda K77 手機技術數據 :: GSMchoice.com ';\n\n...\n\nKechaoda K77\n\n...\n\n主要特點\n\n...\n\n- 2.4\" TFT 240 x 320 px屏幕比例: 4:3\n- 0.08 Mpx\n- Li-Ion 1000 mAh\n- 32 MB\n- 32 MB\n- Spreadtrum SC6531E\n- C2T 電池容量與厚度比\n- 螢幕佔比\n\n...\n\n| 牌子 | Kechaoda Kechaoda手機 |\n| --- | --- |\n| 模型 | K77 |\n| 發行日期 | |\n| 手機規格 | 直立式手機 |\n| 大小 | |\n| Weight | Buy case |\n| 顏色 | 有 4 個變體可用: Black / Red Black White / Red Black / Coffee |\n| Display | 彩色 / TFT64 數千 顏色240 x 320 px (2.40\") 167 ppi |\n| 顯示保護 | Buy screen protector |\n| 通話最長時間 | |\n| 待機最長時間 | |\n| 标准电池: | Li-Ion 1000 mAh Buy powerbank |\n| 快速充電 | |\n| 包装中包含的充电器 | |\n| 無線充電 | |\n| 手机存储 | 32 MB Buy memory card |\n| 隨機存取存儲 (RAM) | 32 MB |\n| Memory cards | microSD, microSDHC (到 32 GB) |\n| 處理器 | Spreadtrum SC6531E芯的數目: 1 |\n| 標準 | GSM 閱讀更多 |\n| GSM frequencies | 850 900 1800 1900 |\n| UMTS標準 | |\n| LTE 標準 | |\n| 5G 標準 | |\n| CDMA標準 | |\n| TD-SCDMA 標準 | |\n| Touchscreen | |\n| 雙SIM卡 | |\n| SIM 卡 | miniSIM, miniSIM |\n| 卡雙模式 | dual standby |\n| 混合雙卡雙待 | |\n\n...\n\n## 其他信息\n\n...\n\nSorry, additional information is available only in English.\n\n...\n\nLED flashlight.\n\n...\n\n## 來自這款手機的圖片\n\n...\n\n0.\n\n...\n\n8\n\n...\n\n數碼變焦\n\n...\n\n閃光燈\n\n...\n\nLED\n\n...\n\n額外\n\n...\n\nFF",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://pd.prlog.org/world/windows-mobile+dual-sim-card/?p=17.1955",
+      "title": "Products - Windows Mobile - Dual SIM Card - Color=White",
+      "content": "AVATAR ET-1 Quad Band Touch Screen Watch Phone With Numeric Keypad Pakistan - Windows Mobile - Dual SIM Card - Phone, 16 years ago, 972 hits This single card watch phone supports MP3 / MP4 multimedia play, which supplies nice melody and videos. * With the FM radio, you can keep pace with daily news. * Also it has built-in games, from which you can relax yourself and enjoy funs\n\n...\n\nEVA K77 Quad Band Dual Sim Mini Mobile Phone With Hebrew Black Pakistan - Windows Mobile - Dual SIM Card - Phone, 16 years ago, 1453 hits This EVA K77 supports quad band, dual sim , online stock, java . It may attract customer for its mini style. Quad band:GSM850/900/1800/1900Mhz , Dual sim card dual standby , Six pages menu , GPRS,WAP , Slide to unlock , Bluetooth A2DP, E-book reader",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    }
+  ],
+  "rejected_annotations": [
+    {
+      "url": "https://www.cacgo.net/",
+      "title": "SHENZHEN CACGO TECHNOLOGY CO., LIMITED-CACGO",
+      "content": "SHENZHEN CACGO TECHNOLOGY CO., LIMITED-CACGO\n\n...\n\nPRODUCT\n\n...\n\nSHENZHEN CACGO TECHNOLOGY CO., LIMITED is a professional Smart Watch and Smart Bracelet manufacturer located in Shenzhen, China, integrating with R&D design, production & quality control, marketing research and after-service.\n\n...\n\n### K58\n\n...\n\n### K\n\n...\n\nPro\n\n...\n\nSHENZHEN CACGO INTELLIGENT TECHNOLOGY CO., LIMITED was born in 2012 when Smart wearable just started in the market, a professional Smart Watch manufacturer located in Shenzhen,China, integrating with R&D design, production & quality control, marketing research and after-service.\n\n...\n\n1\n\n...\n\nyears\n\n...\n\nwatch design is\n\n...\n\ntooling design and high quality craft\n\n...\n\nAmazon online customer give quite\n\n...\n\non CAC\n\n...\n\nand\n\n...\n\nalways",
+      "_relevance": {
+        "relevant": false,
+        "relevance_type": "homepage",
+        "reason": "source is a homepage or marketplace root without product-specific evidence",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://fccid.co/fcc/2BGT5-K76A",
+      "title": "2BGT5-K76A - SMART WATCH | SHENZHEN CACGO INTELLIGENT CO....",
+      "content": "# 2BGT5-K76A\n\n...\n\nSHENZHEN CACGO INTELLIGENT CO.,LTD\n\n...\n\n## Application Details\n\n...\n\nEquipment Class\n\n...\n\nDSS - Part 15 Spread Spectrum Transmitter\n\n...\n\nDate of Grant\n\n...\n\nJan 21, 2026\n\n...\n\nApplication Purpose\n\n...\n\nOriginal Equipment\n\n...\n\nEquipment Note\n\n...\n\nSMART WATCH\n\n...\n\nFrequency Range\n\n...\n\n2402.00000000 - 2480.00000000\n\n...\n\nSHENZHEN CACGO INTELLIGENT CO.,LTD\n\n...\n\nCountry\n\n...\n\nChina\n\n...\n\n### Users Manual\n\n...\n\n## Technical Specifications\n\n...\n\n| # | Rule Parts | Frequency Range | Power Output |\n| --- | --- | --- | --- |\n| 1 | 15C | 2.40 GHz - 2.48 GHz | 1.98 mW |",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "market_unverified",
+        "reason": "source is about smartwatch market/category but not product-specific",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://manuals.plus/cacgo/k67-gps-smart-watch-manual",
+      "title": "CACGO K67 GPS Smart Watch User Manual",
+      "content": "CACGO K\n\n...\n\n7 GPS Smart Watch User Manual\n\n...\n\ns\n\n...\n\n# CACGO K67 GPS Smart Watch User Manual\nOctober 23, 2024October 24, 2024\n\n...\n\nCAC\n\n...\n\n»**CACGO K6\n\n...\n\nGPS Smart Watch User Manual**\n\n...\n\n.\n\n...\n\n8Related\n\n...\n\n#### #### CACGO K67 GPS Smart Watch\n**Product Specifications:**\n* **Model:**699SGXZ=GZIN\n* **Power Source:**33\\*ORU)\n* **Operating Temperature:**0-40 degrees Celsius\n* **Compliance:**FCC Part 15#### Product Usage Instructions\n**Powering On the Device**\n\n...\n\nTo power on the device, press the designated power button located on the front panel.\n**\n\n...\n\nthe\n\n...\n\n**\n\n...\n\nPlease\n\n...\n\na full charge before using it.\n\n...\n\nAPP:GloryFitPro\n#### Download & Pairing\n1. Long press POWER key over 5 seconds for turning on\n2. Scan the QR code and install the GloryFitPro App or download the GloryFitPro App from App Store, Google Player and install it\nCompatible system version: Android 5.0 and above, iOS 10.0 and above\n3. Open the GloryFitPro App, allow all the permission and add device\n**Step 1:**Turn on the Bluetooth of your mobile phone\n**Step 2:**Open GloryFitPro App\n**Step 3:**Click “Add A device” and pair it\n**Step4:**Check watch menu”about” MAC address last four number like “994”, then go mobile phone “setting-bluetooth” to search the same bluetooth name with last 3 numbers “994” to finish BT connection as below operation.\n#### Functions on Smart Watch\n**Time interface**\n1. Power on: Long press POWER key for 5 seconds\n2. Power off: Long press POWER key for 5 seconds\n3. Change watch face: Long press the screen over 3 seconds,there are 12 built-in watch faces for choosing\n4. Menu interface, Left swipe interface (6 menu styles)\n**Function menu**\n1. Steps counter\n2. Heart rate detection\n3. Sleep tracker\n4. Weather\n5. Music Control\n6. Smartwatch supports: GPS BEIDOU GALILEO GLONASS\n7. Message Notification\nThe smart notification function of the smartwatch relies on the notification bar of the mobile phone to work, please make sure you have allowed all permissions and the GloryFitPro App is running in the background#### Functions on GloryFitPro App\n1. **Data sync**\nAll the measured data from smartwatch will be sync on GloryFitPro App automatically (including steps, sleep, heart rate,blood oxygen, training)\n2. **Watch faces**\nOver 100 watch faces for choosing, you could download and custom watch face on GloryFitPro App\n3. **Notifications**\nTurn on the switch to sync related information to smartwatch (Phone, Messages, Facebook, Twitter, WhatsApp, WaChat,Instagram, Skype, KakaoTalk, Line, Others)### Documents / Resources\n\n...\n\nCACGO K67 GPS Smart Watch[pdf] User Manual\n2BGT5-K67, 2BGT5K67,\n\n...\n\n67,\n\n...\n\n67\n\n...\n\nSmart Watch, K6\n\n...\n\n,\n\n...\n\n,\n\n...\n\n, Watch#### References",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "market_unverified",
+        "reason": "source is about smartwatch market/category but not product-specific",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://manualspro.net/649379-cacgo-k65-smart-watch-user-manual",
+      "title": "Cacgo K65 Smart Watch User Manual",
+      "content": "#### Cacgo K6\n\n...\n\nSmart Watch\n\n...\n\n- Size : 70*85mm\n- Compatible System Version: Android 5.0 and above, iOS 10.0 and above\n\n...\n\nProduct Information: The SmartWatch requires a full charge before initial use. The accompanying mobile app is Fit Cloud Pro.\n\n...\n\n1. Long press the POWER key for over 5 seconds to turn on the device\n\n...\n\n2. Scan the QR code and install the Fit Cloud Pro App or download it from the App Store or Google Play Store.\n3. Open the Fit Cloud Pro App, allow all permissions, and add the device by turning on Bluetooth on your mobile phone, opening the app\n\n...\n\nand clicking “Add Device” to pair it.\n\n...\n\nHeart\n\n...\n\ndetection\n\n...\n\nSleep\n\n...\n\n2\n\n...\n\n:\n\n...\n\n0 PM to\n\n...\n\n1\n\n...\n\n:00 AM\n\n...\n\nWeather\n- Music Control\n- Message Notification\n\n...\n\nEnsure all permissions are\n\n...\n\nand the\n\n...\n\nCloud Pro App is running in\n\n...\n\nbackground for\n\n...\n\nnotification\n\n...\n\n.\n\n...\n\n,",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "market_unverified",
+        "reason": "source is about smartwatch market/category but not product-specific",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.xunmei365.com/3cshuma/3673856.html",
+      "title": "傻瓜超人k77青春版是什么？",
+      "content": "傻瓜超人k77青春版是什么？\n\n...\n\n# 傻瓜超人k77青春版是什么？\n\n...\n\n傻瓜超人K77青春版：是科技奇迹还是青春幻想？\n\n...\n\n傻瓜超人K77青春版是一款专为年轻人打造的智能穿戴设备，它通过融合简易操作与前沿科技，重新定义了“智能生活”的入门体验。简单来说，它就像一位贴身的“傻瓜式”超人助手，以青春版的设计降低使用门槛，让科技变得触手可及。\n\n...\n\n在智能功能方面，K77青春版的核心是内置的AI学习系统，能自动分析用户日常行为，提供健康提醒、日程管理等功能。这消除了传统智能设备的复杂设置，用户需专业知识即可享受自动化服务。例如，它通过传感器监测运动数据，并生成简易报告，帮助年轻人轻松管理健康。其新颖之处在于，它将高端科技“傻瓜化”，让技术服务于人而非束缚人。\n\n...\n\n设计上，设备采用轻量化材质和多彩渐变外壳，重量仅30克，佩戴舒适且时尚。这打破了智能设备单调的工业风，迎合了青春群体对个性表达的需求。原因在于，年轻人更重产品的外观与情感连接，而K77青春版以视觉设计降低科技冰冷感，让智能穿戴成为日常穿搭的一部分。\n\n...\n\n性价比也是关键亮点，K77青春版定价仅为同类产品的一半，却集成了基础智能功能。这得益于优化供应链和开源软件，使成本大幅降低。上，它挑战了“智能即昂贵”的刻板印象，证明科技普惠可以通过简化功能实现，而非牺牲质量。理由在于，市场调研显示年轻人预算有限，但渴望科技体验，K77青春版正好填补了这一空白。\n\n...\n\n总之，傻瓜超人K77青春版以简易智能和青春导向，成功打造了一个科技与生活交融的范例。它不仅是工具，更是一种青春态度的延伸，让每个人都能成为自己生活的“超人”。",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "unknown",
+        "reason": "cannot confidently determine relevance from title/URL",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.wintouch.ae/product/35-cn.html",
+      "title": "K77 Pro-Wintouch - No.1 android tablet and smart phone",
+      "content": "K77 Pro-Wintouch - No.1 android tablet and smart phone\n\n...\n\n# K77 Pro\n\n...\n\n### 7inch Kids learning tablets\n\n...\n\nSpecial supporting children learning software, Improve learning efficiency,Left a blue sky for the children.\n\n...\n\n### Intimate modeling design\n\n...\n\nCartoon image of the design, more to stimulate the child's creative force\n\n...\n\n### Happy child, dream come\n\n...\n\nStrong CPU, enjoy learning, enjoy HD video, quality, comfort, super endurance, carefree carefree.\n\n...\n\n### More intelligent for you to enjoy\n\n...\n\nAndroid platform application fully compatible Multifunctional and multi scene, want to see\n\n...\n\n- Detail\n- System Android 4.4\n- CPU Quad-core Cortex™-A7\n- GPU Mali400MP2\n- Memory DDR3 512MB\n- Storage Built-in 8GB capacity\n- External Storage Support 32GB Micro SD Card\n\n...\n\n- Display\n- Screen Size 7inch\n- Resolution 1024*600 TN\n- Touch Screen Multi Touch\n- Camera Fornt0.3M Back0.3M\n\n...\n\n- Power Source\n- Battery Capacity 2200mAh rechargeable li-ion Battery\n- Battery Type Rechargeable Lithium Battery\n- Recharge Type Adapter or USB Cable\n- Charger Type DC 5V 2.0A\n\n...\n\n- Connection\n- 2G -\n- 3G -\n- WiFi 802.11b/g wireless internet\n- Bluetooth Support\n\n...\n\n- I/O\n- SIM card-\n- Audio 3.5 mm standard CTIA\n- Mic & speaker Inside\n- USB Micro USB\n- HDMI N/A\n- RJ45 N/A\n- Others N/A\n\n...\n\n- Function\n- Audio 3.5 mm CTIA MP3, OGG, AAC, etc, LRC lyrics synchronizing, Photo Album, Stereo speaker\n- Video AVI, MKV (XVID/px/H.264), MOV, TS, M2TS, RM/RMVB, FLV, 3GP, MPEG, DAT, MP4 (support to 1080P:1920x1080)\n- Language 23 language(Arabic,English,French,Etc)\n- Business Arabic keyboard, Skype, WeChat, Facebook, Gmail, ect.\n- Gravity Sensor Support\n- Proximity Sensor -\n- Light Sensor -\n\n...\n\n- Others\n- Color Blue,Pink,Purple,Green,Orange\n- Dimensions 203*128*11.5mm\n- Weight 400g",
+      "_relevance": {
+        "relevant": false,
+        "relevance_type": "category_mismatch",
+        "reason": "source mentions 'keyboard' which conflicts with target category smartwatch",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://nocollent.en.alibaba.com/",
+      "title": "Guangzhou Nocollent Electronics Co., Ltd.: Company Overview",
+      "content": "2024\n\n...\n\nMK86 Outdoor 10\n\n...\n\n+ Sport Modes Waterproof IP68 With\n\n...\n\nBT\n\n...\n\nHeart Rate\n\n...\n\nSmart Watches\n\n...\n\n$\n\n...\n\n1\n\n...\n\nSmart Watch Ai Chatgpt 3ATM Waterproof Sport BT Calling Compass Flash\n\n...\n\n1.43 Inch Reloj Smartwatch HD300\n$25.00-28.00\n\n...\n\n.\n\n...\n\nEasy\n\n...\n\n1.7 Inch HD Screen Smart Watch Fitcloud Pro APP With Flashlight BT Calling Fitness Tracker Sport Smart Wristband Watches CF55\n$12.80-13.60\nMin. Order: 5 pieces\nEasy Return\n5 sold\n\n...\n\nto Ship\nView\n\n...\n\nNew\n\n...\n\nWatch\n\n...\n\n65\n\n...\n\nHeart\n\n...\n\nMonitor\n\n...\n\nOutdoor Smart Watch Amoled 2024\n\n...\n\n$1\n\n...\n\n.\n\n...\n\n0\n\n...\n\n1\n\n...\n\n.20\n\n...\n\n: 5",
+      "_relevance": {
+        "relevant": false,
+        "relevance_type": "homepage",
+        "reason": "source is a homepage or marketplace root without product-specific evidence",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.alibaba.co.th/product-detail/AK87-Sports-Smart-Watch-FitcloudPro-BT5_1601706783991.html",
+      "title": "Ak87 Sports Smart Watch Fitcloudpro Bt5.2 Calling Ip68 Waterproof 1000mah 5-10 Days 1.7-inch Ips Alloy Case Steel Band Activity - Buy Ak87 Outdoor Smart Watch Big Screen 1 7\" Hd Large Screen 100+ Sports Bt Call Flashlight Compass Fitcloudpro Ip68 Sos Smartwatch Call Answering Smartwatch Unisex Smartwatch Ip68 Waterproof Smartwatch Ai Voice Assistant Watch Fitness Tracking Smartwatch Fitcloudpro Compatible Smartwatch Activity Tracker Smartwatch Ak87 Smart Watch 1 7-inch Screen Waterproof Product on Alibaba.com",
+      "content": "Ak87 Sports Smart Watch Fitcloudpro Bt5.2 Calling Ip68 Waterproof 1000mah 5-10 Days 1.7-inch Ips Alloy Case Steel Band Activity - Buy Ak87 Outdoor Smart Watch Big Screen 1 7\" Hd Large Screen 100+ Sports Bt Call Flashlight Compass Fitcloudpro Ip68 Sos Smartwatch Call Answering Smartwatch Unisex Smartwatch Ip68 Waterproof Smartwatch Ai Voice Assistant Watch Fitness Tracking Smartwatch Fitcloudpro Compatible Smartwatch Activity Tracker Smartwatch Ak87 Smart Watch 1 7-inch Screen Waterproof Product on Alibaba.com\n\n...\n\n# AK87 Sports Smart Watch FitcloudPro BT5.2 Calling IP68 Waterproof 1000mAh 5-10 Days 1.7-inch IPS Alloy Case Steel Band Activity\n\n...\n\n€15.28\n\n...\n\n#### model number\n\n...\n\nAK87\n\n...\n\n### Key attributes\n\n...\n\nOperating System\n\n...\n\nIOS\n\n...\n\nfunction\n\n...\n\nActivity Tracker, Alarm Clock, Answer Call, Calendar, Call Reminder, Calorie Tracker, Countdown, Dial Call, Distance Tracker, Fitness Tracker, Heart Rate Tracker, Message Reminder, Multisport Tracker, Pedometer, Push Message, Remote Control, Sleep Tracker, Social Media Notifications\n\n...\n\nfeature\n\n...\n\nApp Control, Touchscreen\n\n...\n\nitem shape\n\n...\n\nRound\n\n...\n\nscreen size\n\n...\n\n44-49mm\n\n...\n\nwaterproof standard\n\n...\n\nIP68\n\n...\n\n## Key attributes\n\n...\n\nwaterproof standard\n\n...\n\nIP68\n\n...\n\nMale\n\n...\n\nbattery life\n\n...\n\n5 to 10 days\n\n...\n\ndisplay type\n\n...\n\nIPS\n\n...\n\n360*360\n\n...\n\nCharging Method\n\n...\n\nMagnetic\n\n...\n\nGuangdong, China\n\n...\n\nBrand\n\n...\n\nYiQungo\n\n...\n\nProduct Name\n\n...\n\nAK87 sports smart watch\n\n...\n\nFitcloudPro\n\n...\n\n8773EWE\n\n...\n\nBattery Capacity\n\n...\n\n1000mAh\n\n...\n\nCompatible system\n\n...\n\nAndroid 5.1 and above;IOS 9.0 and above\n\n...\n\nBT Version\n\n...\n\nBT5.2\n\n...\n\nScreen\n\n...\n\n1.7inch 360*360 IPS\n\n...\n\nHeart rate chip\n\n...\n\nVC30F_S\n\n...\n\nHealth Monitor\n\n...\n\nHeart rate,blood pressure oxygen",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "market_unverified",
+        "reason": "source is about smartwatch market/category but not product-specific",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.alibaba.co.th/product-detail/Men-Women-Smart-Watch-V75-IPS_1601629458828.html",
+      "title": "Men Women Smart Watch V75 Ips Screen 2\" Alloy Case Silicone Strap Sports Style 1000mah Battery Heart Rate Blood Oxygen Measuring - Buy Smart Watch Smart Watch V75 Smart Watch Call Android Smart Watch Ios Smart Watch Step Tracking Smart Watch Touch Screen Smart Watch Ip67 Waterproof Smart Watch Men Women Smart Watch V75 Ips Screen Smart Watch 1000mah Battery Watch Heart Rate Blood Oxygen Measuring Watch Phone Call Ip68 Waterproof Watch Product on Alibaba.com",
+      "content": "Men Women Smart Watch V75 Ips Screen 2\" Alloy Case Silicone Strap Sports Style 1000mah Battery Heart Rate Blood Oxygen Measuring - Buy Smart Watch Smart Watch V75 Smart Watch Call Android Smart Watch Ios Smart Watch Step Tracking Smart Watch Touch Screen Smart Watch Ip67 Waterproof Smart Watch Men Women Smart Watch V75 Ips Screen Smart Watch 1000mah Battery Watch Heart Rate Blood Oxygen Measuring Watch Phone Call Ip68 Waterproof Watch Product on Alibaba.com\n\n...\n\n# Men Women Smart Watch V75 IPS Screen 2\" Alloy Case Silicone Strap Sports Style 1000mAh Battery Heart Rate Blood Oxygen Measuring\n\n...\n\nBracelets IPS Display\n\n...\n\n49,63 PLN\n\n...\n\n#### model number\n\n...\n\nV75\n\n...\n\n### Key attributes\n\n...\n\nStyle\n\n...\n\nSports\n\n...\n\nfunction\n\n...\n\nCall Reminder, Dial Call\n\n...\n\nWaterproof\n\n...\n\nIP68\n\n...\n\nScreen\n\n...\n\n< 2\"\n\n...\n\nDisplay Type\n\n...\n\nIPS\n\n...\n\nscreen resolution\n\n...\n\n320x240\n\n...\n\n### At a glance\n\n...\n\n1000mAh Battery: Provides up to 20-30 days of regular use and over 100 days of standby, ensuring long-lasting performance.\n\n...\n\nIP68 Waterproof: Ensures the watch is protected against dust and water, making it suitable for various environments and activities.\n\n...\n\n1.46\" HD Screen: Offers a high-definition display with a narrow frame, enhancing the viewing experience and providing clear visuals.\n\n...\n\n100+ Sports Modes: Supports a wide range of sports and activities, allowing users to track and manage their fitness more effectively.\n\n...\n\n## Key attributes\n\n...\n\nfunction\n\n...\n\nWaterproof\n\n...\n\nIP68\n\n...\n\nDisplay Type\n\n...\n\nIPS\n\n...\n\nOperation System\n\n...\n\nAndroid\n\n...\n\nfeature\n\n...\n\nApp Control, Build in Flash, Touchscreen\n\n...\n\nAlloy case + silicone strap\n\n...\n\nBattery capacity\n\n...\n\n1000mAh\n\n...\n\nWaterproof level\n\n...\n\nIP68\n\n...\n\nCompatible system\n\n...\n\nFor IOS 12.0 and Android 8.0, or above\n\n...\n\n128MB\n\n...\n\nFunctions\n\n...\n\nCall, Play music, Heart rate sleep monitoring, steps count, etc",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "market_unverified",
+        "reason": "source is about smartwatch market/category but not product-specific",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.alibaba.co.th/product-detail/1-53-Display-with-Flashlight-1000mAh_1601856346889.html",
+      "title": "นาฬิกาสมาร์ทวอทช์ AK105 สำหรับทุกเพศ หน้าจอ AMOLED 2 นิ้ว พร้อมไฟฉาย กันน้ำ IP67 สายซิลิโคนเจล รองรับโหมดกีฬามากกว่า 100 โหมด ตรวจจับการนอนหลับ| www.alibaba.co.th",
+      "content": "นาฬิกาสมาร์ทวอทช์ AK105 สำหรับทุกเพศ หน้าจอ AMOLED 2 นิ้ว พร้อมไฟฉาย กันน้ำ IP67 สายซิลิโคนเจล รองรับโหมดกีฬามากกว่า 100 โหมด ตรวจจับการนอนหลับ| www.alibaba.co.th\n\n...\n\n# 2\" AMOLED Display Flashlight IP67 Waterproof Silica Gel Band AK105 Smart Sports Watch for Unisex 100+ Sports Modes Sleep Tracker\n\n...\n\n0\n\n...\n\n### Key attributes\n\n...\n\nOperating System\n\n...\n\nAndroid\n\n...\n\nfunction\n\n...\n\nCalendar, Alarm Clock, Remote Control, Sleep Tracker, Speed Measurement, Fitness Tracker, Call Reminder, Answer Call, Push Message, Message Reminder, Dial Call, Heart Rate Tracker, Activity Tracker, Multisport Tracker\n\n...\n\nfeature\n\n...\n\nTouchscreen, App Control\n\n...\n\nscreen size\n\n...\n\n44-49mm\n\n...\n\nwaterproof standard\n\n...\n\nIp67\n\n...\n\n## Key attributes\n\n...\n\nfunction\n\n...\n\nfeature\n\n...\n\nwaterproof standard\n\n...\n\nIp67\n\n...\n\nUnisex\n\n...\n\nbattery life\n\n...\n\n3 months & above\n\n...\n\ndisplay type\n\n...\n\nAMOLED\n\n...\n\n360*360\n\n...\n\nProduct Name\n\n...\n\nAK105 Smart Watch\n\n...\n\nการตรวจคลื่นไฟฟ้าหัวใจและการตรวจวัดออกซิเจนในเลือด: ติดตามค่าชีวภาพเพื่อการดูแลสุขภาพเชิงรุก\n\n...\n\nกันน้ำระดับ IP68: มั่นใจได้ถึงความทนทานระหว่างกิจกรรมกลางแจ้ง\n\n...\n\nจอแสดงผล AMOLED: ภาพคมชัดสดใส พร้อมความคมชัดและความสว่างที่เหนือกว่า\n\n...\n\nอายุการใช้งานแบตเตอรี่ 3 เดือน: ประสิทธิภาพที่ยาวนานสำหรับการใช้งานประจำวัน\n\n...\n\nหน้าจอสัมผัสและการควบคุมผ่านแอป: ใช้งานง่ายด้วยการเชื่อมต่อกับสมาร์ทโฟน",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "market_unverified",
+        "reason": "source is about smartwatch market/category but not product-specific",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.alibaba.co.th/product-detail/S8-Ultra-Serie-Smart-Watch-Phone_11000033016362.html",
+      "title": "S8 Ultra Serie Smart Watch Phone OEM 8 with AMOLED Display Earphone Answer Call Video Call Payment Functions IOS Compatible",
+      "content": "Z95 Mini Smart Watch 1.10in AMOLED Screen for Call Health Monitoring Android Silica Gel IP68 Waterproof Compass 2026 Factory Cheap Price K62 Relojes Smart Watch with 1000mAh Larger Battery BT Call Music Blood Oxygen Steps Count Smartwatch L16 Band GPS",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "market_unverified",
+        "reason": "source is about smartwatch market/category but not product-specific",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.alibaba.co.th/product-detail/Waterproof-Smart-Watch-for-Men-AK93_1601854390890.html",
+      "title": "นาฬิกาสมาร์ทวอทช์กันน้ำสำหรับผู้ชาย AK93 IP68 พร้อมฟังก์ชั่นติดตามสุขภาพ วัดอัตราการเต้นของหัวใจ ความดันโลหิต วัดค่าออกซิเจนในเลือด รองรับโหมดกีฬามากกว่า 100 โหมด| www.alibaba.co.th",
+      "content": "นาฬิกาสมาร์ทวอทช์กันน้ำสำหรับผู้ชาย AK93 IP68 พร้อมฟังก์ชั่นติดตามสุขภาพ วัดอัตราการเต้นของหัวใจ ความดันโลหิต วัดค่าออกซิเจนในเลือด รองรับโหมดกีฬามากกว่า 100 โหมด| www.alibaba.co.th\n\n...\n\n# Waterproof Smart Watch for Men AK93 IP68 Fitness Tracker with Heart Rate Blood Pressure Spo2 Monitor 100+ Sports Modes\n\n...\n\nUS$16.50-17.50\n\n...\n\nSmart Watch AK93\n\n...\n\n### Key attributes\n\n...\n\nfunction\n\n...\n\nAccelerometer, Activity Tracker, AI Voice Assistant, Alarm Clock, Answer Call, Breath Monitor, Calculators, Calendar, Call Reminder, Calorie Tracker, chronograph, Countdown, Dial Call, Distance Tracker, EMAIL, Fitness Tracker, Gesture Control, Heart Rate Tracker, Interactive Music, Menstrual Management, Message Reminder, Multisport Tracker, Music Player, Pedometer, Power Reserve, Push Message, Remote Control, Sedentary Reminder, Sleep Tracker, Social Media Notifications, Speed Measurement, Voice Call\n\n...\n\nfeature\n\n...\n\nAnti-fluid corrosion, Anti-Impact, App Control, Dustproof, Led Flashlight, Microphone, SDK available, Touchscreen\n\n...\n\nscreen size\n\n...\n\n≥50mm\n\n...\n\nwaterproof standard\n\n...\n\nIP68\n\n...\n\n## Key attributes\n\n...\n\nbattery life\n\n...\n\n5 to 10 days\n\n...\n\nwaterproof standard\n\n...\n\nIP68\n\n...\n\ndisplay type\n\n...\n\nIPS\n\n...\n\nscreen resolution\n\n...\n\n360x360\n\n...\n\nfunction\n\n...\n\nAccelerometer, Activity Tracker, AI Voice Assistant, Alarm Clock, Answer Call, Breath Monitor, Calculators, Calendar, Call Reminder, Calorie Tracker, chronograph, Countdown, Dial Call, Distance Tracker, EMAIL, Fitness Tracker, Gesture Control, Heart Rate Tracker, Interactive Music, Menstrual Management, Message Reminder, Multisport Tracker, Music Player, Pedometer, Power Reserve, Push Message, Remote Control, Sedentary Reminder, Sleep Tracker, Social Media Notifications, Speed Measurement, Voice Call\n\n...\n\nCharging Method\n\n...\n\nCharging Cable, Magnetic\n\n...\n\nGuangdong, China\n\n...\n\nProduct Name\n\n...\n\nSmart Watch AK93\n\n...\n\nProduct Type\n\n...\n\nFitness Tracker\n\n...\n\nWaterproof Level\n\n...\n\nIP68\n\n...\n\nBattery Capacity\n\n...\n\n1000mAh\n\n...\n\nDisplay\n\n...\n\n1.53 Inch Touch Screen\n\n...\n\nCall Function\n\n...\n\nBT Calling\n\n...\n\nHealth Features\n\n...\n\nHeart Rate, Blood Pressure, SpO2\n\n...\n\nSports Modes\n\n...\n\n100+ Sports Modes",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "market_unverified",
+        "reason": "source is about smartwatch market/category but not product-specific",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://shopee.co.th/",
+      "title": "【2026】Huafit A1000 Smartwatch 1000mAh ใช้ได้30วัน วันกันน้ำ ...",
+      "content": "| Hot Deals, Best Prices\n\nSkip to main content\n\nส่งฟรี\n\nFulfilled\n\nช้อปปี้เทรนด์ดี้\n\nช้อปปี้มอลล์\n\nช้อปปี้แฟชั่น\n\nช้อปปี้ถูกชัวร์",
+      "_relevance": {
+        "relevant": false,
+        "relevance_type": "homepage",
+        "reason": "source is a homepage or marketplace root without product-specific evidence",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.alibaba.co.th/product-detail/AK87-Sport-Smart-Watch-FitcloudPro-BT5_1601706937062.html",
+      "title": "นาฬิกาอัจฉริยะ AK87 Sport Smart Watch FitcloudPro BT5.2 IP68 กันน้ำ วัดอัตราการเต้นของหัวใจ วัดความดันโลหิต ตรวจจับการนอนหลับ รองรับโหมดกีฬาหลากหลายประเภท| www.alibaba.co.th",
+      "content": "นาฬิกาอัจฉริยะ AK87 Sport Smart Watch FitcloudPro BT5.2 IP68 กันน้ำ วัดอัตราการเต้นของหัวใจ วัดความดันโลหิต ตรวจจับการนอนหลับ รองรับโหมดกีฬาหลากหลายประเภท| www.alibaba.co.th\n\n...\n\n# AK87 Sport Smart Watch FitcloudPro BT5.2 IP68 Waterproof Heart Rate Blood Pressure Monitor Sleep Tracker Multiple Sports Modes\n\n...\n\n$ 17 30\n\n...\n\n#### model number\n\n...\n\nAK87\n\n...\n\n### Key attributes\n\n...\n\nOperating System\n\n...\n\nIOS\n\n...\n\nfunction\n\n...\n\nActivity Tracker, Alarm Clock, Answer Call, Calendar, Call Reminder, Calorie Tracker, Countdown, Dial Call, Distance Tracker, Fitness Tracker, Heart Rate Tracker, Message Reminder, Multisport Tracker, Pedometer, Push Message, Remote Control, Sleep Tracker, Social Media Notifications\n\n...\n\nfeature\n\n...\n\nApp Control, Touchscreen\n\n...\n\nscreen size\n\n...\n\n44-49mm\n\n...\n\nwaterproof standard\n\n...\n\nIP68\n\n...\n\n## Key attributes\n\n...\n\nscreen size\n\n...\n\n44-49mm\n\n...\n\nbattery life\n\n...\n\n5 to 10 days\n\n...\n\nOperating System\n\n...\n\nIOS\n\n...\n\nwaterproof standard\n\n...\n\nIP68\n\n...\n\ndisplay type\n\n...\n\nIPS\n\n...\n\nscreen resolution\n\n...\n\n360*360\n\n...\n\nfeature\n\n...\n\nApp Control, Touchscreen\n\n...\n\n,\n\n...\n\nCharging Method\n\n...\n\nMagnetic\n\n...\n\nBrand\n\n...\n\nYiQungo\n\n...\n\nplace of origin\n\n...\n\nGuangdong, China\n\n...\n\nProduct Name\n\n...\n\nAK87 sports smart watch\n\n...\n\nAPP\n\n...\n\nFitcloudPro\n\n...\n\nCPU\n\n...\n\n8773EWE\n\n...\n\nBattery Capacity\n\n...\n\n1000mAh\n\n...\n\nCompatible system\n\n...\n\nAndroid 5.1 and above;IOS 9.0 and above\n\n...\n\nBT Version\n\n...\n\nBT5.2\n\n...\n\nScreen\n\n...\n\n1.7inch 360*360 IPS\n\n...\n\nHeart rate chip\n\n...\n\nVC30F_S\n\n...\n\nHealth Monitor\n\n...\n\nHeart rate,blood pressure oxygen\n\n...\n\nLanguage\n\n...\n\nAK87 สมาร์ทวอทช์สำหรับกีฬา ผู้ช่วยเสียง ติดตามสุขภาพ โทรผ่านบลูทูธ แจ้งเตือนข้อความ โหมดกีฬาหลากหลาย ไฟ LED สำหรับกิจกรรมกลางแจ้ง\n\n...\n\nอายุการใช้งานแบตเตอรี่\n\n...\n\n5 ถึง 10 วัน\n\n...\n\nหน้าจอสัมผัส, ควบคุมผ่านแอป, ไฟฉาย\n\n...\n\nเครื่องติดตามการนอนหลับ, เครื่องนับก้าว, ปฏิทิน, นาฬิกาปลุก, รีโมทคอนโทรล, นับถอยหลัง, เครื่องติดตามฟิตเนส, การแจ้งเตือนสายโทรเข้า, รับสาย, ข้อความแจ้งเตือน, การแจ้งเตือนข้อความ, โทรออก, เครื่องวัดอัตราการเต้นของหัวใจ, เครื่องติดตามกิจกรรม, การแจ้งเตือนโซเชียลมีเดีย, เครื่องติดตามแคลอรี่, เครื่องติดตามระยะทาง, เครื่องติดตามกีฬาหลากหลายประเภท\n\n...\n\nมาตรฐานกันน้ำ\n\n...\n\nไอพี68\n\n...\n\nชื่อผลิตภัณฑ์\n\n...\n\nนาฬิกาสปอร์ตอัจฉริยะ AK87\n\n...\n\n8773E\n\n...\n\n773อีดับเบิลยูอี\n\n...\n\nความจุของแบตเตอรี่\n\n...\n\n1000mAh 1000 มิลลิแอมป์\n\n...\n\nAndroid 5.1 ขึ้นไป; IOS 9.0 ขึ้นไป\n\n...\n\nหน้าจอ\n\n...\n\n1.7 นิ้ว 360*360 IPS\n\n...\n\nเครื่องวัดสุขภาพ",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "market_unverified",
+        "reason": "source is about smartwatch market/category but not product-specific",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.alibaba.co.th/product-detail/1-53-Display-with-Flashlight-1000mAh_1601856346889.html",
+      "title": "นาฬิกาสมาร์ทวอทช์ AK105 สำหรับทุกเพศ หน้าจอ AMOLED 2 นิ้ว พร้อมไฟฉาย กันน้ำ IP67 สายซิลิโคนเจล รองรับโหมดกีฬามากกว่า 100 โหมด ตรวจจับการนอนหลับ| www.alibaba.co.th",
+      "content": "นาฬิกาสมาร์ทวอทช์ AK105 สำหรับทุกเพศ หน้าจอ AMOLED 2 นิ้ว พร้อมไฟฉาย กันน้ำ IP67 สายซิลิโคนเจล รองรับโหมดกีฬามากกว่า 100 โหมด ตรวจจับการนอนหลับ| www.alibaba.co.th\n\n...\n\nCambodia\n\n...\n\n# 2\" AMOLED Display Flashlight IP67 Waterproof Silica Gel Band AK105 Smart Sports Watch for Unisex 100+ Sports Modes Sleep Tracker\n\n...\n\n### Key attributes\n\n...\n\nCalendar, Alarm Clock, Remote Control, Sleep Tracker, Speed Measurement, Fitness Tracker, Call Reminder, Answer Call, Push Message, Message Reminder, Dial Call, Heart Rate Tracker, Activity Tracker, Multisport Tracker\n\n...\n\nfeature\n\n...\n\nTouchscreen, App Control\n\n...\n\nwaterproof standard\n\n...\n\nIp67\n\n...\n\n## Key attributes\n\n...\n\nbattery life\n\n...\n\n3 months & above\n\n...\n\nการตรวจคลื่นไฟฟ้าหัวใจและการตรวจวัดออกซิเจนในเลือด: ติดตามค่าชีวภาพเพื่อการดูแลสุขภาพเชิงรุก\n\n...\n\nกันน้ำระดับ IP68: มั่นใจได้ถึงความทนทานระหว่างกิจกรรมกลางแจ้ง\n\n...\n\nอายุการใช้งานแบตเตอรี่ 3 เดือน: ประสิทธิภาพที่ยาวนานสำหรับการใช้งานประจำวัน\n\n...\n\nหน้าจอสัมผัสและการควบคุมผ่านแอป: ใช้งานง่ายด้วยการเชื่อมต่อกับสมาร์ทโฟน",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "market_unverified",
+        "reason": "source is about smartwatch market/category but not product-specific",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.alibaba.co.th/product-detail/Waterproof-Smart-Watch-for-Men-AK93_1601854390890.html",
+      "title": "นาฬิกาสมาร์ทวอทช์กันน้ำสำหรับผู้ชาย AK93 IP68 พร้อมฟังก์ชั่นติดตามสุขภาพ วัดอัตราการเต้นของหัวใจ ความดันโลหิต วัดค่าออกซิเจนในเลือด รองรับโหมดกีฬามากกว่า 100 โหมด| www.alibaba.co.th",
+      "content": "นาฬิกาสมาร์ทวอทช์กันน้ำสำหรับผู้ชาย AK93 IP68 พร้อมฟังก์ชั่นติดตามสุขภาพ วัดอัตราการเต้นของหัวใจ ความดันโลหิต วัดค่าออกซิเจนในเลือด รองรับโหมดกีฬามากกว่า 100 โหมด| www.alibaba.co.th\n\n...\n\n# Waterproof Smart Watch for Men AK93 IP68 Fitness Tracker with Heart Rate Blood Pressure Spo2 Monitor 100+ Sports Modes\n\n...\n\nUS$16.50-17.50\n\n...\n\nSmart Watch AK93\n\n...\n\n### Key attributes\n\n...\n\nOperating System\n\n...\n\nwatch OS\n\n...\n\nfunction\n\n...\n\nAccelerometer, Activity Tracker, AI Voice Assistant, Alarm Clock, Answer Call, Breath Monitor, Calculators, Calendar, Call Reminder, Calorie Tracker, chronograph, Countdown, Dial Call, Distance Tracker, EMAIL, Fitness Tracker, Gesture Control, Heart Rate Tracker, Interactive Music, Menstrual Management, Message Reminder, Multisport Tracker, Music Player, Pedometer, Power Reserve, Push Message, Remote Control, Sedentary Reminder, Sleep Tracker, Social Media Notifications, Speed Measurement, Voice Call\n\n...\n\nfeature\n\n...\n\nAnti-fluid corrosion, Anti-Impact, App Control, Dustproof, Led Flashlight, Microphone, SDK available, Touchscreen\n\n...\n\nscreen size\n\n...\n\n≥50mm\n\n...\n\nwaterproof standard\n\n...\n\nIP68\n\n...\n\n## Key attributes\n\n...\n\nscreen size\n\n...\n\n≥50mm\n\n...\n\nbattery life\n\n...\n\n5 to 10 days\n\n...\n\nOperating System\n\n...\n\nwaterproof standard\n\n...\n\nIP68\n\n...\n\ndisplay type\n\n...\n\nIPS\n\n...\n\n360x360\n\n...\n\nary\n\n...\n\nMagnetic\n\n...\n\nMain Chipset\n\n...\n\nRTL8773EWE\n\n...\n\nGuangdong, China\n\n...\n\nProduct Name\n\n...\n\nSmart Watch AK93\n\n...\n\nProduct Type\n\n...\n\nFitness Tracker\n\n...\n\nWaterproof Level\n\n...\n\nIP68\n\n...\n\nBattery Capacity\n\n...\n\n1000mAh\n\n...\n\nDisplay\n\n...\n\n1.53 Inch Touch Screen\n\n...\n\nCall Function\n\n...\n\nBT Calling\n\n...\n\nHealth Features\n\n...\n\nHeart Rate, Blood Pressure, SpO2\n\n...\n\nSports Modes\n\n...\n\n100+ Sports Modes",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "market_unverified",
+        "reason": "source is about smartwatch market/category but not product-specific",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.alibaba.co.th/product-detail/2-01inch-IPS-Large-Screen-LT52_1601671680549.html",
+      "title": "นาฬิกาสมาร์ทวอทช์เด็ก LT52 หน้าจอ IPS ขนาดใหญ่ 2.01 นิ้ว รองรับ GPS 4G กันน้ำ โทรศัพท์เด็ก วิดีโอคอล แบตเตอรี่ 1000mah ควบคุมผ่านแอพพลิเคชั่น สำหรับนักเรียน| www.alibaba.co.th",
+      "content": "นาฬิกาสมาร์ทวอทช์เด็ก LT52 หน้าจอ IPS ขนาดใหญ่ 2.01 นิ้ว รองรับ GPS 4G กันน้ำ โทรศัพท์เด็ก วิดีโอคอล แบตเตอรี่ 1000mah ควบคุมผ่านแอพพลิเคชั่น สำหรับนักเรียน| www.alibaba.co.th\n\n...\n\n# 2.01inch IPS Large Screen LT52 GPS Kids Smart Watch 4G IP67 Waterproof Answer Calls Video Call 1000mAh 4-Day Battery APP Control\n\n...\n\nNo reviews yet#17 most popular in Smart Watches With RTOS certified\n\n...\n\nShanghai Dawei New Materials Co., Ltd.\n\n...\n\n## Attributes\n\n...\n\n≥50mm screen size\n\n...\n\nUp to 4 days battery life\n\n...\n\nRTOS Operating System\n\n...\n\nIp67 waterproof standard\n\n...\n\nIPS display type\n\n...\n\n240x296 screen resolution\n\n...\n\nfeature: 4 G, Gps, Led Flashlight, SIM Card, 2G\n\n...\n\nfunction: Calculators, Dial Call, Pedometer, Alarm Clock, Answer Call, Audio Recording, Positioning, Power Reserve, Remote Control, Stopwatch, Game, Flashlight\n\n...\n\napplicable people: Children\n\n...\n\nCharging Method: Charging Cable, Magnetic\n\n...\n\nMain Chipset: ASR3603, One-core ARM Cortex-R5 processor\n\n...\n\nBrand: AISHI/OEM\n\n...\n\nplace of origin: Shanghai, China\n\n...\n\nTouch panel: Full lamination, 2.5D\n\n...\n\nAPP Name: Setracker\n\n...\n\nWIFI: For location only, No streaming data.\n\n...\n\nVideo Call: By APP\n\n...\n\nSIM card: Nano SIM card (Not contained)\n\n...\n\nLocation: GPS,AGPS,LBS,WIFI\n\n...\n\n2G Network: GSM B2/3/5/8\n\n...\n\n4G Network LTE (From EU version): B1,2,3,5,7,8,20 ,38,39,40,41\n\n...\n\nbattery life\n\n...\n\nUp to 4 days\n\n...\n\nwaterproof standard\n\n...\n\nIp67",
+      "_relevance": {
+        "relevant": null,
+        "relevance_type": "unknown",
+        "reason": "source mentions 'kids' which is absent from target context",
+        "geography": "thailand"
+      }
+    }
+  ],
+  "output": "# รายงานวิเคราะห์ไม่สำเร็จ: K77\n\n**required_search_failed: true**\n\n## สถานะการค้นหา\n\n- tool_status: unknown\n- สาเหตุ: claim-to-source mismatch: thai market claim without citation: รายงานฉบับนี้เป็นการวิเคราะห์เชิงเปรียบเทียบระหว่างสมาร์ทวอทช์ **CACGO K77** กับ\n\n## สาเหตุเบื้องต้น\n\n- การค้นหาข้อมูลบนเว็บไม่สามารถดำเนินการได้ตามทีต้องการ\n- อาจเกิดจาก model ไม่ได้เรียก search tool, search ไม่พบผล, หรือผลทีได้ไม่ผ่าน relevance gate\n\n## ข้อแนะนำ\n\n- ลองเปลี่ยน model หรือ search mechanism\n- ตรวจสอบว่า model รองรับและเลือกใช้ openrouter:web_search tool จริง\n\n*หมายเหตุ: รายงานนี้ไม่สามารถสร้างได้เนื่องจากต้องการข้อมูลจากเว็บแบบ required*"
+}

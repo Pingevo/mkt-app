@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -126,13 +127,18 @@ def _build_payload(entry: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+HUB_POST_CALLBACK: Any | None = None
+"""Optional callback for acceptance/tests to observe Hub POST result."""
+
+
 def _post(endpoint: str, token: str, payload: dict[str, Any]) -> None:
     """POST จริง — ครอบ try/except ทุกกรณี."""
     if not _HTTPX_OK:
         return
+    result: dict[str, Any] = {"endpoint": endpoint, "request_id": payload.get("request_id")}
     try:
         with httpx.Client(timeout=int(_system_cfg().get("api_timeout_ai_usage", 5))) as client:
-            client.post(
+            resp = client.post(
                 endpoint,
                 json=payload,
                 headers={
@@ -140,8 +146,21 @@ def _post(endpoint: str, token: str, payload: dict[str, Any]) -> None:
                     "x-service-token": token,
                 },
             )
-    except Exception:
-        pass  # ไม่ให้ log error ทำลาย flow หลัก
+            resp.raise_for_status()
+            result["status_code"] = resp.status_code
+            result["hub_status"] = "hub_delivered"
+    except httpx.HTTPStatusError as e:
+        result["status_code"] = e.response.status_code
+        result["error"] = str(e)
+        result["hub_status"] = "hub_http_error"
+    except Exception as e:
+        result["error"] = str(e)
+        result["hub_status"] = "hub_transport_error"
+    if HUB_POST_CALLBACK is not None:
+        try:
+            HUB_POST_CALLBACK(result)
+        except Exception:
+            pass
 
 
 def record_ai_usage(entry: dict[str, Any]) -> None:
@@ -168,11 +187,38 @@ def record_ai_usage(entry: dict[str, Any]) -> None:
         t = threading.Thread(
             target=_post,
             args=(url.rstrip("/") + "/" + _HUB_ENDPOINT.lstrip("/"), token, payload),
+            name="ai-usage-hub",
             daemon=True,
         )
         t.start()
     except Exception:
         pass  # fire-and-forget — ไม่ให้ logging error ทำลาย flow หลัก
+
+
+def flush_usage_log(timeout: float = 5.0) -> bool:
+    """รอให้ daemon threads ทียิงไป Hub ทำงานเสร็จภายใน timeout วินาที.
+
+    ใช้สำหรับ CLI / runner ทีต้องการ ensure delivery ก่อน process จบ
+    โดยไม่ทำให้ production UI ต้อง block.
+
+    คืน True ถ้า threads ทั้งหมดจบทัน timeout, False ถ้ามี thread ยังทำงานอยู่
+    (หมายถึงยังไม่ทราบผล delivery).
+    """
+    try:
+        deadline = time.monotonic() + timeout
+        for t in threading.enumerate():
+            if t.name != "ai-usage-hub" or not t.is_alive():
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            t.join(timeout=remaining)
+        # ถ้ายังมี ai-usage-hub ไมตาย แปลว่า timeout
+        return not any(
+            t.name == "ai-usage-hub" and t.is_alive() for t in threading.enumerate()
+        )
+    except Exception:
+        return False  # ไม่ให้ flush error ทำลาย flow หลัก
 
 
 def log_ai_usage(entry: dict[str, Any]) -> None:
