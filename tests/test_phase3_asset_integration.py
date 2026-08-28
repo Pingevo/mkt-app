@@ -104,8 +104,8 @@ def test_asset_tool_handlers_get_asset_detail(tmp_path, monkeypatch):
 
 def test_content_schema_has_asset_ids():
     """content_schema มี field asset_ids ใน structured output."""
-    from src.content_schema import CONTENT_SCHEMA
-    post_schema = CONTENT_SCHEMA["schema"]["properties"]["posts"]["items"]
+    from src.content_schema import CONTENT_RESPONSE_SCHEMA
+    post_schema = CONTENT_RESPONSE_SCHEMA["schema"]["properties"]["posts"]["items"]
     assert "asset_ids" in post_schema["properties"]
     assert "asset_ids" in post_schema["required"]
 
@@ -268,3 +268,57 @@ def test_build_input_references_no_assets(tmp_path, monkeypatch):
     monkeypatch.setattr(asset_library, "_load_config", lambda: {})
     refs = asset_library.build_input_references(["/tmp/p1.png"], [])
     assert refs == ["/tmp/p1.png"]
+
+
+def test_build_input_references_routes_run_resource_paths(tmp_path, monkeypatch):
+    """รูปแนบจาก quick brief/run context ต้องเดินทางถึง media generator แยกจาก product/asset."""
+    from src import asset_library
+
+    db_path = tmp_path / "db.json"
+    asset_img = tmp_path / "brand.png"
+    asset_img.write_bytes(b"png")
+    db_path.write_text(json.dumps({
+        "assets": [
+            {"id": "a_0001", "file": "brand.png", "type": "image", "subject": "brand",
+             "path": str(asset_img), "hash": "h1", "status": "ready"},
+        ],
+        "next_id": 2,
+    }))
+    monkeypatch.setattr(asset_library, "_db_path", lambda: db_path)
+    monkeypatch.setattr(asset_library, "_load_config", lambda: {"media": {"max_refs_per_post": 10}})
+
+    prod_img = tmp_path / "product.png"
+    prod_img.write_bytes(b"png")
+    res_img = tmp_path / "resource.png"
+    res_img.write_bytes(b"png")
+
+    refs = asset_library.build_input_references(
+        [str(prod_img)], ["a_0001"], [str(res_img)],
+    )
+    assert str(prod_img) in refs
+    assert str(res_img) in refs
+    assert str(asset_img) in refs
+
+
+def test_build_input_references_ignores_unknown_res_id(tmp_path, monkeypatch):
+    """res_... ไม่ควรถูกส่งเข้า asset-library resolver — ต้องถูกข้าม."""
+    from src import asset_library
+
+    db_path = tmp_path / "db.json"
+    (db_path).write_text(json.dumps({"assets": [], "next_id": 1}))
+    monkeypatch.setattr(asset_library, "_db_path", lambda: db_path)
+    monkeypatch.setattr(asset_library, "_load_config", lambda: {"media": {"max_refs_per_post": 10}})
+
+    prod_img = tmp_path / "product.png"
+    prod_img.write_bytes(b"png")
+    res_img = tmp_path / "resource.png"
+    res_img.write_bytes(b"png")
+
+    refs = asset_library.build_input_references(
+        [str(prod_img)], ["res_12345"], [str(res_img)],
+    )
+    assert str(prod_img) in refs
+    assert str(res_img) in refs
+    assert "res_12345" not in refs
+    assert all(not r.startswith("res_") for r in refs)
+    assert len(refs) == 2

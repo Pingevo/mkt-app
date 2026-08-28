@@ -28,6 +28,7 @@ def _content_json():
             "hashtags": "#t",
             "image_prompts": [],
             "video_prompts": [],
+            "asset_ids": [],
         }],
     }, ensure_ascii=False)
 

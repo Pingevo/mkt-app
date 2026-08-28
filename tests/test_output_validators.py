@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from src.output_validators import validate_output
+from src.output_validators import validate_content_output, validate_output
 
 
 def _content_json() -> dict:
@@ -31,10 +31,88 @@ def _content_json() -> dict:
     }
 
 
+def _content_json_with_script_review() -> dict:
+    data = _content_json()
+    data["posts"][0]["script_review"] = {
+        "status": "reviewed",
+        "reviewed_at": "2026-08-27T10:00:00",
+        "score": 85,
+        "iterations": 1,
+        "threshold": 70,
+        "script_changed": False,
+        "issues_count": 2,
+        "hooks_count": 3,
+        "review": {"score": 85, "issues": []},
+    }
+    return data
+
+
 def test_content_creator_valid_json():
     ok, err = validate_output("content_creator", json.dumps(_content_json(), ensure_ascii=False))
     assert ok is True
     assert err == ""
+
+
+def test_content_with_script_review_validates():
+    """Final saved artifact with script_review field must pass strict CONTENT_ARTIFACT_SCHEMA."""
+    ok, err = validate_content_output(_content_json_with_script_review())
+    assert ok is True, err
+    assert err == ""
+
+
+def test_content_string_with_script_review_validates():
+    """validate_content_output accepts the raw JSON string saved to disk."""
+    ok, err = validate_content_output(json.dumps(_content_json_with_script_review(), ensure_ascii=False))
+    assert ok is True, err
+    assert err == ""
+
+
+def test_content_without_script_review_still_validates():
+    """Backward compatibility: content without script_review is still valid."""
+    ok, err = validate_content_output(_content_json())
+    assert ok is True, err
+    assert err == ""
+
+
+def test_content_with_bad_script_review_type_fails():
+    """script_review must be an object — not any other type."""
+    data = _content_json()
+    data["posts"][0]["script_review"] = "not an object"
+    ok, err = validate_content_output(data)
+    assert ok is False
+    assert "script_review" in err
+
+
+def test_raw_response_schema_has_no_script_review():
+    """โมเดลต้องตอบตาม response schema — ห้ามมี script_review ใน raw response."""
+    from src.content_schema import CONTENT_RESPONSE_SCHEMA
+    post = CONTENT_RESPONSE_SCHEMA["schema"]["properties"]["posts"]["items"]
+    assert "script_review" not in post["properties"]
+    assert "additionalProperties" in post
+    assert post["additionalProperties"] is False
+
+
+def test_artifact_schema_allows_script_review():
+    """ไฟล์ save หลัง review อนุญาต script_review เป็น optional derived field."""
+    from src.content_schema import CONTENT_ARTIFACT_SCHEMA
+    post = CONTENT_ARTIFACT_SCHEMA["schema"]["properties"]["posts"]["items"]
+    assert "script_review" in post["properties"]
+    assert "script_review" not in post["required"]
+    assert post["additionalProperties"] is False
+
+
+def test_validate_output_rejects_script_review_in_raw_response():
+    """validate_output สำหรับ content_creator raw output ต้องปฏิเสธ script_review."""
+    data = _content_json()
+    data["posts"][0]["script_review"] = {
+        "status": "reviewed", "reviewed_at": "2026-08-27T10:00:00",
+        "score": 80, "iterations": 1, "threshold": 70,
+        "script_changed": False, "issues_count": 0, "hooks_count": 0,
+        "review": {},
+    }
+    ok, err = validate_output("content_creator", json.dumps(data, ensure_ascii=False))
+    assert ok is False
+    assert "script_review" in err
 
 
 def test_content_creator_missing_posts():

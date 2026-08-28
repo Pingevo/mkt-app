@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from .config_loader import load_config
-from .content_schema import CONTENT_SCHEMA
+from .content_schema import CONTENT_ARTIFACT_SCHEMA, CONTENT_RESPONSE_SCHEMA
 
 
 def _output_is_blank(output: str | None) -> bool:
@@ -125,7 +125,7 @@ def _validate_json(output: str) -> tuple[bool, str]:
         data = json.loads(output)
     except json.JSONDecodeError as e:
         return False, f"ไม่ใช่ JSON: {e}"
-    return _validate_json_against_schema(data, CONTENT_SCHEMA["schema"])
+    return _validate_json_against_schema(data, CONTENT_RESPONSE_SCHEMA["schema"])
 
 
 def _validate_markdown(output: str, required_sections: list[str] | None = None) -> tuple[bool, str]:
@@ -252,4 +252,23 @@ def validate_output(
             return ok, err
 
     return True, ""
+
+
+def validate_content_output(output: str | dict) -> tuple[bool, str]:
+    """Validate a content_creator JSON artifact (raw string or parsed dict) against CONTENT_ARTIFACT_SCHEMA.
+
+    This is the strict gate for the final saved content artifact — including any
+    optional fields added after generation (e.g. script_review).
+    """
+    data: Any
+    if isinstance(output, str):
+        if _output_is_blank(output):
+            return False, "output ว่างเปล่า"
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError as e:
+            return False, f"ไม่ใช่ JSON: {e}"
+    else:
+        data = output
+    return _validate_json_against_schema(data, CONTENT_ARTIFACT_SCHEMA["schema"])
 

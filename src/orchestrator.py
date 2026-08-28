@@ -664,7 +664,7 @@ class Orchestrator:
                             f"{final_script}\n\n"
                             f"คืน JSON ตาม schema ใน system prompt"
                         )
-                        from .content_schema import CONTENT_SCHEMA
+                        from .content_schema import CONTENT_RESPONSE_SCHEMA
                         vp_response = llm.chat(
                             [{"role": "system", "content": vp_system},
                              {"role": "user", "content": vp_user}],
@@ -676,7 +676,7 @@ class Orchestrator:
                                 "json_schema": {
                                     "name": "content_output",
                                     "strict": True,
-                                    "schema": CONTENT_SCHEMA,
+                                    "schema": CONTENT_RESPONSE_SCHEMA["schema"],
                                 },
                             },
                             source="script_review.regenerate_prompts",
@@ -1257,8 +1257,17 @@ class Orchestrator:
                 except Exception:
                     pass  # review พังไม่ต้อง crash pipeline
 
-            # รวมผลลัพธ์ทุกแพลตฟอร์มเป็น JSON เดียว
+            # รวมผลลัพธ์ทุกแพลตฟอรืมเป็น JSON เดียว
             combined = {"posts": all_posts}
+
+            # Strict JSON contract: final saved artifact must always pass CONTENT_ARTIFACT_SCHEMA
+            from .output_validators import validate_content_output
+            ok, err = validate_content_output(combined)
+            if not ok:
+                if status_callback:
+                    status_callback(f"⚠ ไฟล์ content ไม่ผ่าน schema: {err}")
+                raise ValueError(f"Content output validation failed: {err}")
+
             content = _json.dumps(combined, ensure_ascii=False, indent=2)
             try:
                 from .content_schema import render_posts_to_markdown

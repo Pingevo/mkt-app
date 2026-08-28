@@ -759,13 +759,20 @@ def get_asset_paths(asset_ids: list[str]) -> list[str]:
     return paths
 
 
-def build_input_references(product_paths: list[str], asset_ids: list[str]) -> list[str]:
-    """รวมรูปสินค้า + รูป asset เป็น input_references เดียว — จำกัดจำนวนตาม config.
+def build_input_references(
+    product_paths: list[str],
+    asset_ids: list[str],
+    resource_paths: list[str] | None = None,
+) -> list[str]:
+    """รวมรูปสินค้า + รูปแนบจาก quick brief/run context + รูป asset เป็น input_references เดียว.
 
-    รูปสินค้ามาก่อน (สำคัญกว่า — ต้องตรงรุ่น) แล้วเติม asset จนถึง max_refs_per_post.
+    resource_paths ถูกเก็บแยกจาก asset_ids — ห้ามใช้ res_... แทน asset-library IDs.
+    รูปสินค้ามาก่อน (สำคัญกว่า — ต้องตรงรุ่น) แล้วเติมรูปแนบ จากนั้นถึง asset จนถึง max_refs_per_post.
     ใช้ helper นี้ตัวเดียวในทุก call site ของ media_gen — ไม่ต่อ list เอง.
     """
     refs = list(product_paths)
+    if resource_paths:
+        refs.extend(str(p) for p in resource_paths)
     if asset_ids:
         refs.extend(get_asset_paths(asset_ids))
     cfg = _load_config()

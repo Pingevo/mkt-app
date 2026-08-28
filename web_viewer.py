@@ -660,6 +660,56 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
     output_dir = p.parent
     session_rel = str(output_dir.relative_to(OUTPUT_DIR)) if output_dir.is_relative_to(OUTPUT_DIR) else str(output_dir)
 
+    # Resolve run-resource images: explicit request takes priority, then recover from session meta
+    request_upload_session_id = body.get("upload_session_id", "")
+    request_resource_refs = body.get("resource_refs", [])
+    resource_image_paths: list[str] = []
+    if request_resource_refs:
+        if not request_upload_session_id:
+            return JSONResponse({"error": "resource_refs requires upload_session_id"}, status_code=400)
+        ctx = build_step_run_context(
+            _resource_store,
+            workflow_id=f"generate_all_media_{output_dir.name}",
+            step_id="generate_all_media_step",
+            agent_key="content_creator",
+            quick_brief="",
+            product_refs=[],
+            resource_refs=request_resource_refs,
+            upload_session_id=request_upload_session_id,
+        )
+        if any("missing" in w or "invalid" in w or "unsupported" in w for w in ctx.warnings):
+            return JSONResponse({"error": f"resource resolution failed: {list(ctx.warnings)}"}, status_code=400)
+        resource_image_paths = list(ctx.resource_image_paths)
+    else:
+        # recover from session metadata: source of truth = resource_refs + upload_session_id
+        meta_path = output_dir / "_session_meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                meta_resource_refs = meta.get("resource_refs", [])
+                meta_upload_session_id = meta.get("upload_session_id", "")
+                if meta_resource_refs:
+                    if not meta_upload_session_id:
+                        return JSONResponse({"error": "session metadata has resource_refs but missing upload_session_id"}, status_code=400)
+                    ctx = build_step_run_context(
+                        _resource_store,
+                        workflow_id=f"generate_all_media_{output_dir.name}",
+                        step_id="generate_all_media_step",
+                        agent_key="content_creator",
+                        quick_brief="",
+                        product_refs=[],
+                        resource_refs=meta_resource_refs,
+                        upload_session_id=meta_upload_session_id,
+                    )
+                    if any("missing" in w or "invalid" in w or "unsupported" in w for w in ctx.warnings):
+                        return JSONResponse({"error": f"session resource resolution failed: {list(ctx.warnings)}"}, status_code=400)
+                    resource_image_paths = list(ctx.resource_image_paths)
+                # if the original output had no resource refs, proceed without resources
+            except json.JSONDecodeError as e:
+                return JSONResponse({"error": f"invalid _session_meta.json: {e}"}, status_code=400)
+            except Exception as e:
+                return JSONResponse({"error": f"failed to recover session resources: {e}"}, status_code=400)
+
     # หา flow_id ของ output file นี้ — เพื่อผูก cost สร้างสื่อภายหลังเข้า flow เดิม
     media_flow_id = find_flow_id_for_file(output_dir, p)
 
@@ -721,7 +771,7 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                         img_kwargs["aspect_ratio"] = img["aspect_ratio"]
                     # ส่งรูปสินค้า + รูป asset เป็น reference — image-to-image
                     _refs = _al.build_input_references(
-                        product_image_paths, img.get("asset_ids", []),
+                        product_image_paths, img.get("asset_ids", []), resource_paths=resource_image_paths,
                     )
                     if _refs:
                         img_kwargs["input_references"] = _refs
@@ -761,7 +811,7 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                         vid_kwargs["resolution"] = vid["resolution"]
                     # ส่งรูปสินค้า + รูป asset เป็น reference — reference-to-video
                     _refs = _al.build_input_references(
-                        product_image_paths, vid.get("asset_ids", []),
+                        product_image_paths, vid.get("asset_ids", []), resource_paths=resource_image_paths,
                     )
                     if _refs:
                         vid_kwargs["input_references"] = _refs
@@ -2288,16 +2338,6 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                 output_dir = OUTPUT_DIR / _session_ts
                 output_dir.mkdir(parents=True, exist_ok=True)
 
-                # บันทึก session metadata — สำหรับหารูปสินค้าจริงตอน generate media
-                try:
-                    meta_path = output_dir / "_session_meta.json"
-                    meta_path.write_text(json.dumps({
-                        "product_id": folder,
-                        "created_at": datetime.now().isoformat(),
-                    }, ensure_ascii=False), encoding="utf-8")
-                except Exception:
-                    pass
-
                 if _current_llm is None:
                     _current_llm = orch.make_client()
                 llm = _current_llm
@@ -2328,6 +2368,16 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                     )
                     if step_context.warnings:
                         raise ValueError("; ".join(step_context.warnings))
+
+                    # บันทึก session metadata พร้อม run-resource refs สำหรับ generate media ภายหลัง
+                    _write_session_meta(
+                        output_dir,
+                        product_id=folder,
+                        product_ids=[folder],
+                        resource_image_paths=list(step_context.resource_image_paths),
+                        resource_refs=resource_refs,
+                        upload_session_id=upload_session_id,
+                    )
 
                     try:
                         def _status_cb(msg, _ak=agent_key):
@@ -2478,6 +2528,29 @@ def _make_run_id() -> str:
     """สร้างรหัสเฉพาะรอบ สำหรับตั้งชื่อไฟล์ output."""
     return f"{datetime.now().strftime('%H%M%S_%f')}_{uuid.uuid4().hex}"
 
+
+def _write_session_meta(
+    output_dir: Path,
+    product_id: str,
+    *,
+    product_ids: list[str] | None = None,
+    resource_image_paths: list[str] | None = None,
+    resource_refs: list[str] | None = None,
+    upload_session_id: str = "",
+) -> None:
+    """Persist session metadata so generate-later endpoints can recover attached resources."""
+    try:
+        meta_path = output_dir / "_session_meta.json"
+        meta_path.write_text(json.dumps({
+            "product_id": product_id,
+            "product_ids": product_ids or ([product_id] if product_id else []),
+            "resource_image_paths": resource_image_paths or [],
+            "resource_refs": resource_refs or [],
+            "upload_session_id": upload_session_id,
+            "created_at": datetime.now().isoformat(),
+        }, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
@@ -2690,6 +2763,13 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
 
         # รวมผลลัพธ์ทุกแพลตฟอร์มเป็น 1 ไฟล์ (เหมือน auto mode)
         combined = {"posts": all_posts}
+
+        # Strict JSON contract: final saved artifact must always pass CONTENT_ARTIFACT_SCHEMA
+        from src.output_validators import validate_content_output
+        ok, err = validate_content_output(combined)
+        if not ok:
+            raise ValueError(f"content output validation failed: {err}")
+
         combined_json = json.dumps(combined, ensure_ascii=False, indent=2)
         try:
             from src.content_schema import render_posts_to_markdown
@@ -2735,7 +2815,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                         if img.get("aspect_ratio"):
                             img_kwargs["aspect_ratio"] = img["aspect_ratio"]
                         _refs = _al.build_input_references(
-                            image_paths, img.get("asset_ids", []),
+                            image_paths, img.get("asset_ids", []), resource_paths=extra_image_paths,
                         )
                         if _refs:
                             img_kwargs["input_references"] = _refs
@@ -2775,7 +2855,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                         if vid.get("resolution"):
                             vid_kwargs["resolution"] = vid["resolution"]
                         _refs = _al.build_input_references(
-                            image_paths, vid.get("asset_ids", []),
+                            image_paths, vid.get("asset_ids", []), resource_paths=extra_image_paths,
                         )
                         if _refs:
                             vid_kwargs["input_references"] = _refs
@@ -3136,6 +3216,16 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                 extra_image_paths = list(step_context.resource_image_paths)
                 resource_trace = [t.__dict__ for t in step_context.resource_trace]
                 all_phase_traces: list[dict[str, Any]] = [t.as_dict() for t in step_context.phase_traces]
+
+                # บันทึก session metadata พร้อม run-resource refs สำหรับ generate media ภายหลัง
+                _write_session_meta(
+                    output_dir,
+                    product_id=target_label,
+                    product_ids=folders,
+                    resource_image_paths=extra_image_paths,
+                    resource_refs=resource_refs,
+                    upload_session_id=upload_session_id,
+                )
 
                 def run_one_agent(agent_key: str, product: str, context: dict) -> str:
                     nonlocal orch, llm, output_dir, all_phase_traces
@@ -3682,6 +3772,16 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     saved_path = str(md_filepath)
                     flow_output_files.append(saved_path)
 
+                    # บันทึก session metadata พร้อม run-resource refs สำหรับ generate media ภายหลัง
+                    _write_session_meta(
+                        output_dir,
+                        product_id=chosen_pid,
+                        product_ids=chosen_pids,
+                        resource_image_paths=extra_image_paths,
+                        resource_refs=resource_refs,
+                        upload_session_id=upload_session_id,
+                    )
+
                     # อัปเดต history entry ล่าสุดให้มี output_file (orchestrator บันทึกก่อนเซฟไฟล์)
                     content_history.update_last_entry_output_file(PROJECT_ROOT, saved_path)
 
@@ -3712,7 +3812,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                         img_kwargs["aspect_ratio"] = img["aspect_ratio"]
                                     # ส่งรูปสินค้า + รูป asset เป็น reference — image-to-image
                                     _refs = _al.build_input_references(
-                                        product_img_paths, img.get("asset_ids", []),
+                                        product_img_paths, img.get("asset_ids", []), resource_paths=extra_image_paths,
                                     )
                                     if _refs:
                                         img_kwargs["input_references"] = _refs
@@ -3740,7 +3840,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                         vid_kwargs["resolution"] = vid["resolution"]
                                     # ส่งรูปสินค้า + รูป asset เป็น reference — reference-to-video
                                     _refs = _al.build_input_references(
-                                        product_img_paths, vid.get("asset_ids", []),
+                                        product_img_paths, vid.get("asset_ids", []), resource_paths=extra_image_paths,
                                     )
                                     if _refs:
                                         vid_kwargs["input_references"] = _refs

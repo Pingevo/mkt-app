@@ -1,7 +1,12 @@
-"""JSON schema สำหรับ content_creator output — ใช้กับ OpenRouter Structured Outputs.
+"""JSON schema สำหรับ content_creator output.
 
 แทนการ parse markdown ด้วย regex (ที่พังทุกครั้งที่ LLM เปลี่ยน format)
-เราบังคับให้ LLM คืน JSON ที่ตรง schema นี้ผ่าน response_format: json_schema
+เราบังคับให้ LLM คืน JSON ที่ตรง schema ผ่าน response_format: json_schema
+
+มี 2 schema แยกกันชัดเจน:
+  - CONTENT_RESPONSE_SCHEMA: สำหรับบังคับโมเดลคืนค่า (ห้ามมี telemetry/derived fields)
+  - CONTENT_ARTIFACT_SCHEMA: สำหรับ validate ไฟล์ JSON ที่ save หลัง processing
+    (อนุญาตให้มี derived fields เช่น script_review ที่เติมหลัง review)
 
 LLM คืน JSON ที่มี:
   - posts: list ของ post ที่มี field ครบ (platform, title, content, hashtags, image_prompts, video_prompts)
@@ -12,10 +17,12 @@ LLM คืน JSON ที่มี:
 
 from __future__ import annotations
 
+import copy
+
 
 # Schema สำหรับ OpenRouter Structured Outputs
 # ใช้กับ response_format: {"type": "json_schema", "json_schema": {...}}
-CONTENT_SCHEMA: dict = {
+CONTENT_RESPONSE_SCHEMA: dict = {
     "name": "content_output",
     "strict": True,
     "schema": {
@@ -128,10 +135,32 @@ CONTENT_SCHEMA: dict = {
 }
 
 
-# response_format สำหรับส่งให้ OpenRouter
+# Artifact schema สำหรับ validate ไฟล์ JSON ที่ save หลัง script review
+# อนุญาต derived field script_review แต่ post ยังถูกบังคับ structure เดิม
+CONTENT_ARTIFACT_SCHEMA: dict = copy.deepcopy(CONTENT_RESPONSE_SCHEMA)
+_CONTENT_ARTIFACT_POST_SCHEMA = CONTENT_ARTIFACT_SCHEMA["schema"]["properties"]["posts"]["items"]
+_CONTENT_ARTIFACT_POST_SCHEMA["properties"]["script_review"] = {
+    "type": "object",
+    "description": "ผลลัพธ์จากการตรวจ script อัตโนมัติ (ถ้ามี)",
+    "properties": {
+        "status": {"type": "string"},
+        "reviewed_at": {"type": "string"},
+        "score": {"type": "number"},
+        "iterations": {"type": "number"},
+        "threshold": {"type": "number"},
+        "script_changed": {"type": "boolean"},
+        "issues_count": {"type": "number"},
+        "hooks_count": {"type": "number"},
+        "review": {"type": "object"},
+    },
+    "additionalProperties": False,
+}
+
+
+# response_format สำหรับส่งให้ OpenRouter — ใช้ response schema ที่ไม่มี telemetry
 CONTENT_RESPONSE_FORMAT: dict = {
     "type": "json_schema",
-    "json_schema": CONTENT_SCHEMA,
+    "json_schema": CONTENT_RESPONSE_SCHEMA,
 }
 
 

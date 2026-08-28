@@ -29,6 +29,7 @@ def _content_json(platform="Facebook", concept="c"):
             "hashtags": "#t",
             "image_prompts": [],
             "video_prompts": [],
+            "asset_ids": [],
         }],
     }, ensure_ascii=False)
 
@@ -64,10 +65,23 @@ def test_regular_flow_multi_platform_one_file_with_script_review(_client, tmp_pa
             return _content_json(platform=platform, concept=f"concept_{platform}")
         fake.run_content_creator.side_effect = _run_cc
 
-        # script review method — track ว่าถูกเรียก
+        # script review method — track ว่าถูกเรียก + แกะ script_review ลงใน post
         def _review_script(*args, **kw):
             platform = args[1] if len(args) > 1 else kw.get("platform", "")
             script_review_called.append(platform)
+            posts = args[0]
+            if posts:
+                posts[0]["script_review"] = {
+                    "status": "reviewed",
+                    "reviewed_at": "2026-08-27T10:00:00",
+                    "score": 80,
+                    "iterations": 1,
+                    "threshold": 70,
+                    "script_changed": False,
+                    "issues_count": 0,
+                    "hooks_count": 0,
+                    "review": {"score": 80, "issues": []},
+                }
             return {}
         fake._review_script_in_posts = MagicMock(side_effect=_review_script)
 
@@ -135,6 +149,11 @@ def test_regular_flow_multi_platform_one_file_with_script_review(_client, tmp_pa
             assert "TikTok" in platforms_in_posts, (
                 f"BUG: ไม่มีโพสต์สำหรับ TikTok: {platforms_in_posts}")
 
+            # Final saved artifact with script_review must pass CONTENT_ARTIFACT_SCHEMA
+            from src.output_validators import validate_content_output
+            ok, err = validate_content_output(content)
+            assert ok, f"saved content JSON failed schema: {err}"
+
     # --- ตรวจว่า script review ถูกเรียก ---
     assert len(script_review_called) > 0, (
         "BUG: script review ไม่ถูกเรียกใน regular flow")
@@ -164,6 +183,7 @@ def test_run_flows_per_flow_quick_brief(_client, tmp_path, monkeypatch):
                 "hashtags": "#t",
                 "image_prompts": [],
                 "video_prompts": [],
+                "asset_ids": [],
             }],
         }, ensure_ascii=False)
 
