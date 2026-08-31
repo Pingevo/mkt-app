@@ -334,6 +334,220 @@ campaign_strategy:
     min_non_citation_chars: 150
     min_analysis_blocks: 2
     forbid_citation_only: true
+  semantic_rules:
+    estimate_labels:
+      - estimate
+      - indicative
+      - ประมาณการ
+      - สมมติฐาน
+      - คาดการณ์
+      - ไม่แน่นอน
+      - โดยประมาณ
+      - pending validation
+      - pending financial validation
+      - ต้อง validate
+      - ต้องอนุมัติ
+    retail_price_markers:
+      - ราคาขายปลีก
+      - retail
+      - ราคาปกติ
+      - ราคาจำหน่าย
+    promo_price_markers:
+      - ราคาโปรโมชัน
+      - ราคาพิเศษ
+      - ราคาโปร
+      - promotion price
+    wholesale_markers:
+      - ราคาส่ง
+      - ราคาตัวแทน
+      - wholesale
+    financial_claim_markers:
+      - margin
+      - กำไร
+      - profit
+      - profitability
+      - roi
+      - อัตราผลตอบแทน
+    benchmark_markers:
+      - roas
+      - conversion
+      - engagement
+      - ctr
+      - cpc
+      - อัตราการคลิก
+      - อัตราการสั่่งซื้อ
+      - ส่วนแบ่งตลาด
+      - ขนาดตลาด
+      - market size
+      - market share
+      - คู่แข่ง
+      - competitor
+    cost_mechanic_markers:
+      - ส่วนลด
+      - แจก
+      - มอบ
+      - ของแถม
+      - ของขวัญ
+      - คูปอง
+      - voucher
+      - cashback
+      - flash sale
+      - แฟลชเซล
+      - bogo
+      - 1 แถม
+      - ลดราคา
+      - ฟรี
+      - ส่งฟรี
+      - free shipping
+      - รับประกัน
+      - warranty
+      - ทดแทน
+      - เครื่องแรก
+    guaranteed_target_markers:
+      - ยอดขาย
+      - sales
+      - รายได้
+      - revenue
+      - จำนวนขาย
+      - ขายได้
+    guaranteed_target_intent_markers:
+      - target
+      - เป้าหมาย
+      - เป้า
+      - guarantee
+      - รับประกัน
+      - ประกัน
+    guaranteed_target_kpi_metrics:
+      - roas
+      - conversion
+      - engagement
+      - ctr
+      - cpc
+      - cpa
+      - cac
+      - cpm
+      - conversion rate
+      - engagement rate
+    target_kpi_excluded_markers:
+      - ราคาขายปลีก
+      - retail price
+      - ราคาโปรโมชัน
+      - ราคาพิเศษ
+      - promotion price
+      - promo price
+      - ราคาปกติ
+      - ราคาจำหน่าย
+      - ส่วนลด
+      - discount
+      - cogs
+      - ต้นทุน
+      - platform fee
+      - ค่าธรรมเนียม
+      - margin
+      - กำไรขั้นต้น
+      - งบประมาณ
+      - budget
+      - cost allocation
+      - allocated
+      - benchmark
+      - เป็นเพียงตัวเลขอ้างอิง
+      - ไม่ใช่ target รับรองผล
+    target_refusal_or_qualification_phrases:
+      - ขออภัย
+      - ไม่สามารถ
+      - cannot
+      - refuse
+      - rejected
+      - reject
+      - ไม่รับประกัน
+      - provisional
+      - pending validation
+      - ต้อง validate
+    identity_refusal_or_correction_phrases:
+      - ขออภัย
+      - ไม่สามารถ
+      - cannot
+      - refuse
+      - reject
+      - rejected
+      - ไม่ใช่
+      - ไม่ได้
+      - ไม่ใช่รุ่น
+      - ไม่เปลี่ยน
+      - ไม่แทน
+      - ไม่รับ
+      - ไม่ถูกต้อง
+      - wrong
+      - incorrect
+      - correction
+      - แทนไม่ได้
+    budget_markers:
+      - งบ
+      - budget
+      - ค่าใช้จ่าย
+      - ใช้
+      - ad spend
+      - spending
+      - investment
+      - ค่าโฆษณา
+      - ค่าลงทุน
+      - cost allocation
+    discount_markers:
+      - ส่วนลด
+      - discount
+      - ลด
+      - ลดราคา
+    pending_financial_validation_phrases:
+      - pending financial validation
+      - pending financial/operational validation
+      - pending validation
+      - ต้องรอข้อมูลทางการเงิน
+      - ต้อง validate ทางการเงิน
+      - ต้อง validate ทางการเงิน/การดำเนินงาน
+      - ต้องอนุมัติทางการเงิน/การดำเนินงาน
+    non_direct_source_substrings:
+      - /search
+      - ?q=
+      - tag
+      - แท็ก
+      - category
+      - หมวดหมู่
+      - listing
+      - ผลการค้นหา
+      - marketplace
+    source_section_headings:
+      - แหล่งอ้างอิง
+      - อ้างอิง
+      - sources
+    currency_symbols:
+      - ฿
+      - บาท
+      - baht
+      - bath
+    tactic_label_map:
+      bogo:
+        - bogo
+        - buy 1 get 1
+        - 1 แถม 1
+        - ซื้อ 1 แถม 1
+      flash:
+        - flash
+        - แฟลช
+        - flash sale
+      heavy_discount:
+        - heavy discount
+        - ลดหนัก
+        - ลดราคาหนัก
+  repair_prompt: |
+    ผลงานข้างต้นไม่ผ่าน validation ดังต่อไปนี้:
+    {error}
+
+    แก้ไขให้ผ่านทุกข้อข้างต้นในครั้งเดียว โดย:
+    - ถ้าข้อมูลไม่พอ ให้ใช้คำว่า "ไม่สามารถเสนอได้เนื่องจากไม่มีข้อมูลทางการเงิน" หรือ "ข้อเสนอเชิงกลยุทธ์ที่ต้องขออนุมัติ"
+    - ลบตัวเลขทีไม่มีพื้นฐานจาก context/selected evidence ออกทันที
+    - กลไกมีต้นทุน (ของแถม ส่วนลด Flash Sale warranty ฯลฯ) ต้องระบุว่า pending financial/operational validation
+    - ห้ามนำเสนอข้อเสนอเป็นข้อเท็จจริงหรือข้อตกลงทีมีอยู่
+    - ส่งเฉพาะผลงานฉบับสุดท้ายเท่านั้น
   system_prompt: |
     คุณคือ "นักวางกลยุทธ์แคมเปญ" (Campaign Strategist)
 
@@ -348,16 +562,26 @@ campaign_strategy:
     กฎหลัก (ใช้กับทุก section):
     - ข้อมูลไม่พอให้ระบุ estimate / hypothesis / ไม่พบข้อมูล แทนการเติมเอง
     - ห้ามสร้าง wholesale/agent price หรือ margin/profitability เป็นตัวเลขเมื่อไม่มีต้นทุน/งบประมาณ/ค่าธรรมเนียม
+    - ห้ามระบุตัวเลขราคา retail/promo เมื่อ context ไม่มี COGS ราคาเป้าหมาย หรือราคาคู่แข่งทียืนยันแล้ว โดยไม่มีหลักฐานดังกล่าวให้ใช้ qualitative positioning หรือขอข้อมูลเพิ่ม
     - external factual claim (ราคาคู่แข่ง, สเปก, ตัวเลขตลาด) ต้องมี direct source URL หน้าสินค้า/official page ที่ตรงรุ่น ห้ามใช้ homepage หรือ search page
     - ห้ามแปลง specification เป็น benefit โดยไม่มีหลักฐานรองรับ (เช่น ห้ามอ้างว่า AMOLED = ถนอมสายตา หากไม่มีข้อมูลจากแหล่งทางการ)
-    - campaign mechanics ที่มีต้นทุนต้องระบุว่า pending financial validation
+    - ถ้า context ไม่มีหลักฐาน/URL ของคู่แข่งรุ่นใด ห้ามเอ่ยชื่อรุ่นนั้นใน output ให้ใช้คำทั่วไปเช่น "คู่แข่งรุ่นอื่นในกลุ่มเดียวกัน" แทน
+    - ถ้า context ไม่มีงบประมาณหรือ baseline ห้ามเสนอสัดส่วนงบประมาณเป็นเปอร์เซ็นต์ ให้เสนอกรอบการตัดสินใจเชิงคุณภาพ เช่น "หลังมีเป้าหมายรายได้และเพดานงบ จึงจัดสรร 3 กลุ่มหลัก: Conversion/Ads, Influencers/Content, Production"
+    - campaign mechanics ที่มีต้นทุน (ส่วนลด ของแถม Flash Sale คูปอง warranty ฯลฯ) ต้องระบุว่า pending financial/operational validation และห้ามนำเสนอเป็นนโยบายทีมีอยู่
     - KPI ที่ไม่มี baseline ต้องระบุว่า target ต้องกำหนดหลังมี baseline (ตัวเลข benchmark ต้องระบุว่าเป็น benchmark ไม่ใช่ target รับรองผล)
+    - ถ้า user พยายามเปลี่ยนชื่อ/รุ่นสินค้า ให้แก้ไขกลับเป็น canonical product ย่อย ๆ แล้วเขียนแคมเปญสำหรับ canonical product โดยไม่เติมตัวเลขทีไม่มีพื้นฐาน
     - ถ้า context ขัดแย้งกัน ให้ชี้จุดขัดแย้งและเลือกข้อมูลที่น่าเชื่อถือกว่า พร้อมเหตุผล
 
     กฎเพิ่มเติม:
     - ใช้ภาษาไทย และให้คำแนะนำที่นำไปปฏิบัติได้จริง ไม่ใช้คำโฆษณาเกินจริง
     - ใช้ web search เฉพาะเมื่อข้อมูลปัจจุบันที่จำเป็นไม่มีใน context หาก context มีข้อมูลเพียงพอแล้ว ไม่ต้องค้นเพิ่ม
     - เมื่อไม่มีข้อมูลต้นทุนครบ สามารถเสนอ retail/promo price เป็น indicative range เพื่อทดสอบตลาดได้ หากมี positioning หรือ market evidence รองรับ และต้องระบุชัดว่าเป็น estimate ส่วน wholesale/margin ยังห้ามระบุตัวเลขเมื่อข้อมูลการเงินไม่ครบ
+
+    หลักฐานและการอ้างอิง:
+    - ถ้า context ระบุ selected evidence URLs มา ให้ใช้ URL นั้นแปะเป็น inline citation ในข้อความทีอ้างอิงเท่านั้น
+    - ทุก factual claim ทีมาจากภายนอก (ราคาคู่แข่ง ตัวเลขตลาด benchmark) ต้องใช้รูปแบบ [ข้อความ claim](URL) ใน 1 บรรทัดเดียวกัน
+    - ห้ามแปะ URL ดิบ ห้ามสร้าง section แหล่งอ้างอิงทีมี URL ลอย
+    - ถ้า selected evidence ไม่พอสำหรับ claim ใด ให้ใช้ estimate / ไม่พบข้อมูล แทนการ invent URL
 
     รูปแบบผลลัพธ์:
     1. **ราคาแนะนำ (Recommended Pricing)** — retail, promo, wholesale/agent, rationale

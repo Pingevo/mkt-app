@@ -45,8 +45,8 @@ def _valid_output():
     """A minimal valid output containing all required Markdown section headings."""
     return (
         "## ราคาแนะนำ\n"
-        "- ราคาขายปลีก: ฿2,490-2,790 (estimate)\n"
-        "- ราคาโปรโมชัน: ฿2,240 (indicative)\n"
+        "- กลุ่มราคาเป้าหมาย: ระดับ mid-range (ต้องกำหนดหลังมีต้นทุน)\n"
+        "- ราคาโปรโมชัน: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
         "- ราคาส่ง/ตัวแทน: ไม่สามารถระบุได้เนื่องจากขาดข้อมูลต้นทุน\n\n"
         "## แคมเปญหลัก\n"
         "- ชื่อ: Launch\n\n"
@@ -59,7 +59,7 @@ def _valid_output():
         "## งบประมาณประมาณการ\n"
         "- ประมาณ 50,000 บาท (estimate)\n\n"
         "## แหล่งอ้างอิง\n"
-        "- [ตัวอย่าง](https://shopee.co.th/product/123456)"
+        "- ไม่มี external factual claim ที่ต้องอ้างอิง"
     )
 
 

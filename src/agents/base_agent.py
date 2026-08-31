@@ -558,6 +558,7 @@ class BaseAgent:
         else:
             to_verify = unique_urls
 
+        self._last_relevant_annotations = relevant_annotations
         citation_policy = self.config.get("citation_policy", {})
         if citation_policy.get("mode") == "inline_first":
             # Inline-first: ถ้า output มี URL จาก annotations อยู่แล้ว ไม่ append dump ซ้ำ

@@ -39,11 +39,11 @@ class FakeLLM:
 
 
 def _valid_campaign_output() -> str:
-    """A valid campaign output that passes all guardrails with flags=False."""
+    """A valid campaign output that passes all semantic guardrails."""
     return (
         "## ราคาแนะนำ\n"
-        "- ราคาขายปลีก: ฿2,490-2,790 (estimate)\n"
-        "- ราคาโปรโมชัน: ฿2,240 (indicative)\n"
+        "- กลุ่มราคาเป้าหมาย: ระดับ mid-range (ต้องกำหนดหลังมีต้นทุน)\n"
+        "- ราคาโปรโมชัน: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
         "- ราคาส่ง/ตัวแทน: ไม่สามารถระบุได้เนื่องจากขาดข้อมูลต้นทุน\n\n"
         "## แคมเปญหลัก\n"
         "- ชื่อ: Launch Campaign\n\n"
@@ -56,7 +56,7 @@ def _valid_campaign_output() -> str:
         "## งบประมาณประมาณการ\n"
         "- ประมาณ 50,000 บาท (estimate)\n\n"
         "## แหล่งอ้างอิง\n"
-        "- [Shopee product page](https://shopee.co.th/product/123456)"
+        "- ไม่มี external factual claim ที่ต้องอ้างอิง"
     )
 
 
@@ -271,14 +271,38 @@ def test_campaign_strategy_single_generate_call_no_repair():
     assert len(repair_calls) == 0
 
 
+def _with_web_citation_output() -> str:
+    """A compliant output that already contains an inline citation for the URL
+    that the web search annotation would provide."""
+    return (
+        "## ราคาแนะนำ\n"
+        "- กลุ่มราคาเป้าหมาย: ระดับ mid-range (ต้องกำหนดหลังมีต้นทุน)\n"
+        "- ราคาโปรโมชัน: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
+        "- ราคาคู่แข่ง: ฿2,500 [Shopee](https://shopee.co.th/product/123)\n"
+        "- ราคาส่ง/ตัวแทน: ไม่สามารถระบุได้เนื่องจากขาดข้อมูลต้นทุน\n\n"
+        "## แคมเปญหลัก\n"
+        "- ชื่อ: Launch Campaign\n\n"
+        "## แคมเปญเสริม\n"
+        "- แคมเปญ 1\n\n"
+        "## ช่องทางโปรโมท\n"
+        "- TikTok\n\n"
+        "## KPI ที่ควรวัดผล\n"
+        "- ยอดขาย (target ต้องกำหนดหลังมี baseline)\n\n"
+        "## งบประมาณประมาณการ\n"
+        "- ประมาณ 50,000 บาท (estimate)\n\n"
+        "## แหล่งอ้างอิง\n"
+        "- [Shopee product](https://shopee.co.th/product/123)\n"
+    )
+
+
 def test_campaign_strategy_citations_appended_without_verification():
-    """Annotations from generate must still be appended as citations,
-    even when verify_urls=false (citations ≠ verification)."""
+    """With inline_first citation policy, the model's own inline citation is kept
+    and no fallback URL dump/verification section is appended."""
     orch = _make_orchestrator()
     fake_llm = FakeLLM(
-        output=_valid_campaign_output(),
+        output=_with_web_citation_output(),
         annotations=[
-            {"url": "https://shopee.co.th/product/123", "title": "Shopee product"},
+            {"url": "https://shopee.co.th/product/123", "title": "Product X smartwatch"},
         ],
     )
 
@@ -288,10 +312,10 @@ def test_campaign_strategy_citations_appended_without_verification():
         llm=fake_llm,
     )
 
-    # Citation section must be present
-    assert "แหล่งอ้างอิงจริงจากการค้นหา" in result
+    # The inline citation is preserved in the result.
     assert "https://shopee.co.th/product/123" in result
-    # Verification section must NOT be present
+    # No fallback dump section and no verification section are appended.
+    assert "แหล่งอ้างอิงจริงจากการค้นหา" not in result
     assert "URL ที่ verify ผ่าน" not in result
 
 
