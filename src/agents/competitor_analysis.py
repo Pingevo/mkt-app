@@ -217,32 +217,42 @@ class CompetitorAnalysisAgent(BaseAgent):
         return True, "", research
 
     def _build_evidence_manifest(self) -> str:
-        """Canonical manifest of selected/relevant annotations for revise call."""
+        """Canonical manifest of all non-rejected annotations for revise call.
+
+        Market parity: include ALL non-rejected search results (relevant=True
+        and relevant=None) with relevance labels, so the model can decide
+        which sources to cite — like Claude/ChatGPT do.
+        """
         relevant = getattr(self, "_last_relevant_annotations", []) or []
         target = getattr(self, "_target_model", "") or ""
         competitors = getattr(self, "_competitor_names", []) or []
         lines = [
             f"สินค้าเป้าหมาย (target_model): {target}",
-            f"คู่แข่งใน scope: {', '.join(competitors) if competitors else '(ไม่ระบุ)'}"
+            f"คู่แข่งใน scope: {', '.join(competitors) if competitors else '(ไม่ระบุ)'}",
+            f"หมายเหตุ: competitor_names ต้องมาจากรายชื่อคู่แข่งข้างต้นเสมอ แม้จะไม่มี evidence",
         ]
         if not relevant:
-            lines.append("ไม่พบ URL ทีผ่าน relevance gate")
+            lines.append("ไม่พบ URL จากการค้นหา")
         else:
-            lines.append("--- รายการ URL ทีผ่าน relevance gate (เลือกจากนี้เท่านั้น) ---")
+            lines.append("--- รายการ URL จากการค้นหา (เลือกใช้ตามความเกี่ยวข้อง) ---")
             for i, a in enumerate(relevant, 1):
                 rel = a.get("_relevance", {})
                 title = a.get("title", "").strip()
                 url = a.get("url", "").strip()
                 geo = rel.get("geography", "global")
+                rel_type = rel.get("relevance_type", "unknown")
+                rel_label = "verified" if rel.get("relevant") is True else "unverified"
                 lines.append(f"\n[{i}] URL: {url}")
                 lines.append(f"    title: {title}")
                 lines.append(f"    geography: {geo}")
+                lines.append(f"    relevance: {rel_label} ({rel_type})")
                 content = (a.get("content") or "").strip()
                 if content:
                     lines.append(f"    snippet: {content[:400]}")
         lines.append(
-            "\nคุณสามารถใช้ได้เฉพาะ URL จากรายการข้างต้นเท่านั้น "
-            "ห้ามค้นหาเว็บเพิ่ม ห้าม fetch ห้ามสร้าง factual claim ใหม่"
+            "\nคุณสามารถใช้ URL จากรายการข้างต้นเท่านั้น "
+            "ห้ามค้นหาเว็บเพิ่ม ห้าม fetch ห้ามสร้าง factual claim ใหม่ "
+            "ถ้าไม่มี evidence พอ ให้คืน evidence: [] และอธิบายใน uncertainty"
         )
         return "\n".join(lines)
 

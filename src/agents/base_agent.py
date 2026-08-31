@@ -356,6 +356,8 @@ class BaseAgent:
                 source=f"{self.agent_name}.generate",
                 return_annotations=True,
             )
+            # Preserve raw web-search evidence for downstream review.
+            self._last_annotations = list(annotations or [])
             # แปะ URL จริงจาก citations + verify ถ้าเปิด
             output = self._append_citations_and_verify(output, annotations)
         else:
@@ -372,6 +374,7 @@ class BaseAgent:
                 temperature=self.config.get("temperature", 0.7),
                 max_tokens=self.config.get("max_tokens", 4096),
                 max_retry_limit=self.config.get("max_retry_limit", 3),
+                stream=self.config.get("stream", True),
                 response_format=response_format,
                 provider=provider,
                 source=f"{self.agent_name}.generate",
@@ -430,9 +433,11 @@ class BaseAgent:
         # บันทึก draft ก่อน repair เพื่อ acceptance diagnostics
         self._last_draft_output = output
         self._last_first_validation_error = error if not ok else ""
+        self._last_repair_count = 0
         for _ in range(max_repair):
             if ok:
                 break
+            self._last_repair_count += 1
             console.print(f"[yellow]output ไม่ผ่าน validation: {error}[/yellow]")
             repair_error = error
             repaired = self._repair_output(output, error, messages, response_format)
@@ -443,6 +448,7 @@ class BaseAgent:
                 )
             output = repaired
             ok, error = self.validate_output(output)
+        self._last_repaired_output = output
         if not ok:
             raise ValueError(f"Agent {self.agent_name} ตรวจ output ไม่ผ่านหลังซ่อม {max_repair} รอบ: {error}")
 
@@ -551,14 +557,23 @@ class BaseAgent:
                 rel = result.get("relevant")
                 if rel is False:
                     continue
-                if rel is True:
-                    relevant_annotations.append(a)
-                else:  # None / unknown
+                # Market parity: include both relevant=True AND relevant=None
+                # in _last_relevant_annotations so the model sees all non-rejected
+                # search results and can decide what to cite — like Claude/ChatGPT.
+                # The _relevance label lets the model distinguish verified vs
+                # unverified sources.
+                relevant_annotations.append({**a, "_relevance": result})
+                if rel is None:  # None / unknown — also send to web_fetch verify
                     to_verify.append(a)
         else:
             to_verify = unique_urls
 
         self._last_relevant_annotations = relevant_annotations
+        # Let subclasses update derived state (selected evidence, competitor models, etc.)
+        # before the first validation/repair.
+        on_ready = getattr(self, "_on_annotations_ready", None)
+        if callable(on_ready):
+            on_ready()
         citation_policy = self.config.get("citation_policy", {})
         if citation_policy.get("mode") == "inline_first":
             # Inline-first: ถ้า output มี URL จาก annotations อยู่แล้ว ไม่ append dump ซ้ำ
@@ -580,8 +595,9 @@ class BaseAgent:
             return output
 
         # Default: แสดง source ทีไม่ถูก reject ใน section หลัก (relevant=True กับ unknown)
-        # source ที unknown ยังตรวจ verify ต่อถ้า verify_urls เปิด
-        citation_annotations = relevant_annotations + to_verify
+        # relevant_annotations รวม relevant=None แล้ว ไม่ต้อง append to_verify ซ้ำ
+        # ถ้าไม่มี assess function (else branch) relevant_annotations ว่าง ใช้ to_verify แทน
+        citation_annotations = relevant_annotations if relevant_annotations else to_verify
 
         if citation_annotations:
             output += (
@@ -727,6 +743,7 @@ class BaseAgent:
                 temperature=review_temp,
                 max_tokens=self.config.get("max_tokens", 4096),
                 max_retry_limit=self.config.get("max_retry_limit", 3),
+                stream=self.config.get("stream", True),
                 response_format=response_format,
                 source=f"{self.agent_name}.review",
             )
@@ -755,11 +772,31 @@ class BaseAgent:
         """ให้ LLM แก้ output ที่ไม่ผ่าน validation โดยไม่เปลี่ยนเนื้อหา."""
         prompt = self.config.get(
             "repair_prompt",
-            "ผลงานข้างต้นไม่ตรงตามรูปแบบที่กำหนด: {error}\nกรุณาแก้ไขให้ตรงรูปแบบโดยไม่เปลี่ยนเนื้อหา ส่งเฉพาะผลงานฉบับสุดท้ายเท่านั้น",
+            "ผลงานข้างต้นไม่ตรงตามรูปแบบที่กำหนด: {error}\n"
+            "กรุณาแก้ไขให้ตรงรูปแบบโดยไม่เปลี่ยนเนื้อหา ส่งเฉพาะผลงานฉบับสุดท้ายเท่านั้น",
         )
+        evidence_text = ""
+        selected = list(getattr(self, "_selected_evidence", []) or [])
+        if selected:
+            lines = ["ข้อมูลหลักฐานทีเลือกใช้ (selected evidence) สำหรับแก้ไข:"]
+            for a in selected:
+                title = a.get("title") or "แหล่งอ้างอิง"
+                url = a.get("url") or ""
+                content = (a.get("content") or "").replace("\n", " ").strip()
+                # Compact excerpt: keep enough to be useful, not a full-page dump.
+                snippet = content[:300]
+                if len(content) > 300:
+                    snippet += " ..."
+                lines.append(f"- {title} ({url}): {snippet}")
+            lines.append(
+                "คำแนะนำ: แก้ไขข้อผิดพลาดโดยอ้างอิงข้อมูลด้านบนเมื่อเหมาะสม, "
+                "เก็บข้อเท็จจริงทีมีหลักฐานสนับสนุน พร้อม inline citation [claim](URL), "
+                "ลบเฉพาะข้อมูลทีไม่มีหลักฐาน ไม่สร้างตัวเลขเอง ไม่แปลงสกุลเงิน ไม่บอกว่าไม่มีหลักฐานเมื่อมี"""
+            )
+            evidence_text = "\n".join(lines) + "\n\n"
         repair_messages = messages + [
             {"role": "assistant", "content": output},
-            {"role": "user", "content": prompt.format(error=error)},
+            {"role": "user", "content": evidence_text + prompt.format(error=error)},
         ]
         return self.llm.chat(
             repair_messages,
@@ -767,6 +804,7 @@ class BaseAgent:
             temperature=self.config.get("temperature", 0.7),
             max_tokens=self.config.get("max_tokens", 4096),
             max_retry_limit=self.config.get("max_retry_limit", 3),
+            stream=self.config.get("stream", True),
             response_format=response_format,
             source=f"{self.agent_name}.repair",
         )

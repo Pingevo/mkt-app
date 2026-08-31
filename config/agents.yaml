@@ -382,6 +382,9 @@ campaign_strategy:
       - market share
       - คู่แข่ง
       - competitor
+      - benchmark
+      - เกณฑ์อ้างอิง
+      - เกณฑ์
     cost_mechanic_markers:
       - ส่วนลด
       - แจก

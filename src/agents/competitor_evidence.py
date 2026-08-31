@@ -208,9 +208,16 @@ class CompetitorReportRenderer:
             return False, f"URL not in selected evidence: {ev.url}", None
 
         rel = a.get("_relevance", {})
-        if rel.get("relevance_type") != "competitor":
-            return False, f"source is not competitor-specific: {ev.url}", None
 
+        # Market parity: let the model decide which sources to cite, but keep
+        # a structural guardrail against sources that are clearly not evidence
+        # (homepage, category_mismatch).  Other relevance types (competitor,
+        # target, market_unverified, unknown) are left to the model's judgment.
+        rel_type = rel.get("relevance_type", "")
+        if rel_type in ("homepage", "category_mismatch"):
+            return False, f"source is structurally not evidence ({rel_type}): {ev.url}", None
+
+        # Factual check: the source text must actually mention the competitor.
         src_text = f"{a.get('url','')} {a.get('title','')} {a.get('content','')}".lower()
         if ev.competitor.lower() not in src_text:
             return False, f"source does not mention competitor {ev.competitor}: {ev.url}", None

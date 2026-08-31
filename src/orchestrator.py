@@ -12,7 +12,7 @@ Each step can also run independently.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,12 @@ from .config_loader import get_agent_config, load_config
 from .data_loader import detect_data_files, get_agent_data
 from .llm_client import LLMClient
 from .run_context import StepRunContext, build_multimodal_content
+from .flow_context import set_usage_reference, set_usage_metadata, clear_usage_context
+from .ai_usage import HubReceiptCollector, flush_usage_log, reconcile_hub_receipts, USAGE_LOG_PATH
+from .evaluation.campaign_qualification import (
+    read_usage_log_for_reference,
+    snapshot_usage_log_offset,
+)
 
 # Platform display names — ใช้ในหลายที่ นิยามครั้งเดียว
 _PLATFORM_NAMES = {"facebook": "Facebook", "tiktok": "TikTok"}
@@ -169,7 +175,7 @@ class Orchestrator:
         """Run manager agent to analyze user intent and plan execution."""
         own = llm is None
         if own:
-            llm = self._make_client()
+            llm = self.make_client()
         try:
             agent = self._make_agent("manager", ManagerAgent, llm)
             products = self.get_products_state()
@@ -217,7 +223,7 @@ class Orchestrator:
         """
         own = llm is None
         if own:
-            llm = self._make_client()
+            llm = self.make_client()
         try:
             agent = self._make_agent("product_spec", ProductSpecAgent, llm)
             prompt = agent.build_prompt(raw_data, product_images or self.product_images)
@@ -290,7 +296,7 @@ class Orchestrator:
     ) -> str:
         own = llm is None
         if own:
-            llm = self._make_client()
+            llm = self.make_client()
         try:
             agent = self._make_agent("competitor_analysis", CompetitorAnalysisAgent, llm)
             # ดึงข้อมูลสินค้าจาก DB ถ้ามี ไม่งั้นใช้ parameter (backward compatible)
@@ -315,12 +321,19 @@ class Orchestrator:
         quick_brief: str = "", resource_context: str = "",
         extra_image_paths: list[str] | None = None,
         step_context: StepRunContext | None = None,
+        web_search: bool | None = None,
     ) -> str:
         own = llm is None
         if own:
-            llm = self._make_client()
+            llm = self.make_client()
+        run_exception: Exception | None = None
+        run_ref = ""
         try:
             agent = self._make_agent("campaign_strategy", CampaignStrategyAgent, llm)
+            if web_search is not None:
+                if agent.config is None:
+                    agent.config = {}
+                agent.config["web_search"] = web_search
             # ดึงข้อมูลสินค้าจาก DB ถ้ามี ไม่งั้นใช้ parameter (backward compatible)
             product_data = self._get_product_data(product_spec)
             # CampaignStrategyAgent.build_prompt accepts a single context dict.
@@ -332,14 +345,76 @@ class Orchestrator:
             }
             prompt = agent.build_prompt(context)
             image_paths = self._get_product_image_paths()
-            result = agent.run(
-                prompt, quick_brief=quick_brief, image_paths=image_paths,
-                resource_context=resource_context, extra_image_paths=extra_image_paths,
-                step_context=step_context,
-            )
-            self.results["campaign_strategy"] = result
-            return result
+            run_ref = f"orchestrator:{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+            set_usage_reference(run_ref)
+            set_usage_metadata({
+                "product_id": self.product_id or "",
+                "agent": "campaign_strategy",
+                "run_ref": run_ref,
+            })
+            usage_log_offset = snapshot_usage_log_offset(USAGE_LOG_PATH)
+            result: str = ""
+            with HubReceiptCollector() as hub_collector:
+                try:
+                    result = agent.run(
+                        prompt, quick_brief=quick_brief, image_paths=image_paths,
+                        resource_context=resource_context, extra_image_paths=extra_image_paths,
+                        step_context=step_context,
+                    )
+                except Exception as exc:
+                    run_exception = exc
+                finally:
+                    # Preserve the latest generated/repaired text even on exception.
+                    last_draft = getattr(agent, "_last_draft_output", "") or ""
+                    last_repaired = getattr(agent, "_last_repaired_output", "") or ""
+                    final_text = result or last_repaired or last_draft
+
+                    # Read local usage and flush Hub receipts even on exception.
+                    run_entries = read_usage_log_for_reference(USAGE_LOG_PATH, run_ref, usage_log_offset)
+                    run_cost_usd = round(sum(float(e.get("cost_usd", 0) or 0) for e in run_entries), 6)
+                    actual_model = run_entries[-1].get("model") if run_entries else "unknown"
+                    request_ids = [e.get("request_id") for e in run_entries if e.get("request_id")]
+                    call_classifications = [e.get("source") for e in run_entries]
+
+                    hub_ack = flush_usage_log(timeout=5.0)
+                    hub_reconciliation = reconcile_hub_receipts(run_entries, hub_collector.results, flush_completed=hub_ack)
+
+                    self.results["campaign_strategy_run_ref"] = run_ref
+                    self.results["campaign_strategy_output"] = final_text
+                    self.results["campaign_strategy_draft"] = last_draft
+                    self.results["campaign_strategy_repaired"] = last_repaired
+                    self.results["campaign_strategy_raw_annotations"] = list(getattr(agent, "_last_annotations", []) or [])
+                    self.results["campaign_strategy_relevant_annotations"] = list(getattr(agent, "_last_relevant_annotations", []) or [])
+                    self.results["campaign_strategy_selected_evidence"] = list(getattr(agent, "_selected_evidence", []) or [])
+                    self.results["campaign_strategy_selected_evidence_urls"] = sorted(getattr(agent, "_selected_evidence_urls", set()))
+                    self.results["campaign_strategy_requested_competitor_models"] = sorted(getattr(agent, "_requested_competitor_models", set()))
+                    self.results["campaign_strategy_evidence_confirmed_competitor_models"] = sorted(getattr(agent, "_evidence_confirmed_competitor_models", set()))
+                    self.results["campaign_strategy_run_entries"] = run_entries
+                    self.results["campaign_strategy_run_cost_usd"] = run_cost_usd
+                    self.results["campaign_strategy_actual_model"] = actual_model
+                    self.results["campaign_strategy_request_ids"] = request_ids
+                    self.results["campaign_strategy_call_classifications"] = call_classifications
+                    self.results["campaign_strategy_hub_results"] = hub_collector.results
+                    self.results["campaign_strategy_hub_reconciliation"] = hub_reconciliation
+
+            # Audit the preserved final text (draft, repaired, or final) for diagnostics.
+            try:
+                if final_text:
+                    audit = agent.audit_output(final_text)
+                    self.results["campaign_strategy_validator_results"] = [{"rule": a.rule, "ok": a.ok, "reason": a.reason} for a in audit]
+                    self.results["campaign_strategy_validator_ok"] = all(a.ok for a in audit)
+                else:
+                    self.results["campaign_strategy_validator_results"] = []
+                    self.results["campaign_strategy_validator_ok"] = False
+            except Exception as audit_exc:
+                self.results["campaign_strategy_validator_results"] = [{"rule": "audit_error", "ok": False, "reason": str(audit_exc)}]
+                self.results["campaign_strategy_validator_ok"] = False
+
+            if run_exception:
+                raise run_exception
+            return final_text
         finally:
+            clear_usage_context()
             if own:
                 llm.close()
 
@@ -358,7 +433,7 @@ class Orchestrator:
     ) -> str:
         own = llm is None
         if own:
-            llm = self._make_client()
+            llm = self.make_client()
         try:
             agent = self._make_agent("content_creator", ContentCreatorAgent, llm)
             # ดึงข้อมูลสินค้าจาก DB ถ้ามี ไม่งั้นใช้ parameter (backward compatible)
@@ -384,11 +459,20 @@ class Orchestrator:
                 pass  # ดึงไม่ได้ → ไม่บังคับ ใช้ default
 
             # Visual style hint — high-level style จาก visual.json (ส่งให้ LLM)
+            # image_style/keywords อาจเป็น string (จาก product_profile รุ่นเก่า)
+            # หรือ dict/list (จาก UI) — ต้องรองรับทั้งสองรูปแบบ
             visual_style = ""
             if self.brand_visual:
                 style = self.brand_visual.get("image_style", {})
-                tone = style.get("tone", "")
-                keywords = self.brand_visual.get("keywords", [])
+                if isinstance(style, str):
+                    tone = style
+                else:
+                    tone = style.get("tone", "") if isinstance(style, dict) else ""
+                keywords_raw = self.brand_visual.get("keywords", [])
+                if isinstance(keywords_raw, str):
+                    keywords = [k.strip() for k in keywords_raw.split(",") if k.strip()]
+                else:
+                    keywords = keywords_raw or []
                 if tone or keywords:
                     visual_parts = []
                     if tone:
@@ -750,7 +834,7 @@ class Orchestrator:
 
         own = llm is None
         if own:
-            llm = self._make_client()
+            llm = self.make_client()
         try:
             project_root = Path(__file__).resolve().parent.parent
 
@@ -1083,7 +1167,7 @@ class Orchestrator:
 
         own = llm is None
         if own:
-            llm = self._make_client()
+            llm = self.make_client()
         try:
             # อ่าน config
             auto_cfg = get_section(self.config, "auto_mode")
@@ -1323,7 +1407,7 @@ class Orchestrator:
         
         If competitor_data is None or empty, CompetitorAnalysisAgent will search web itself.
         """
-        llm = self._make_client()
+        llm = self.make_client()
         try:
             with Progress(
                 SpinnerColumn(),

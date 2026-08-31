@@ -274,7 +274,7 @@ def test_revise_receives_canonical_manifest():
 
     assert len(fake.calls) == 2
     revise_message = fake.calls[1]["messages"][-1]["content"]
-    assert "URL ทีผ่าน relevance gate" in revise_message
+    assert "URL จากการค้นหา" in revise_message
     assert "https://www.siamphone.com/smartwatch/xiaomi/watch-s3" in revise_message
     assert "https://www.kieslectthailand.com" in revise_message
     assert "ห้ามใช้ URL นอก manifest" in revise_message
