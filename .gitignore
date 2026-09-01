@@ -68,8 +68,16 @@ data/CACGO*/
 cache/CACGO*/
 data/.staging/
 
-# Per-Agent status notes (regenerated during debug)
-data/*_beta_status.md
+# Runtime evaluation / preflight / dryrun artifacts (not source of truth)
+data/campaign_*_report.md
+data/campaign_*_state.json
+data/campaign_*_plan*.json
+data/campaign_*_decision_record.md
+data/campaign_*_scenarios.json
+data/campaign_*_readiness.md
+data/campaign_real_eval_plan.json
+data/campaign_paid_acceptance_plan.md
+data/agent3_offline_stabilization_report.md
 
 # Consultation / audit scratch notes (not source of truth)
 audit_*.md

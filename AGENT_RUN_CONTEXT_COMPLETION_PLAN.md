@@ -466,4 +466,3 @@ input_refs:
 - Phase trace ตรวจได้ว่า context พร้อมให้ decision point ใดบ้าง
 - ไม่มี known single-agent decision path ที่ Quick Brief เห็นแต่ attachment ไม่เห็นโดยไม่มี policy อธิบาย
 - เอกสาร `CONTEXT.md` อัปเดตนิยาม Run/Step Context และขอบเขต MVP
-

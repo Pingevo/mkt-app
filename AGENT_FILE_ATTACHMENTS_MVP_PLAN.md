@@ -515,4 +515,3 @@ Resource ที่ upload วันนี้ยังคงอ้างด้ว
 - legacy flow ไม่ถดถอย
 - internal contract ใช้ resource/step identity ที่ต่อยอดได้
 - ไม่มี schema หรือ code path ที่ผูก attachment ถาวรกับ agent ชนิดใดชนิดหนึ่ง
-

@@ -215,7 +215,7 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 ### Current classification
 
-**OFFLINE FIXED — NOT YET BETA สำหรับ default competitor discovery.** Qualification จริงรอบล่าสุด (`beta_20260901_022823` และ rerun 3 ครั้ง) ยังจบด้วย `structural_output_failed` ทุกครั้ง แม้ model คืน JSON ที่มี competitor_names และ evidence ครบแล้ว root cause คือ `_assess_source_relevance` ไม่ match competitor name กับ URL ของ annotation เพราะ URL ใช้ hyphens และมีคำคั่น (เช่น `imoo-kid-watch-phone-z1` ไม่ match `"imoo Watch Phone Z1"`) แก้ด้วย hyphen normalization + brand+model fallback matching แล้ว แต่เกินเพดาน rerun ที่อนุญาต จึงยังไม่มี real-model green run หลัง fix ล่าสุด ต้อง rerun 1 ครั้งหลัง fix เพื่อยืนยันก่อนเลื่อนเป็น Beta
+**LIMITED BETA PASS — default discovery และ explicit competitor analysis.** Qualification จริงรอบล่าสุด (`beta_rerun_a2_20260901_033048`) สร้าง analysis ที่ใช้ต่อได้ ระบุคู่แข่ง `imoo Z1`, `Huawei Watch Kids`, `Xiaomi Mi Watch Kids` พร้อม evidence URLs ที่เกี่ยวข้อง แยก fact, inference และ missing evidence ชัดเจน ทำตาม Quick Brief (เน้นราคาและฟีเจอร์ GPS tracking) ไม่แต่ง critical facts ผ่านด้วย `google/gemini-3.5-flash`, 2 paid calls (generate + repair), ค่าใช้จ่าย `$0.176891`, Hub delivery COMPLETE (2/2)
 
 ## Agent 3 — Campaign Strategist (`campaign_strategy`)
 
