@@ -236,12 +236,117 @@ def test_competitor_specific_evidence_still_validates():
     assert ok, f"competitor-specific evidence ต้องผ่าน validation: {err}"
 
 
+# ---------------------------------------------------------------------------
+# Seam 5: default discovery mode — re-assess annotations after model returns
+# ---------------------------------------------------------------------------
+
+
+def test_default_discovery_reassess_after_model_returns_competitor_names():
+    """ใน default discovery mode (ไม่มี competitor_data) model ค้นหาคู่แข่งเอง
+    แล้วคืน competitor_names ใน JSON — ระบบต้อง re-assess annotations ใหม่
+    ด้วย competitor_names ที่ model ค้นพบ ไม่ใช่ใช้ list ว่างจาก build_prompt.
+
+    สถานการณ์จริง: user ส่งแค่ product_spec ไม่มี competitor_data
+    - build_prompt: _relevance_context.competitor_names = [] (ว่าง)
+    - super().run(): _assess_source_relevance ใช้ competitor_names=[] →
+      ไม่ match check 4 → annotations ได้ relevant=None (market_unverified)
+    - _last_relevant_annotations = [] (เฉพาะ relevant=True ใน evidence mode)
+    - model คืน JSON: competitor_names=["imoo Z1"], evidence อ้างอิง URL จาก search
+    - หลังแก้: re-assess ด้วย ["imoo Z1"] → annotation ที่ mention "imoo Z1"
+      ได้ relevant=True → _last_relevant_annotations ไม่ว่าง → renderer ใช้ได้
+    """
+    product_spec = "รหัสสินค้า: K2\nLAGENIO K2 kids smartwatch with GPS"
+    competitor_data = ""  # default discovery mode — no competitor data
+    agent = _make_agent(product_spec, competitor_data)
+
+    # Verify: before model response, competitor_names is empty in context
+    assert agent._relevance_context["competitor_names"] == [], (
+        "default discovery mode: competitor_names ต้องว่างก่อน model ตอบ"
+    )
+
+    # Simulate annotations from web search (model searched for kids smartwatches)
+    annotations = [
+        {
+            "url": "https://example.com/imoo-z1-review",
+            "title": "imoo Z1 kids smartwatch review",
+            "content": "imoo Z1 is a popular kids smartwatch with GPS tracking",
+        },
+        {
+            "url": "https://example.com/smartwatch-comparison",
+            "title": "Best kids smartwatch comparison 2024",
+            "content": "Comparing imoo Z1 and Huawei Watch Kids for children",
+        },
+    ]
+
+    # Simulate what happens inside super().run() → _append_citations_and_verify
+    agent._evidence_mode = True  # set like run() does
+    agent._last_annotations = list(annotations)
+    agent._last_relevant_annotations = []
+    agent._last_rejected_annotations = []
+    for a in annotations:
+        r = agent._assess_source_relevance(a)
+        if r.get("relevant") is True:
+            agent._last_relevant_annotations.append({**a, "_relevance": r})
+        else:
+            agent._last_rejected_annotations.append({**a, "_relevance": r})
+
+    # Before fix: _last_relevant_annotations is empty because competitor_names=[]
+    assert len(agent._last_relevant_annotations) == 0, (
+        "ก่อน re-assess: _last_relevant_annotations ต้องว่าง "
+        "เพราะ competitor_names ยังว่าง"
+    )
+
+    # Simulate model returning JSON with discovered competitor names
+    research_json = {
+        "target_model": "K2",
+        "competitor_names": ["imoo Z1"],
+        "evidence": [
+            {
+                "competitor": "imoo Z1",
+                "field": "gps",
+                "claim": "imoo Z1 has GPS tracking",
+                "url": "https://example.com/imoo-z1-review",
+                "geography": "global",
+            }
+        ],
+        "recommendations": [],
+        "uncertainty": [],
+    }
+    json_str = json.dumps(research_json)
+
+    # Simulate the re-assessment that the fix does in run() —
+    # this happens BEFORE _validate_research_json
+    agent._reassess_for_default_discovery(json_str)
+
+    # After fix: annotations mentioning "imoo Z1" should now be relevant=True
+    assert len(agent._last_relevant_annotations) >= 1, (
+        f"หลัง re-assess: _last_relevant_annotations ต้องไม่ว่าง "
+        f"เพราะ annotation มี 'imoo Z1' และ competitor_names มี 'imoo Z1' แล้ว. "
+        f"ได้ {len(agent._last_relevant_annotations)}"
+    )
+
+    # Now validation should pass because _last_relevant_annotations is populated
+    ok, err, research = agent._validate_research_json(json_str)
+    assert ok, f"research JSON ต้องผ่าน validation หลัง re-assess: {err}"
+
+    # The renderer should also be able to validate the evidence
+    renderer = CompetitorReportRenderer(
+        research, relevant_annotations=agent._last_relevant_annotations
+    )
+    errors = renderer.validate()
+    url_errors = [e for e in errors if "URL not in selected evidence" in e]
+    assert not url_errors, (
+        f"renderer ไม่ควรปฏิเสธ URL หลัง re-assess: {url_errors}"
+    )
+
+
 if __name__ == "__main__":
     tests = [
         test_manifest_not_empty_when_only_generic_smartwatch_results,
         test_renderer_accepts_url_from_market_match_annotation,
         test_limited_analysis_with_empty_evidence_passes_validation,
         test_competitor_specific_evidence_still_validates,
+        test_default_discovery_reassess_after_model_returns_competitor_names,
     ]
     passed = 0
     failed = 0

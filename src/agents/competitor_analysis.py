@@ -59,6 +59,29 @@ class CompetitorAnalysisAgent(BaseAgent):
             "ห้ามสับสนกับรุ่นอื่นในแบรนด์เดียวกัน"
         )
 
+        # Default competitor discovery: when no competitor data is provided
+        # and web search is enabled, instruct the model to discover competitors
+        # itself from web search and populate competitor_names + evidence in the output.
+        if not self._competitor_names and self._web_search_enabled:
+            prompt += (
+                "\n\n"
+                "**โหมดค้นหาคู่แข่งอัตโนมัติ (Default Competitor Discovery)**\n"
+                "ไม่มีข้อมูลคู่แข่งที่ระบุไว้ล่วงหน้า — ให้คุณค้นหาคู่แข่งเองจาก web search\n"
+                "ขั้นตอน:\n"
+                "1. วิเคราะห์สินค้าเป้าหมายจากสเปคข้างต้น (หมวดหมู่ ราคา ฟีเจอร์หลัก)\n"
+                "2. ค้นเว็บหาสินค้าคู่แข่งในหมวดเดียวกัน ในตลาดเดียวกัน (ไทย ถ้าระบุ)\n"
+                "3. เลือก 2-3 คู่แข่งหลักที่ใกล้เคียงที่สุด\n"
+                "4. ใส่ชื่อคู่แข่งที่ค้นพบใน field `competitor_names` ของ JSON output\n"
+                "5. ค้นข้อมูลเฉพาะรุ่นของคู่แข่งแต่ละรุ่น แล้วสร้าง evidence records\n\n"
+                "สำคัญ: competitor_names ต้องไม่ว่าง — ใส่ชื่อคู่แข่งที่ค้นพบจาก web search\n"
+                "evidence ต้องไม่ว่าง — ใส่อย่างน้อย 1 evidence record ต่อคู่แข่ง "
+                "โดยอ้างอิง URL จริงจาก search results\n"
+                "แต่ละ evidence record ต้องมี: competitor (ชื่อตรงกับ competitor_names), "
+                "field (เช่น price_availability, display, battery, gps_tracking), "
+                "claim (ข้อเท็จจริงที่พบ), url (URL จริงจาก search), geography (thailand หรือ global)\n"
+                "ถ้าค้นไม่พบข้อมูลเฉพาะรุ่น ให้ใส่ evidence ที่พบใกล้เคียงที่สุดและอธิบายใน uncertainty"
+            )
+
         if self._thin_competitor_context and not self._web_search_enabled:
             prompt += (
                 "\n\n"
@@ -115,11 +138,22 @@ class CompetitorAnalysisAgent(BaseAgent):
 
         # Stage 2: deterministic validation + exactly one self-review round
         self._last_generate_raw = json_output
+
+        # Default discovery mode: the model discovered competitor names via web
+        # search, but _assess_source_relevance ran inside super().run() BEFORE
+        # those names were known — so _last_relevant_annotations is empty.
+        # Extract competitor_names from the raw JSON and re-assess all
+        # annotations BEFORE validation, so _validate_research_json and the
+        # renderer can match evidence URLs against relevant annotations.
+        self._reassess_for_default_discovery(json_output)
+
         ok, err, research = self._validate_research_json(json_output)
         final_json = json_output
         if not ok:
             final_json = self._revise_research(user_prompt, json_output, err, response_format)
             self._last_revise_raw = final_json if final_json != json_output else None
+            # Re-assess again in case the revision changed competitor_names
+            self._reassess_for_default_discovery(final_json)
             ok, err, research = self._validate_research_json(final_json)
             if not ok or research is None:
                 if err and "evidence_validation" in err:
@@ -145,6 +179,48 @@ class CompetitorAnalysisAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     _FENCE_RE = re.compile(r"^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$")
+
+    def _reassess_for_default_discovery(self, json_output: str) -> None:
+        """In default discovery mode, re-assess annotations with model-discovered
+        competitor names.  Called before _validate_research_json so the renderer
+        can match evidence URLs against relevant annotations.
+
+        In default discovery mode (no competitor_data), _assess_source_relevance
+        ran inside super().run() with an empty competitor_names list — so no
+        annotation got relevant=True.  The model then discovers competitors via
+        web search and returns their names in the JSON.  This method extracts
+        those names, updates the relevance context, and re-runs the assessment.
+        """
+        if self._competitor_names:
+            return  # not default discovery mode — competitor names were provided
+
+        # Extract competitor_names from the raw JSON without full validation
+        try:
+            data = json.loads(self._strip_json_fence(json_output))
+        except (json.JSONDecodeError, AttributeError):
+            return
+
+        names = data.get("competitor_names") if isinstance(data, dict) else None
+        if not isinstance(names, list) or not names:
+            return
+
+        self._relevance_context["competitor_names"] = [str(n) for n in names if n]
+        self._reassess_all_annotations()
+
+    def _reassess_all_annotations(self) -> None:
+        """Re-run _assess_source_relevance on all stored annotations and split
+        them into _last_relevant_annotations (relevant=True) and
+        _last_rejected_annotations (everything else).
+        """
+        all_annotations = getattr(self, "_last_annotations", []) or []
+        self._last_relevant_annotations = []
+        self._last_rejected_annotations = []
+        for a in all_annotations:
+            r = self._assess_source_relevance(a)
+            if r.get("relevant") is True:
+                self._last_relevant_annotations.append({**a, "_relevance": r})
+            else:
+                self._last_rejected_annotations.append({**a, "_relevance": r})
 
     def _strip_json_fence(self, text: str) -> str:
         text = text.strip()
@@ -1191,14 +1267,7 @@ class CompetitorAnalysisAgent(BaseAgent):
         """แปะ citation และทำความสะอาด inline citations ทีไม่ผ่าน relevance."""
         # บันทึก evidence ทั้งหมดเพื่อ diagnostic
         self._last_annotations = list(annotations)
-        self._last_relevant_annotations = []
-        self._last_rejected_annotations = []
-        for a in annotations:
-            r = self._assess_source_relevance(a)
-            if r.get("relevant") is True:
-                self._last_relevant_annotations.append({**a, "_relevance": r})
-            else:
-                self._last_rejected_annotations.append({**a, "_relevance": r})
+        self._reassess_all_annotations()
 
         # เรียก base เพื่อแปะ fallback citations ตาม policy (ถ้ามี inline แล้ว base จะไม่แปะ)
         if not getattr(self, "_evidence_mode", False):
