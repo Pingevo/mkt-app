@@ -26,10 +26,10 @@
 
 | Agent | หน้าที่เมื่อ user กดรัน | สถานะล่าสุด | งานที่ต้องทำต่อ |
 |---|---|---|---|
-| Product Analyst | เปลี่ยนข้อมูลสินค้าที่เลือกเป็น product brief/spec | **BETA PASS** ใน selected-product data scope | ไม่แก้เพิ่มก่อน Beta; image path แยกเป็น capability ที่ยังไม่ requalify |
-| Competitor Analyst | ค้นคู่แข่งที่เกี่ยวข้องและส่ง analysis ที่มีหลักฐาน | **OFFLINE FIXED — NOT YET BETA** | default-discovery reassessment แก้แล้วและ offline suite ผ่าน; rerun UI-equivalent งานหลัก 1 ครั้ง |
-| Campaign Strategist | สร้างแผนแคมเปญที่ใช้ได้จาก context ที่มี | **OFFLINE FIXED — NOT YET BETA** | validator/root causes แก้ใน code แล้ว; rerun default job 1 ครั้ง และทดสอบ live web เพิ่มเฉพาะถ้าจะเปิด capability นี้ |
-| Content Creator | สร้างงานตาม platform/count/media ที่ UI เลือก | **OFFLINE FIXED — NOT YET BETA** | brand visual compatibility แก้ใน code แล้ว; rerun text/image งานหลัก 1 ครั้ง และทดสอบ video เพิ่มเฉพาะถ้าจะเปิด capability นี้ |
+| Product Analyst | เปลี่ยนข้อมูลสินค้าที่เลือกเป็น product brief/spec | **BETA PASS** ใน selected-product text scope; image understanding ยังไม่พิสูจน์ | ไม่แก้เพิ่มก่อน Beta; image path เป็น capability ที่ยังไม่ requalify |
+| Competitor Analyst | ค้นคู่แข่งที่เกี่ยวข้องและส่ง analysis ที่มีหลักฐาน | **LIMITED BETA PASS** — default discovery และ explicit competitor analysis | หยุดทดสอบ; known limitations ถูกบันทึกแล้ว |
+| Campaign Strategist | สร้างแผนแคมเปญที่ใช้ได้จาก context ที่มี | **LIMITED BETA PASS** — context-grounded campaign strategy; live-web research ยังไม่พิสูจน์ | หยุดทดสอบ; known limitations ถูกบันทึกแล้ว |
+| Content Creator | สร้างงานตาม platform/count/media ที่ UI เลือก | **LIMITED BETA PASS** — Facebook single-post + caption/hashtags/image prompt; TikTok, multi-post และ media generation ยังไม่พิสูจน์ | หยุดทดสอบ; known limitations ถูกบันทึกแล้ว |
 
 ห้ามย้อนกลับไปทำ Phase 1–6 ทั้งชุดโดยอัตโนมัติ ลำดับกว้างด้านล่างเป็นแผน Production/ความสมบูรณ์ระยะยาว งานเร่งด่วนตอนนี้คือ qualification แบบ UI-equivalent เฉพาะ capability หลักที่แก้แล้วในตารางเท่านั้น
 

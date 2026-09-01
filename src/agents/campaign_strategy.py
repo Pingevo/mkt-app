@@ -24,6 +24,9 @@ class CampaignStrategyAgent(BaseAgent):
         self._last_quick_brief: str = ""
         self._relevance_context: dict = {}
         self._selected_evidence_urls: set[str] = set()
+        self._selected_evidence: list[dict[str, Any]] = []
+        self._requested_competitor_models: set[str] = set()
+        self._evidence_confirmed_competitor_models: set[str] = set()
 
     def build_prompt(self, context: dict) -> str:
         """Build the user prompt from a semantic context dict.
@@ -218,6 +221,60 @@ class CampaignStrategyAgent(BaseAgent):
                 return True
         return False
 
+    @staticmethod
+    def _extract_competitor_tokens(text: str) -> set[str]:
+        """Extract model-like competitor tokens a user explicitly asks about.
+
+        Only accepts clear competitor/comparison phrasing (คู่แข่ง / เปรียบเทียบ / competitor).
+        """
+        if not text:
+            return set()
+        trigger_phrases = ["คู่แข่ง", "competitor", "เปรียบเทียบ", "compare", "เทียบกับ", "vs", "against"]
+        low = text.lower()
+        if not any(p in low for p in trigger_phrases):
+            return set()
+        models: set[str] = set()
+        for pat in [r"\b([A-Za-z]{2,}\s+[A-Za-z]*\d[\w]{0,4})\b", r"\b([A-Za-z]+\d[\w]{0,4})\b"]:
+            for m in re.finditer(pat, text):
+                token = m.group(1).split()[-1].lower().replace(" ", "")
+                if token not in {"q1", "q2", "q3", "q4"}:
+                    models.add(token)
+        return models
+
+    @staticmethod
+    def _annotation_confirms_competitor(annotation: dict, models: set[str]) -> bool:
+        """Return True if the returned web evidence corroborates a requested competitor."""
+        if not models:
+            return False
+        combined = (annotation.get("title", "") + " " + annotation.get("content", "") + " " + annotation.get("url", "")).lower()
+        for m in models:
+            # Require at least one full brand-ish token and one model-ish token in evidence.
+            if m in combined:
+                return True
+        return False
+
+    def _on_annotations_ready(self) -> None:
+        """Compute effective selected evidence and evidence-confirmed competitor models
+        after the live web-search call returns annotations.
+        """
+        raw = list(getattr(self, "_last_annotations", []) or [])
+        # For campaign_strategy, the relevance assessment was already done in _append_citations_and_verify
+        # via _last_relevant_annotations; if not, fall back to all raw annotations.
+        relevant = list(getattr(self, "_last_relevant_annotations", []) or [])
+        if not relevant and raw:
+            relevant = raw
+        self._selected_evidence = list(relevant)
+        self._selected_evidence_urls = {a.get("url", "").lower().rstrip("/") for a in self._selected_evidence if a.get("url")}
+
+        confirmed: set[str] = set()
+        for m in self._requested_competitor_models:
+            if any(self._annotation_confirms_competitor(a, {m}) for a in self._selected_evidence):
+                confirmed.add(m)
+        self._evidence_confirmed_competitor_models = confirmed
+
+        self._context_flags["requested_competitor_models"] = sorted(self._requested_competitor_models)
+        self._context_flags["evidence_confirmed_competitor_models"] = sorted(self._evidence_confirmed_competitor_models)
+
     def run(self, *args, **kwargs) -> str:
         """Capture the effective quick_brief (StepRunContext wins) for validation."""
         step = kwargs.get("step_context")
@@ -225,19 +282,18 @@ class CampaignStrategyAgent(BaseAgent):
         if quick is None and len(args) > 1:
             quick = args[1]
         self._last_quick_brief = quick or ""
+        self._requested_competitor_models = self._extract_competitor_tokens(self._last_quick_brief)
         return super().run(*args, **kwargs)
 
     def _validator_instructions(self) -> dict[str, Any]:
         instructions = dict(self.instructions or {})
         instructions["quick_brief"] = self._last_quick_brief
 
-        # Add runtime selected evidence from web-search annotations.
-        relevant = list(getattr(self, "_last_relevant_annotations", []) or [])
-        annotation_urls = {u.lower().rstrip("/") for u in (a.get("url") for a in relevant) if u}
-        # Also keep any selected evidence URLs the caller explicitly passed in.
-        explicit_urls = {u.lower().rstrip("/") for u in (instructions.get("selected_evidence_urls") or [])}
-        selected = self._selected_evidence_urls | explicit_urls | annotation_urls
-        instructions["selected_evidence_urls"] = sorted(selected)
+        # Pass the effective selected evidence manifest to validation and repair.
+        instructions["selected_evidence"] = list(self._selected_evidence)
+        instructions["selected_evidence_urls"] = sorted(self._selected_evidence_urls)
+        instructions["requested_competitor_models"] = sorted(self._requested_competitor_models)
+        instructions["evidence_confirmed_competitor_models"] = sorted(self._evidence_confirmed_competitor_models)
 
         return instructions
 

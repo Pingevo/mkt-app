@@ -59,6 +59,31 @@ cache/scheduled_runs.json
 # Content history — runtime state, เปลี่ยนทุกครั้งที่รัน
 cache/content_history.json
 
+# Runtime qualification / debug outputs
+data/all_agents_beta_qualification/
+cache/all_agents_beta_qualification/
+data/campaign_*/
+cache/campaign_*/
+data/CACGO*/
+cache/CACGO*/
+data/.staging/
+
+# Per-Agent status notes (regenerated during debug)
+data/*_beta_status.md
+
+# Consultation / audit scratch notes (not source of truth)
+audit_*.md
+consult_*.md
+
+# IDE
+.windsurf/
+
+# Temporary mockups
+staging_preview_mockup.html
+
+# Diagnostic scripts (one-off experiments)
+tests/diagnose_*.py
+
 # IDE / editor
 .idea/
 .vscode/

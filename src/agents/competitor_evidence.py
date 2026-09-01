@@ -95,10 +95,35 @@ RESEARCH_RESPONSE_SCHEMA = {
                         "additionalProperties": False,
                     },
                 },
-                "recommendations": {
+                "evidence_based_recommendations": {
                     "type": "array",
                     "maxItems": 3,
-                    "items": {"type": "string", "maxLength": 400},
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "maxLength": 400},
+                            "supporting_evidence_urls": {
+                                "type": "array",
+                                "items": {"type": "string", "maxLength": 500},
+                                "maxItems": 6,
+                            },
+                        },
+                        "required": ["text", "supporting_evidence_urls"],
+                        "additionalProperties": False,
+                    },
+                },
+                "strategic_hypotheses": {
+                    "type": "array",
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "maxLength": 400},
+                            "rationale": {"type": "string", "maxLength": 400},
+                        },
+                        "required": ["text", "rationale"],
+                        "additionalProperties": False,
+                    },
                 },
                 "uncertainty": {
                     "type": "array",
@@ -106,7 +131,7 @@ RESEARCH_RESPONSE_SCHEMA = {
                     "items": {"type": "string", "maxLength": 400},
                 },
             },
-            "required": ["target_model", "competitor_names", "evidence", "recommendations", "uncertainty"],
+            "required": ["target_model", "competitor_names", "evidence", "evidence_based_recommendations", "strategic_hypotheses", "uncertainty"],
             "additionalProperties": False,
         },
     },
@@ -138,12 +163,42 @@ class CompetitorEvidence:
 
 
 @dataclass
+class EvidenceBasedRecommendation:
+    """A recommendation backed by validated evidence URLs."""
+    text: str
+    supporting_evidence_urls: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "EvidenceBasedRecommendation":
+        return cls(
+            text=d.get("text", ""),
+            supporting_evidence_urls=d.get("supporting_evidence_urls", []),
+        )
+
+
+@dataclass
+class StrategicHypothesis:
+    """A strategic hypothesis that is NOT yet backed by evidence.
+    Must be presented as unverified, not as comparative fact."""
+    text: str
+    rationale: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "StrategicHypothesis":
+        return cls(
+            text=d.get("text", ""),
+            rationale=d.get("rationale", ""),
+        )
+
+
+@dataclass
 class ResearchResponse:
     """Stage A output."""
     target_model: str
     competitor_names: list[str] = field(default_factory=list)
     evidence: list[CompetitorEvidence] = field(default_factory=list)
-    recommendations: list[str] = field(default_factory=list)
+    evidence_based_recommendations: list[EvidenceBasedRecommendation] = field(default_factory=list)
+    strategic_hypotheses: list[StrategicHypothesis] = field(default_factory=list)
     uncertainty: list[str] = field(default_factory=list)
 
     @classmethod
@@ -152,7 +207,14 @@ class ResearchResponse:
             target_model=d.get("target_model", ""),
             competitor_names=d.get("competitor_names", []),
             evidence=[CompetitorEvidence.from_dict(e) for e in d.get("evidence", [])],
-            recommendations=d.get("recommendations", []),
+            evidence_based_recommendations=[
+                EvidenceBasedRecommendation.from_dict(r)
+                for r in d.get("evidence_based_recommendations", [])
+            ],
+            strategic_hypotheses=[
+                StrategicHypothesis.from_dict(h)
+                for h in d.get("strategic_hypotheses", [])
+            ],
             uncertainty=d.get("uncertainty", []),
         )
 
@@ -194,7 +256,29 @@ class CompetitorReportRenderer:
         return text.replace("|", "&#124;").replace("\n", "<br>")
 
     def _validate_evidence(self, ev: CompetitorEvidence) -> tuple[bool, str, dict | None]:
-        """Return (ok, reason, selected_annotation) for an evidence record."""
+        """Return (ok, reason, selected_annotation) for an evidence record.
+
+        Checks only deterministic facts:
+        - field must be in allowed catalog
+        - competitor must be in declared competitor_names
+        - URL must come from real search results (provenance via rel_map)
+        - URL must not be structurally blocked (homepage, category_mismatch)
+        - geography must be in enum (thailand/global)
+
+        Does NOT check whether the source text mentions the competitor name
+        via substring — that check is unreliable because URL slugs and
+        product names use different formatting (hyphens, extra words,
+        different casing).  The model saw the search results and chose
+        which URLs to cite; code verifies provenance, not semantics.
+
+        Geography is model-decided: the model reads the source content and
+        declares geography in the evidence record.  Code does NOT override
+        the model's geography judgment with its own TLD/substring detection
+        — that detection is unreliable for .com domains that are actually
+        Thai stores (e.g. vteccomputer.com).  The model's geography is
+        accepted as-is; _detect_geography remains as a diagnostic signal
+        stored in _relevance metadata, not as a hard gate.
+        """
         if ev.field not in ALLOWED_FIELD_IDS:
             return False, f"invalid field {ev.field!r}; allowed: {', '.join(ALLOWED_FIELD_IDS)}", None
 
@@ -209,21 +293,17 @@ class CompetitorReportRenderer:
 
         rel = a.get("_relevance", {})
 
-        # Market parity: let the model decide which sources to cite, but keep
-        # a structural guardrail against sources that are clearly not evidence
-        # (homepage, category_mismatch).  Other relevance types (competitor,
-        # target, market_unverified, unknown) are left to the model's judgment.
+        # Structurally blocked sources (homepage, category_mismatch) are
+        # hard-blocked — they cannot serve as evidence.
         rel_type = rel.get("relevance_type", "")
         if rel_type in ("homepage", "category_mismatch"):
             return False, f"source is structurally not evidence ({rel_type}): {ev.url}", None
 
-        # Factual check: the source text must actually mention the competitor.
-        src_text = f"{a.get('url','')} {a.get('title','')} {a.get('content','')}".lower()
-        if ev.competitor.lower() not in src_text:
-            return False, f"source does not mention competitor {ev.competitor}: {ev.url}", None
-
-        if ev.geography == "thailand" and rel.get("geography") != "thailand":
-            return False, f"source is not Thailand-specific: {ev.url}", None
+        # Geography: model-decided.  Accept the model's geography declaration.
+        # _detect_geography is stored as diagnostic in _relevance but does
+        # NOT override the model's judgment.  Mismatch between model-declared
+        # and code-detected geography is a warning, not a hard block.
+        # (Hard block for geography is removed — see test_geography_* cases.)
 
         return True, "", a
 
@@ -268,7 +348,12 @@ class CompetitorReportRenderer:
         return tuple(selected)
 
     def render(self, product_spec: str) -> str:
-        """Return deterministic Markdown report."""
+        """Return deterministic Markdown report.
+
+        If no evidence passes validation, return a limited analysis report
+        instead of an empty stub — the user gets a usable summary of what
+        was found and what's missing, rather than a blank report.
+        """
         by_field = self._index_validated()
         fields = self._fields_to_render(product_spec)
         product_cells = self._product_cells(product_spec, fields)
@@ -280,16 +365,15 @@ class CompetitorReportRenderer:
             if any(comp in by_field.get(f, {}) for f in fields)
         ]
 
+        if not fields or not competitors:
+            return self._render_limited_analysis(product_spec)
+
         lines = [
             f"# รายงานวิเคราะห์เปรียบเทียบคู่แข่ง: {self.research.target_model}",
             "",
             "## ตารางเปรียบเทียบคุณสมบัติและสเปก",
             "",
         ]
-
-        if not fields or not competitors:
-            lines.append("ไม่พบข้อมูลคู่แข่งทีผ่านการตรวจสอบ")
-            return "\n".join(lines)
 
         lines.extend([
             "| คุณสมบัติ | " + " | ".join([self.research.target_model] + competitors) + " |",
@@ -308,16 +392,129 @@ class CompetitorReportRenderer:
                     row.append(self._esc_cell(self._NO_EVIDENCE))
             lines.append("| " + " | ".join(row) + " |")
 
-        if self.research.recommendations:
-            lines.extend(["", "## ข้อเสนอแนะ", ""])
-            for r in self.research.recommendations:
-                lines.append(f"- {r}")
+        # Evidence-based recommendations: only render if ALL supporting
+        # URLs pass provenance check (exist in validated evidence set).
+        # If any URL is not validated, demote the recommendation to a
+        # strategic hypothesis (don't drop it — the model's insight may
+        # still be useful, but it must be labeled as unverified).
+        validated_urls = {
+            (ev.url or "").lower().rstrip("/")
+            for ev in self.research.evidence
+            if self._validate_evidence(ev)[0]
+        }
+        promoted_hypotheses: list[StrategicHypothesis] = []
+
+        evidence_based: list[EvidenceBasedRecommendation] = []
+        for rec in self.research.evidence_based_recommendations:
+            urls_ok = all(
+                (u or "").lower().rstrip("/") in validated_urls
+                for u in rec.supporting_evidence_urls
+            )
+            if urls_ok and rec.supporting_evidence_urls:
+                evidence_based.append(rec)
+            else:
+                # Demote to hypothesis — unsupported claim must not appear
+                # as a verified recommendation.
+                promoted_hypotheses.append(StrategicHypothesis(
+                    text=rec.text,
+                    rationale="เดิมอ้างเป็น evidence_based แต่ URL รองรับไม่ผ่าน validation",
+                ))
+
+        if evidence_based:
+            lines.extend(["", "## ข้อเสนอแนะที่มีหลักฐานรองรับ", ""])
+            for rec in evidence_based:
+                lines.append(f"- {rec.text}")
+
+        all_hypotheses = list(self.research.strategic_hypotheses) + promoted_hypotheses
+        if all_hypotheses:
+            lines.extend([
+                "",
+                "## สมมติฐานเชิงกลยุทธ์ (ยังไม่ยืนยัน)",
+                "",
+                "*ข้อความในส่วนนี้เป็นสมมติฐาน ไม่ใช่ข้อเท็จจริงที่ผ่านการตรวจสอบ*",
+                "",
+            ])
+            for h in all_hypotheses:
+                lines.append(f"- {h.text}")
+                if h.rationale:
+                    lines.append(f"  - เหตุผล: {h.rationale}")
 
         if self.research.uncertainty:
             lines.extend(["", "## ข้อจำกัด", ""])
             for u in self.research.uncertainty:
                 lines.append(f"- {u}")
 
+        return "\n".join(lines)
+
+    def _render_limited_analysis(self, product_spec: str) -> str:
+        """Render a limited analysis report when no evidence passes validation.
+
+        Instead of returning an empty stub, produce a usable report that:
+        - lists the competitors the model discovered
+        - shows the product spec
+        - includes the model's recommendations and uncertainty
+        - explains what's missing
+        """
+        lines = [
+            f"# รายงานวิเคราะห์จำกัด: {self.research.target_model}",
+            "",
+            "**limited_analysis: true**",
+            "",
+            "## คู่แข่งที่ระบุ",
+            "",
+        ]
+        if self.research.competitor_names:
+            for name in self.research.competitor_names:
+                lines.append(f"- {name}")
+        else:
+            lines.append("- ยังไม่ระบุ")
+        lines.append("")
+
+        # Product spec summary
+        lines.extend(["## สรุปสินค้าของเรา", ""])
+        for raw_line in (product_spec or "").splitlines():
+            line = raw_line.strip()
+            if line:
+                lines.append(f"- {line}")
+        lines.append("")
+
+        # Model's evidence-based recommendations (if any) — in limited
+        # analysis, no evidence is validated, so all go to hypotheses.
+        all_hypotheses = list(self.research.strategic_hypotheses)
+        for rec in self.research.evidence_based_recommendations:
+            all_hypotheses.append(StrategicHypothesis(
+                text=rec.text,
+                rationale="เดิมอ้างเป็น evidence_based แต่ไม่มี evidence ผ่าน validation",
+            ))
+        if all_hypotheses:
+            lines.extend([
+                "## สมมติฐานเชิงกลยุทธ์ (ยังไม่ยืนยัน)",
+                "",
+                "*ข้อความในส่วนนี้เป็นสมมติฐาน ไม่ใช่ข้อเท็จจริงที่ผ่านการตรวจสอบ*",
+                "",
+            ])
+            for h in all_hypotheses:
+                lines.append(f"- {h.text}")
+                if h.rationale:
+                    lines.append(f"  - เหตุผล: {h.rationale}")
+            lines.append("")
+
+        # Model's uncertainty (if any)
+        if self.research.uncertainty:
+            lines.extend(["## ข้อจำกัด", ""])
+            for u in self.research.uncertainty:
+                lines.append(f"- {u}")
+            lines.append("")
+
+        lines.extend([
+            "## สิ่งที่ต้องขอเพิ่มเพื่อทำวิเคราะห์เต็มรูปแบบ",
+            "",
+            "- สเปคเฉพาะของแต่ละคู่แข่งที่ผ่านการตรวจสอบ",
+            "- ราคาขายปลีกที่มีหลักฐานยืนยัน",
+            "- ช่องทางจำหน่ายในประเทศเป้าหมาย",
+            "",
+            "*หมายเหตุ: รายงานนี้ไม่มีการสร้างหรืออนุมานข้อมูลคู่แข่งเอง*",
+        ])
         return "\n".join(lines)
 
 
@@ -341,7 +538,8 @@ JSON ต้องมี key เหล่านี้เท่านั้น:
 - target_model
 - competitor_names
 - evidence
-- recommendations
+- evidence_based_recommendations
+- strategic_hypotheses
 - uncertainty
 
 กฎการเลือก evidence:
@@ -351,8 +549,6 @@ JSON ต้องมี key เหล่านี้เท่านั้น:
 - ห้ามเติมข้อมูลเพื่อให้ output ดูสมบูรณ์
 - ถ้าไม่มีหลักฐานสำหรับ field ใด field หนึ่ง ให้ข้าม field นั้น (ไม่ใส่ evidence) และบอกไว้ใน uncertainty
 - ถ้าไม่พบหลักฐานใด ๆ ให้คืน evidence: [] และอธิบายสาเหตุใน uncertainty
-- recommendation คือข้อเสนอแนะเท่านั้น ห้ามใส่ facts หรือ URL
-- uncertainty คือสิ่งที่ยังไม่พบหลักฐาน ห้ามคาดการณ์
 
 field catalog (ใช้ field ID เหล่านี้เท่านั้น ห้ามตั้งชื่อใหม่):
 - "display" → หน้าจอ
@@ -372,11 +568,26 @@ field catalog (ใช้ field ID เหล่านี้เท่านั้�
 - ให้ความสำคัญกับ evidence ทีมี geography: thailand
 - ไม่ต้องสร้าง evidence ครบทุก field หรือทุก competitor
 - แต่ละ claim ต้องกระชับ ไม่เกิน 400 ตัวอักษร
-- recommendations สูงสุด 3 รายการ ไม่ใส่ facts หรือ URL
-- uncertainty สูงสุด 3 รายการ
 
-คุณจะได้รับ manifest ของ URL ทีผ่าน relevance gate ใน user prompt ให้เลือก URL จาก manifest นั้นเท่านั้น
-หาก URL ไม่อยู่ใน manifest ห้ามใช้
+กฎ recommendations และ hypotheses (สำคัญมาก):
+- evidence_based_recommendations: ข้อเสนอแนะที่มีหลักฐานรองรับโดยตรง
+  - แต่ละรายการต้องมี supporting_evidence_urls ที่ชี้ไป URL ใน evidence array
+  - ห้ามทำ comparative claim (เช่น "เหนือกว่า", "มากกว่า", "ดีกว่า") โดยไม่มี evidence รองรับ
+  - ห้ามอ้างราคา สเปก หรือคุณสมบัติของสินค้าเรา (target_model) ที่ไม่มีใน product_spec ที่ได้รับ
+  - ถ้าอยากแนะนำเรื่องที่ไม่มี evidence → ใส่ใน strategic_hypotheses แทน
+  - สูงสุด 3 รายการ
+- strategic_hypotheses: สมมติฐานเชิงกลยุทธ์ที่ยังไม่ยืนยัน
+  - เป็นความคิดเห็น/ข้อสังเกต ไม่ใช่ข้อเท็จจริง
+  - ต้องมี rationale อธิบายว่าทำไมคิดแบบนั้น
+  - สูงสุด 3 รายการ
+- uncertainty: สิ่งที่ยังไม่พบหลักฐาน ห้ามคาดการณ์
+  - สูงสุด 3 รายการ
+
+กฎการเลือก URL:
+- ถ้ามี manifest ของ URL ใน user prompt ให้เลือก URL จาก manifest นั้นเท่านั้น
+- ถ้าไม่มี manifest (โหมด default discovery) ให้ใช้ URL จากผล web search ที่คุณค้นพบในรอบนี้
+- ห้าม invent URL หรือใช้ URL ที่ไม่ได้มาจาก web search หรือ manifest
+- ถ้าไม่พบหลักฐานใด ๆ ให้คืน evidence: [] และอธิบายสาเหตุใน uncertainty
 
 ห้ามครอบ JSON ด้วย Markdown code fence (```json) หรือคำอธิบายนำหน้า/ท้าย
 """

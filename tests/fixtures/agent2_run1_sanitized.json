@@ -1,0 +1,133 @@
+{
+  "run": 1,
+  "request_id": "gen-1787890626-fXFdbqRFn0iUcce6dQft",
+  "total_cost_usd": 0.184449,
+  "wall_ms": 48829,
+  "tool_status": "tool_invoked_with_relevant_annotations",
+  "validation_ok": true,
+  "validation_error": "",
+  "output": "# รายงานการวิเคราะห์เปรียบเทียบผลิตภัณฑ์: CACGO K77 และคู่แข่งในตลาดประเทศไทย\n\nรายงานฉบับนี้จัดทำขึ้นเพื่อวิเคราะห์เปรียบเทียบสมาร์ทวอทช์รุ่น **CACGO K77** กับคู่แข่งในตลาดประเทศไทย เพื่อให้ฝ่ายการตลาดสามารถนำข้อมูลไปกำหนดตำแหน่งทางการตลาด (Positioning) และวางกลยุทธ์การขายได้อย่างมีประสิทธิภาพ\n\n---\n\n## 1. ตารางเปรียบเทียบคุณสมบัติและราคา (Specification Comparison)\n\n| :--- | :--- | :--- | :--- | :--- |\n| **หน้าจอ** | 1.7\" IPS ทรงกลม (360x360 px) | 1.43\" AMOLED (466x466 px) | 1.46\" LTPO 2.0 AMOLED (480x480 px) | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **ชิปเซ็ต** | Realtek 8773EWE-VP | ไม่ระบุแน่ชัด (รัน HyperOS) | Quad-Core BES2700 Series | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **การเชื่อมต่อ** | Bluetooth 5.0 | Bluetooth 5.2 / 5.3 | Bluetooth 5.3 | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **ระบบ GPS** | ไม่มีในตัว (ใช้ GPS มือถือ) | มีในตัว (Dual-band L1+L5) | มีในตัว (Dual-Band 6 Satellite) | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **แบตเตอรี่** | **1,000 mAh** | 486 mAh | 510 mAh | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **มาตรฐานกันน้ำ**| IP68 | 5ATM | 5ATM | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **ฟังก์ชันเด่น** | ไฟฉาย LED ในตัว, BT Calling, BT Music | เปลี่ยนกรอบหน้าปัดได้, NFC, BT Calling | ChatGPT AI Assistant, คลังเพลงในเครื่อง, NFC | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **วัสดุตัวเรือน** | Black / Silver (สายซิลิโคน 22mm) | อลูมิเนียม / สแตนเลส | ขอบเซรามิกนาโน, เฟรมอลูมิเนียมเกรดการบิน | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **แหล่งอ้างอิง** | *ข้อมูลจากผู้ใช้* | [Siamphone](https://www.siamphone.com/smartwatch/xiaomi/watch-s3) | [Kieslect Thailand](https://www.kieslectthailand.com/en/product/72127/kieslect-ai-smartwatch-elite2-lumina-edition) | *ไม่พบข้อมูลในระบบ* |\n\n*\\*หมายเหตุ: คำนวณจากอัตราแลกเปลี่ยนโดยประมาณ ยังไม่รวมภาษีนำเข้า ค่าขนส่ง และค่าดำเนินการทางการตลาดในไทย*\n\n---\n\n## 2. การวิเคราะห์เชิงลึกรายคู่แข่ง (Competitor Deep Dive)\n\n### 1. Xiaomi Watch S3\n*   **การวางตำแหน่งสินค้า:** เน้นแฟชั่นและการปรับแต่งส่วน",
+  "relevant_annotations": [
+    {
+      "url": "https://www.instagram.com/",
+      "title": "Newest K77 Smart Watch With Flashlight and Large Power 🔋 ...",
+      "content": "F7325eD1lu6t1\n...\nbxWX71x8iqRDskRjoNlqk\n...\nFoyW9yUjZQ\n...\nMRzRoNNuiEjmYIIqQm\n...\nvft/gFLnNDX3OIb\n...\n7FKIPBIjZ\n...\nTeairawjGOToYm2chHG6cIa1y8eSe7r492\n...\nEM7/7\n...\n7rzf1mg8j3eUVKd\n...\neveryday moments from your close friends.\n...\nLog into Instagram",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.amazon.com/PODOEIL-Military-Touchscreen-Bluetooth-Waterproof/dp/B0GTZ5FPWT",
+      "title": "Military Smart Watch for Men, 1.7\" HD Touchscreen, Bluetooth Calling, 1000mAh Battery, Heart Rate/SpO2, 110+ Sports Modes, IP68 Waterproof Fitness Watch for Android & iPhone",
+      "content": "# Military Smart Watch for Men, 1.7\" HD Touchscreen, Bluetooth Calling, 1000mAh Battery, Heart Rate/SpO2, 110+ Sports Modes, IP68 Waterproof Fitness Watch for Android & iPhone\nBrand: PODOEIL\nCategory: Wearable Technology > Smartwatches\n\n...\n\n## Features\nStylish Design & Custom Watch Faces Military watches for men is made from special metal material,digital watch men has undergone rigorous military-grade testing,including extreme temperature,low pressure,and dustproof. 1.7-inch HD touchscreen, 30",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.cherrypicksreviews.com/smartwatches/water-resistant",
+      "title": "The 30 Best Water-Resistant Smartwatches of 2026 [Verified] - Cherry Picks",
+      "content": "Features\n\n...\n\n#### Features\n\n...\n\n#### Features\n\n...\n\n#### Features\n\n...\n\n#### Features\n\n...\n\nFeatures\n\n...\n\nFeatures\n\n...\n\nFeatures\n\n...\n\n#### Features\n\n...\n\nFeatures\n\n...\n\n#### Features\n\n...\n\nFeatures\n\n...\n\nFeatures\n\n...\n\n#### Features\n\n...\n\n#### Features\n\n...\n\n#### Features\n\n...\n\nFeatures\n\n...\n\n#### Features\n\n...\n\n#### Features\n\n...\n\n#### Features\n\n...\n\nfor Women\n\n...\n\nB\n\n...\n\n#### Features\n\n...\n\n【30 Days+ Battery Life】: Smart watch features a massive 1000mAh battery, offering 30 days of use",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
+      "title": "Xiaomi Watch S3 สมาร์ทวอทช์หน้าปัด 47 มม. ราคา ...",
+      "content": "Xiaomi Watch S3 สมาร์ทวอทช์หน้าปัด 47 มม. ราคา 5,490 บาท | Siamphone.com\n\n...\n\nBlackSilver\n47 มม.\nขนาด: 47 × 47 × 12 มม. น้ำหนัก 44 กรัม\nXiaomi Watch S3\nเครื่องศูนย์**฿ 4,890**\nราคากลาง\nราคาโดยประมาณจาก สยามโฟนฯ\n(คำนวณหาค่าเฉลี่ย x̄ จากร้านค้าทั้งหมดที่มีจำหน่ายผลิตภัณฑ์รุ่นนี้)\n**฿ 4,890**\nเช็คราคา Xiaomi Watch S3\nPowered by store.siamphone.com\nราคาใกล้เคียง\n\n...\n\n## ข้อมูลทั่วไป Xiaomi Watch S3\n* เปิดตัวครั้งแรก ตุลาคม 66 (สยามโฟนฯ)\n* สถานะ มีวางจำหน่ายในประเทศไทย\n* วางจำหน่าย ไตรมาสที่ 1 ปี 2",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Xiaomi Watch S3",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.central.co.th/en/xiaomi-silver-xiaomi-watch-s3-mkp1709647",
+      "title": "XIAOMI \n                        \n                     \n                     \n                        Silver Xiaomi Watch S3",
+      "content": "XIAOMI Silver Xiaomi Watch S3 on discount\n\n...\n\n*\n\n...\n\nProduct IDMKP1709647\n# XIAOMI\nSilver Xiaomi Watch S3\nSold by:**MAC MODERN**\nSave2%\n฿5,379\n฿5,490\nSave฿111\nRedeem LogoGet this item with43,032Points\nPre-order product will be started shipping from.\nThis Variation is not available\nPre-order product will be started shipping from.\nOK\n\n...\n\n3",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Xiaomi Watch S3",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.sanook.com/hitech/1598247/",
+      "title": "พาชม \"Xiaomi Watch S3\" หรูหราปรับเป็นตัวเองได้ในงบ ...",
+      "content": "#\n\n...\n\nชม \"\n\n...\n\nWatch\n\n...\n\n\" หรูหราปรับเป็นตัวเองได้ในง\n\n...\n\n4,\n\n...\n\n0\n\n...\n\n## ราคาเปิดตัวของ Xiaomi Watch S3\n\n...\n\nXiaomi Watch S3 พร้อมให้คุณเป็นเจ้าของแล้วในราคาพิเศษ 4,890 บาท (จากราคาปกติ 5,490 บาท) ตั้งแต่วันนี้ ถึง 30 เมษายน 2567 ซื้อได้ที่ Xiaomi Store และร้านตัวแทนจำหน่ายที่ร่วมรายการทั่วประเทศ รวมถึงช่องทางการจัดจำหน่ายทางออนไลน์ทุกแพลตฟอร์ม",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Xiaomi Watch S3",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://droidsans.com/xiaomi-watch-2-watch-s3-specs-price-thailand/",
+      "title": "Xiaomi Watch S3 และ Xiaomi Watch 2 นาฬิกา HyperOS และ ...",
+      "content": "ส่วน\n\n...\n\nรุ่น\n\n...\n\nXiaomi\n\n...\n\n2 ที่\n\n...\n\nระบบ\n\n...\n\nการ Wear OS เวอร์ชันใหม่\n\n...\n\nและได้\n\n...\n\nป Snapdragon W5+ Gen 1 ตัวท็\n\n...\n\nจาก\n\n...\n\nนราคา 5,\n\n...\n\n9\n\n...\n\nและ 7,49\n\n...\n\nบาท\n\n...\n\nลำ\n\n...\n\nโดย\n\n...\n\nพ\n\n...\n\nออร์เดอร์จะมีส่วนลดเพิ่มเติมให้อีกด้วย\n\n...\n\nราคา\n\n...\n\nXiaomi Watch S3 และ Xiaomi Watch 2 เปิดให้สั่งซื้อผ่าน Xiaomi Official Store และร้านค้าตัวแทนจำหน่ายทั้งช่องทางออนไลน์และออฟไลน์ ตั้งแต่วันที่ 14 มีนาคม 2024 เป็นต้นไป\n\n...\n\n- น้ำหนัก 36.8 กรัม ไม่รวมสาย\n- Xiaomi Watch S3 ",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Xiaomi Watch S3",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.appdisqus.com/xiaomi-14-series-launch-thai-watch-s3-smart-band-8-pro/",
+      "title": "เปิดตัว ‘Xiaomi 14 Series’ อย่างเป็นทางการในประเทศไทย พร้อมประกาศวางจำหน่าย Xiaomi Watch 2, Xiaomi Watch S3 และ Xiaomi Smart Band 8 Pro",
+      "content": "### Xiaomi Watch S3\n\n...\n\nWatch\n\n...\n\nด้วย\n\n...\n\nXiaomi Watch S3 พร้อมให้คุณเป็นเจ้าของแล้วในราคาพิเศษ 4,890 บาท (จากราคาปกติ 5,490 บาท) ตั้งแต่วันนี้ ถึง 30 เมษายน 2567 ที่ Xiaomi Store และร้านตัวแทนจำหน่ายที่ร่วมรายการทั่วประเทศ รวมถึงช่องทางการจัดจำหน่ายทางออนไลน์ทุกแพลตฟอร์ม",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Xiaomi Watch S3",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.kieslectthailand.com/en/product/67054/kieslect-ai-smartwatch-elite2",
+      "title": "Kieslect AI Smartwatch Elite2 GPS Dual-Band",
+      "content": "Kieslect AI Smartwatch Elite2 GPS Dual-Band\n\n...\n\nNew Arrival\n\n...\n\n# Kieslect AI Smartwatch Elite2\n\n...\n\n฿7,990\n\n...\n\n฿3,290\n\n...\n\nOptions\n\n...\n\nPlease Select\n\n...\n\n- Please Select\n- Black\n\n...\n\nQuantity\n\n...\n\n[[Product Highlights]]- Kieslect AI, an intelligent wrist assistant based on ChatGPT.* Supports up to 25 languages for both text and voice communication.Note: Auto-reply is only available on Android. It is not yet available on iOS.* Convenient operation, allowing you to activate various m",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Kieslect AI Smartwatch Elite2 Lumina Edition",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.kieslectthailand.com/en/tag/Elite2",
+      "title": "Tag - Elite2 - kieslectthailand.com",
+      "content": "Tag - Elite2 - kieslectthailand.com\n...\nKieslect AI Smartwatch Elite2 Lumina Edition\n...\nKieslect AI Smartwatch Elite2 Noir Edition\n...\nKieslect AI Smartwatch Elite2",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Kieslect AI Smartwatch Elite2 Lumina Edition",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.kieslectthailand.com/en/product/72127/kieslect-ai-smartwatch-elite2-lumina-edition",
+      "title": "Kieslect AI Smartwatch Elite2 Lumina Edition",
+      "content": "Kieslect AI Smartwatch Elite2 Lumina Edition\n\n...\n\nNew Arrival\n\n...\n\n# Kieslect AI Smartwatch Elite2 Lumina Edition\n\n...\n\n฿8,990\n\n...\n\n฿3,490\n\n...\n\nOptions\n\n...\n\nPlease Select\n\n...\n\n- Please Select\n- Lumina Edition\n\n...\n\nQuantity\n\n...\n\nan\n\n...\n\ndiscount 25\n\n...\n\nProduct description\n\n...\n\n[[Product Highlights]]- Kieslect AI, an intelligent wrist assistant based on ChatGPT.* Supports up to 25 languages for both text and voice communication.Note: Auto-reply is only available on Android. It is not y",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Kieslect AI Smartwatch Elite2 Lumina Edition",
+        "geography": "thailand"
+      }
+    }
+  ]
+}

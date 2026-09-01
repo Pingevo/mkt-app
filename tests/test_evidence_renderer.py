@@ -10,7 +10,9 @@ import pytest
 from src.agents.competitor_evidence import (
     CompetitorEvidence,
     CompetitorReportRenderer,
+    EvidenceBasedRecommendation,
     ResearchResponse,
+    StrategicHypothesis,
 )
 from src.agents.competitor_analysis import CompetitorAnalysisAgent
 from tests.test_competitor_analysis import FakeLLM
@@ -53,7 +55,8 @@ def _check_outcome_for_rendered(output: str, fixture: dict) -> dict:
 
 class TestStageAEvidenceContract:
     def test_evidence_without_selected_url_is_dropped(self):
-        """Model ไม่สามารถ invent URL เป็น source ได้."""
+        """Model ไม่สามารถ invent URL เป็น source ได้ — invented URL is not
+        rendered; limited analysis is shown instead of the claim."""
         research = ResearchResponse(
             target_model="CACGO K77",
             competitor_names=["Xiaomi Watch S3"],
@@ -70,10 +73,14 @@ class TestStageAEvidenceContract:
         )
         renderer = CompetitorReportRenderer(research, relevant_annotations=[])
         output = renderer.render("---\nรหัสสินค้า: K77\nCACGO K77")
+        # invented URL must not appear in output
         assert "1.43\" AMOLED" not in output
-        assert "ไม่พบข้อมูล" in output
+        assert "https://example.com/invented" not in output
+        # limited analysis is shown instead of empty stub
+        assert "limited_analysis" in output
 
     def test_competitor_outside_scope_is_dropped(self):
+        """Evidence citing a competitor not in competitor_names is dropped."""
         research = ResearchResponse(
             target_model="CACGO K77",
             competitor_names=["Xiaomi Watch S3"],
@@ -94,10 +101,13 @@ class TestStageAEvidenceContract:
             "_relevance": {"relevance_type": "competitor", "geography": "thailand"},
         }])
         output = renderer.render("---\nรหัสสินค้า: K77")
-        assert "ไม่พบข้อมูล" in output
+        # out-of-scope competitor's claim must not appear
+        assert "1.46\" AMOLED" not in output
+        assert "limited_analysis" in output
 
-    def test_thai_claim_must_use_thai_source(self):
-        """Thai market evidence ต้องมา source ทีระบุ geography=thailand."""
+    def test_thai_claim_with_global_source_is_warning_not_block(self):
+        """Thai geography claim with non-Thai source is now a warning,
+        not a hard block — model-decided geography is accepted."""
         research = ResearchResponse(
             target_model="CACGO K77",
             competitor_names=["Xiaomi Watch S3"],
@@ -119,8 +129,9 @@ class TestStageAEvidenceContract:
             "_relevance": {"relevance_type": "competitor", "geography": "global"},
         }])
         output = renderer.render("---\nรหัสสินค้า: K77")
-        assert "ไม่พบข้อมูล" in output
-        assert "6,990 บาท" not in output
+        # Geography is model-decided — evidence is rendered despite mismatch
+        assert "6,990 บาท" in output
+        assert "## ตารางเปรียบเทียบ" in output
 
 
 class TestStageBRenderer:
@@ -147,9 +158,20 @@ class TestStageBRenderer:
                     geography="thailand",
                 ),
             ],
-            recommendations=[
-                "เน้นจุดขายหน้าจอใหญ่และแบตอึด",
-                "ระบุช่องทางจำหน่าย official Thailand",
+            evidence_based_recommendations=[
+                EvidenceBasedRecommendation(
+                    text="เน้นจุดขายหน้าจอใหญ่และแบตอึด",
+                    supporting_evidence_urls=[
+                        "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
+                        "https://www.kieslectthailand.com/en/product/72123/kieslect-ai-smartwatch-elite2-noir-edition",
+                    ],
+                ),
+            ],
+            strategic_hypotheses=[
+                StrategicHypothesis(
+                    text="ระบุช่องทางจำหน่าย official Thailand",
+                    rationale="คู่แข่งมีช่องทาง official เราควรชูจุดนี้",
+                ),
             ],
         )
         renderer = CompetitorReportRenderer(research, relevant_annotations=fixture["relevant_annotations"])
@@ -163,7 +185,7 @@ class TestStageBRenderer:
         # target model
         assert "CACGO K77" in output
         # recommendations separated
-        assert "## ข้อเสนอแนะ" in output
+        assert "ข้อเสนอแนะที่มีหลักฐานรองรับ" in output
 
     def test_rendered_output_passes_competitor_validation(self):
         fixture = _load_fixture("agent2_quality_good")
@@ -254,9 +276,19 @@ class TestStageBRenderer:
                     geography="thailand",
                 ),
             ],
-            recommendations=[
-                "เน้นจุดขายหน้าจอใหญ่",
-                "ใช้แบตอึดเป้าหมาย",
+            evidence_based_recommendations=[
+                EvidenceBasedRecommendation(
+                    text="เน้นจุดขายหน้าจอใหญ่",
+                    supporting_evidence_urls=[
+                        "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
+                    ],
+                ),
+            ],
+            strategic_hypotheses=[
+                StrategicHypothesis(
+                    text="ใช้แบตอึดเป้าหมาย",
+                    rationale="K77 มีแบตใหญ่ตามสเปก",
+                ),
             ],
         )
         renderer = CompetitorReportRenderer(research, relevant_annotations=fixture["relevant_annotations"])
@@ -268,6 +300,7 @@ class TestStageBRenderer:
 
 class TestBadEvidenceCannotRender:
     def test_tag_or_homepage_source_is_not_rendered(self):
+        """Homepage/tag sources are structurally blocked — claim is not rendered."""
         fixture = _load_fixture("agent2_quality_bad_source")
         research = ResearchResponse(
             target_model="CACGO K77",
@@ -288,7 +321,8 @@ class TestBadEvidenceCannotRender:
 
         # bad source is dropped
         assert "510mAh" not in output
-        assert "ไม่พบข้อมูล" in output
+        # limited analysis is shown instead of empty stub
+        assert "limited_analysis" in output
 
     def test_model_messy_evidence_renders_safely(self):
         """ถ้า model คืน evidence มากเกิน/ซ้ำ/ผิด ให้ renderer เลือกอันทีผ่าน validation เท่านั้น."""
@@ -500,7 +534,18 @@ def test_six_evidence_bounded_response_renders_usable_report():
         target_model="CACGO K77",
         competitor_names=["Xiaomi Watch S3", "Kieslect"],
         evidence=evidence,
-        recommendations=["เน้นหน้าจอใหญ่", "แบตอึด"],
+        evidence_based_recommendations=[
+            EvidenceBasedRecommendation(
+                text="เน้นหน้าจอใหญ่",
+                supporting_evidence_urls=[evidence[0].url],
+            ),
+        ],
+        strategic_hypotheses=[
+            StrategicHypothesis(
+                text="แบตอึด",
+                rationale="ตามสเปก",
+            ),
+        ],
         uncertainty=["ยังไม่พบราคา Kieslect"],
     )
     renderer = CompetitorReportRenderer(research, relevant_annotations=relevant)
@@ -509,7 +554,7 @@ def test_six_evidence_bounded_response_renders_usable_report():
     # fits within token budget when converted to single-line output
     assert len("\n".join(output.splitlines())) < 20000
     assert "## ตารางเปรียบเทียบ" in output
-    assert "## ข้อเสนอแนะ" in output
+    assert "ข้อเสนอแนะที่มีหลักฐานรองรับ" in output
 
     outcome = _check_outcome({
         "case_name": "k77_thailand_web_search",

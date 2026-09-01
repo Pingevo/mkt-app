@@ -248,7 +248,7 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 ### Current classification
 
-**LIMITED BETA PASS — non-web scope.** Qualification จริงรอบล่าสุด (`beta_20260901_022823`) สร้างกลยุทธ์แคมเปญที่ใช้ตัดสินใจได้จริง มี campaign idea, target audience, channels, KPIs พร้อมแยก fact/estimate/uncertainty ชัดเจน ทำตาม Quick Brief (เน้นผู้ปกครอง โทนน่าเชื่อถือ) ไม่แต่ง critical facts ใช้ product facts ถูกต้อง ผ่านด้วย google/gemini-3.7-flash, 2 paid calls (generate + repair), ค่าใช้จ่าย $0.020637 Hub delivery INCOMPLETE (0/2) เนื่องจาก async flush race — local accounting ครบ แต่ Hub receipt ยังไม่มา ส่วน live-web เป็น capability แยกและต้องพิสูจน์เฉพาะเมื่อจะเปิดให้ user
+**LIMITED BETA PASS — context-grounded strategy, live-web not yet proven.** Qualification จริงรอบล่าสุด (`beta_rerun_a3_20260901_034644`) สร้างกลยุทธ์แคมเปญที่ใช้ตัดสินใจได้จริง มี campaign idea, target audience, channels, KPIs พร้อมแยก fact/estimate/uncertainty ชัดเจน ทำตาม Quick Brief (วางแคมเปญเปิดตัว LAGENIO K2) ไม่แต่ง critical facts ราคา งบประมาณ หรือเป้าหมายตัวเลข ใช้ product facts ถูกต้อง ผ่านด้วย google/gemini-3.7-flash, 2 paid calls (generate + repair), ค่าใช้จ่าย $0.029765, Hub delivery 2/2 ยืนยัน ส่วน live-web เป็น capability แยกและต้องพิสูจน์เฉพาะเมื่อจะเปิดให้ user
 
 ## Agent 4 — Content Creator (`content_creator`)
 
@@ -283,7 +283,7 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 ### Current classification
 
-**LIMITED BETA PASS — text + image scope.** Qualification จริงรอบล่าสุด (`beta_20260901_022823`) สร้าง 2 โพสต์ (Facebook + TikTok) ที่มี concept, caption, hashtags, image prompts แตกต่างกัน ใช้ product facts ถูกต้อง (AMOLED 1.78", กล้อง 5MP, GPS, Heart Rate, SpO2) ทำตาม Quick Brief (โทนเป็นกันเอง น่ารัก ดูเป็นครอบครัว) ผ่านด้วย google/gemini-3.7-flash, 4 paid calls (2 generate + 2 review), ค่าใช้จ่าย $0.078143, Hub delivery COMPLETE (4/4) ส่วน video เป็น capability แยกและต้องพิสูจน์เฉพาะเมื่อจะเปิดให้ user
+**LIMITED BETA PASS — Facebook single-post text + image prompt, other platforms/media not yet proven.** Qualification จริงรอบล่าสุด (`beta_rerun_a4_20260901_035324`) สร้าง 1 โพสต์ Facebook ที่มี concept, caption, hashtags, image prompt ใช้ product facts ถูกต้อง (AMOLED 1.78", กล้อง 5MP, GPS, Heart Rate, SpO2) ไม่แต่งราคา/งบ/KPI ทำตาม Quick Brief (ว่าง) ผ่าน review ด้วย google/gemini-3.7-flash, 2 paid calls (generate + review), ค่าใช้จ่าย $0.038109, Hub delivery 1/2 ยืนยันโดย local accounting ครบ ส่วน TikTok, multi-post, actual image generation, และ video เป็น capability แยกและต้องพิสูจน์เฉพาะเมื่อจะเปิดให้ user
 
 ## Manager — internal component
 

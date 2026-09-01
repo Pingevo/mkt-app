@@ -126,7 +126,7 @@ def test_renderer_accepts_url_from_market_match_annotation():
                 "geography": "global",
             }
         ],
-        "recommendations": [],
+        "evidence_based_recommendations": [], "strategic_hypotheses": [],
         "uncertainty": ["ไม่พบราคาที่แน่นอน"],
     })
 
@@ -174,7 +174,7 @@ def test_limited_analysis_with_empty_evidence_passes_validation():
         "target_model": "K2",
         "competitor_names": ["imoo Z1", "Huawei Watch Kids"],
         "evidence": [],
-        "recommendations": ["แนะนำให้ค้นหาข้อมูลเพิ่มเติมจาก official product page"],
+        "evidence_based_recommendations": [], "strategic_hypotheses": [{"text": "แนะนำให้ค้นหาข้อมูลเพิ่มเติมจาก official product page", "rationale": "ยังไม่ครบ"}],
         "uncertainty": ["ไม่พบหลักฐานเฉพาะรุ่นของ imoo Z1 และ Huawei Watch Kids จากการค้นหา"],
     }
 
@@ -211,7 +211,7 @@ def test_competitor_specific_evidence_still_validates():
                 "geography": "thailand",
             }
         ],
-        "recommendations": [],
+        "evidence_based_recommendations": [], "strategic_hypotheses": [],
         "uncertainty": [],
     }
 
@@ -309,7 +309,7 @@ def test_default_discovery_reassess_after_model_returns_competitor_names():
                 "geography": "global",
             }
         ],
-        "recommendations": [],
+        "evidence_based_recommendations": [], "strategic_hypotheses": [],
         "uncertainty": [],
     }
     json_str = json.dumps(research_json)

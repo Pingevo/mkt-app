@@ -131,6 +131,141 @@ HUB_POST_CALLBACK: Any | None = None
 """Optional callback for acceptance/tests to observe Hub POST result."""
 
 
+def get_hub_post_callback() -> Any | None:
+    """Return the currently installed Hub POST callback, if any."""
+    return HUB_POST_CALLBACK
+
+
+def set_hub_post_callback(callback: Any | None) -> Any | None:
+    """Set the global Hub POST callback and return the previous one."""
+    global HUB_POST_CALLBACK
+    previous = HUB_POST_CALLBACK
+    HUB_POST_CALLBACK = callback
+    return previous
+
+
+def clear_hub_post_callback() -> Any | None:
+    """Remove the global Hub POST callback and return the previous one."""
+    global HUB_POST_CALLBACK
+    previous = HUB_POST_CALLBACK
+    HUB_POST_CALLBACK = None
+    return previous
+
+
+class HubReceiptCollector:
+    """Context manager that collects Hub POST receipts for one run.
+
+    Restores any previously installed callback on exit.
+    """
+
+    def __init__(self, target: list[dict[str, Any]] | None = None):
+        self.results: list[dict[str, Any]] = target if target is not None else []
+        self._previous: Any | None = None
+
+    def __enter__(self) -> "HubReceiptCollector":
+        self._previous = set_hub_post_callback(self.results.append)
+        return self
+
+    def __exit__(self, *a: object) -> None:
+        set_hub_post_callback(self._previous)
+
+
+def reconcile_hub_receipts(
+    local_entries: list[dict[str, Any]],
+    hub_results: list[dict[str, Any]],
+    *,
+    flush_completed: bool = True,
+) -> dict[str, Any]:
+    """Reconcile Hub delivery receipts against the local usage log.
+
+    - every locally recorded paid LLM call must have exactly one matching Hub receipt;
+    - match by request_id;
+    - duplicate, missing or unrelated receipts make the overall status INCOMPLETE.
+
+    Returned dict contains per-request status and the overall `COMPLETE`/`INCOMPLETE`
+    verdict.  No credentials or tokens are included.
+    """
+    local_by_id: dict[str, list[dict[str, Any]]] = {}
+    for entry in local_entries:
+        rid = str(entry.get("request_id") or "")
+        if rid:
+            local_by_id.setdefault(rid, []).append(entry)
+
+    # Index Hub receipts by request_id
+    hub_by_id: dict[str, list[dict[str, Any]]] = {}
+    for r in hub_results:
+        rid = str(r.get("request_id") or "")
+        if rid:
+            hub_by_id.setdefault(rid, []).append(r)
+
+    all_local_ids = set(local_by_id.keys())
+    all_hub_ids = set(hub_by_id.keys())
+    unrelated_ids = all_hub_ids - all_local_ids
+
+    per_request: dict[str, str] = {}
+    missing: list[str] = []
+    duplicate: list[str] = []
+    delivered: list[str] = []
+    http_error: list[str] = []
+    transport_error: list[str] = []
+    flush_timeout: list[str] = []
+
+    for rid in sorted(all_local_ids):
+        count = len(hub_by_id.get(rid, []))
+        if count == 0:
+            status = "flush_timeout" if not flush_completed else "missing_receipt"
+            (flush_timeout if not flush_completed else missing).append(rid)
+        elif count > 1:
+            status = "duplicate_receipt"
+            duplicate.append(rid)
+        else:
+            receipt = hub_by_id[rid][0]
+            hub_status = receipt.get("hub_status") or "unknown"
+            if hub_status == "hub_delivered":
+                status = "delivered"
+                delivered.append(rid)
+            elif hub_status == "hub_http_error":
+                status = "http_error"
+                http_error.append(rid)
+            elif hub_status == "hub_transport_error":
+                status = "transport_error"
+                transport_error.append(rid)
+            else:
+                status = hub_status
+            # No token / authorization header leakage: only known status strings.
+        per_request[rid] = status
+
+    for rid in sorted(unrelated_ids):
+        per_request[rid] = "unrelated_receipt"
+
+    overall = "COMPLETE" if (
+        flush_completed
+        and not missing
+        and not duplicate
+        and not unrelated_ids
+        and not http_error
+        and not transport_error
+        and not flush_timeout
+        and len(delivered) == len(all_local_ids)
+        and all_local_ids
+    ) else "INCOMPLETE"
+
+    return {
+        "overall": overall,
+        "per_request": per_request,
+        "delivered": delivered,
+        "missing_receipt": missing,
+        "duplicate_receipt": duplicate,
+        "unrelated_receipt": sorted(unrelated_ids),
+        "http_error": http_error,
+        "transport_error": transport_error,
+        "flush_timeout": flush_timeout,
+        "flush_completed": flush_completed,
+        "expected": len(all_local_ids),
+        "delivered_count": len(delivered),
+    }
+
+
 def _post(endpoint: str, token: str, payload: dict[str, Any]) -> None:
     """POST จริง — ครอบ try/except ทุกกรณี."""
     if not _HTTPX_OK:

@@ -33,6 +33,7 @@ def _content_creator_json():
             "hashtags": "#t",
             "image_prompts": [{"prompt": "product photo"}],
             "video_prompts": [{"prompt": "product video"}],
+            "asset_ids": [],
         }],
     }, ensure_ascii=False)
 

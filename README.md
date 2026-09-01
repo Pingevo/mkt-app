@@ -1,6 +1,15 @@
 # Marketing Agent System
 
-ระบบ AI Agent สำหรับทีมการตลาด — รันผ่าน command line ด้วย Python
+ระบบพนักงาน AI สำหรับทีมการตลาด — ใช้งานหลักผ่าน Web UI และรองรับ CLI สำหรับ automation/backward compatibility
+
+## Product documents
+
+- [`AI_EMPLOYEE_PRODUCT_VISION.md`](AI_EMPLOYEE_PRODUCT_VISION.md) — ภาพผลิตภัณฑ์ “พนักงาน AI”, วิธีใช้งานจริง และเหตุผลด้านความคุ้มค่า
+- [`AGENT_PRODUCTION_READINESS_SPEC.md`](AGENT_PRODUCTION_READINESS_SPEC.md) — เกณฑ์ Beta และ Production Ready ราย Agent
+- [`AI_EMPLOYEE_BETA_EXECUTION_PLAN.md`](AI_EMPLOYEE_BETA_EXECUTION_PLAN.md) — แผนส่งมอบ Beta, ระยะเวลา, stopping rule และ handoff ข้าม session
+- [`AGENT_ORCHESTRATION_SPEC.md`](AGENT_ORCHESTRATION_SPEC.md) — สัญญาการทำงานเป็นทีม/ส่ง artifact ในอนาคต
+
+Web UI ปัจจุบันรองรับการเลือกสินค้า เลือก Agent หนึ่งตัวต่อ Flow, optional Quick Brief, ไฟล์แนบ, Agent Settings และตัวเลือก Content Creator (Facebook/TikTok, จำนวนโพสต์, รูป/วิดีโอ, สร้างทันทีหรือถามก่อน). CLI ด้านล่างยังคงใช้ได้สำหรับ automation และ backward compatibility.
 
 ## Agent ทั้ง 4 ตัว
 

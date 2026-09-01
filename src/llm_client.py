@@ -117,6 +117,8 @@ class LLMClient:
         source: label สำหรับ AI Usage Hub log (เช่น "content_creator", "ingestion")
         """
         used_model = model or self._default_model
+        # Reset per-call metadata so a failed or skipped call cannot leak stale data.
+        self._last_raw_response = {}
         # Structured Outputs ไม่รองรับ stream — บังคับ non-stream
         if response_format:
             stream = False
@@ -390,6 +392,9 @@ class LLMClient:
                     if chunk.get("id"):
                         yield ("request_id", chunk["id"])
 
+                    if chunk.get("model"):
+                        yield ("model", chunk["model"])
+
                     if chunk.get("usage"):
                         yield ("usage", chunk["usage"])
 
@@ -448,6 +453,7 @@ class LLMClient:
         text = Text()
         usage: dict[str, Any] | None = None
         request_id: str | None = None
+        actual_model: str | None = None
 
         with Live(text, console=console, refresh_per_second=int(cfg.get("stream_refresh_rate", 15)), transient=False) as live:
             for event_type, value in self._stream_attempt(
@@ -461,6 +467,16 @@ class LLMClient:
                     usage = value
                 elif event_type == "request_id":
                     request_id = value
+                elif event_type == "model":
+                    actual_model = actual_model or value
+
+        # Record the same per-call metadata shape as the non-stream path so
+        # consumers of _last_raw_response (e.g. actual_model) work for streams.
+        self._last_raw_response = {
+            "id": request_id,
+            "model": actual_model,
+            "usage": usage,
+        }
 
         console.print()
         return "".join(collected), usage, request_id
@@ -482,6 +498,8 @@ class LLMClient:
         source: label สำหรับ AI Usage Hub log
         """
         used_model = model or self._default_model
+        # Reset per-call metadata so a failed or skipped call cannot leak stale data.
+        self._last_raw_response = {}
         payload: dict[str, Any] = {
             "model": used_model,
             "messages": messages,

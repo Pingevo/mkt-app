@@ -26,9 +26,26 @@ class FakeLLM:
 
     def chat(self, messages, **kwargs):
         self.calls.append({"messages": messages, "kwargs": kwargs})
+        out = (
+            "## ราคาแนะนำ\n"
+            "- ราคาขายปลีก: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
+            "## แคมเปญหลัก\n"
+            "- ชื่อ: Launch Campaign เปิดตัวสินค้ารุ่นใหม่\n"
+            "- วัตถุประสงค์: สร้างการรับรู้และกระตุ้นยอดขายในช่วงเปิดตัว\n"
+            "## แคมเปญเสริม\n"
+            "- แคมเปญ Influencer Review ใช้บล็อกเกอร์ทดลองและรีวิวสินค้า\n"
+            "## ช่องทางโปรโมท\n"
+            "- Facebook Ads และ TikTok สำหรับกลุ่มเป้าหมาย Gen Z\n"
+            "## KPI ที่ควรวัดผล\n"
+            "- Reach และ CTR ต้องกำหนดหลังมี baseline\n"
+            "## งบประมาณประมาณการ\n"
+            "- ต้องอนุมัติทางการเงินก่อนกำหนดสัดส่วนงบ\n"
+            "## แหล่งอ้างอิง\n"
+            "- ไม่มี URL ภายนอกใน context นี้\n"
+        )
         if kwargs.get("return_annotations"):
-            return "## ราคาแนะนำ\n- test\n\n## แคมเปญหลัก\n- test\n\n## แคมเปญเสริม\n- test\n\n## ช่องทางโปรโมท\n- test\n\n## KPI ที่ควรวัดผล\n- test\n\n## งบประมาณประมาณการ\n- test\n\n## แหล่งอ้างอิง\n- test", []
-        return "## ราคาแนะนำ\n- test\n\n## แคมเปญหลัก\n- test\n\n## แคมเปญเสริม\n- test\n\n## ช่องทางโปรโมท\n- test\n\n## KPI ที่ควรวัดผล\n- test\n\n## งบประมาณประมาณการ\n- test\n\n## แหล่งอ้างอิง\n- test"
+            return out, []
+        return out
 
     def close(self):
         pass
@@ -140,7 +157,7 @@ def test_quick_brief_reaches_llm_user_prompt():
     # quick_brief ถูกแปะท้าย user prompt
     assert "อยากได้ราคาเฉพาะเจาะจง" in user_content
     assert "เน้น TikTok" in user_content
-    assert "คำสั่งเพิ่มเติมจากผู้ใช้สำหรับรอบนี้" in user_content
+    assert "คำสั่งเฉพาะรอบนี้จากผู้ใช้" in user_content
 
 
 def test_quick_brief_does_not_override_brand_rules():
@@ -151,7 +168,7 @@ def test_quick_brief_does_not_override_brand_rules():
     agent.run(prompt, quick_brief="ใช้คำว่าถูกที่สุด")
 
     user_content = llm.calls[0]["messages"][1]["content"]
-    assert "ถ้าขัดแย้งกับกฎบังคับของแบรนด์ใน system prompt ให้ทำตามกฎแบรนด์เสมอ" in user_content
+    assert "ถ้าขัดแย้ง ให้ system guardrails" in user_content
 
 
 def test_preset_change_affects_full_system_prompt():

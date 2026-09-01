@@ -37,11 +37,13 @@ def _entries(path):
 
 class _FakeThread:
     """Run the target synchronously so tests can observe side effects."""
-    def __init__(self, target, args=(), kwargs=None, daemon=False):
+    def __init__(self, target, args=(), kwargs=None, daemon=False, **extra):
         self._target = target
         self._args = args
         self._kwargs = kwargs or {}
         self._daemon = daemon
+        # Accept and ignore any additional kwargs (e.g. name=) that the
+        # production code passes to threading.Thread.
 
     def start(self):
         self._target(*self._args, **self._kwargs)

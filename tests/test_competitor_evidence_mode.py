@@ -51,7 +51,20 @@ def _good_research_response():
                     "geography": "thailand",
                 },
             ],
-            "recommendations": ["เน้นหน้าจอใหญ่"],
+            "evidence_based_recommendations": [
+                {
+                    "text": "เน้นหน้าจอใหญ่ของ K77 เปรียบเทียบกับ Xiaomi Watch S3",
+                    "supporting_evidence_urls": [
+                        "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
+                    ],
+                },
+            ],
+            "strategic_hypotheses": [
+                {
+                    "text": "ชูแบตอึดเป็นจุดขาย",
+                    "rationale": "K77 มีแบตใหญ่กว่า Kieslect ตามสเปก แต่ยังไม่ได้เปรียบเทียบกับทุกรุ่น",
+                },
+            ],
             "uncertainty": ["ยังไม่พบราคา Kieslect"],
         },
         ensure_ascii=False,
@@ -154,7 +167,7 @@ def test_untrusted_url_triggers_one_revision():
                     "geography": "thailand",
                 },
             ],
-            "recommendations": ["เน้นหน้าจอใหญ่"],
+            "evidence_based_recommendations": [], "strategic_hypotheses": [],
             "uncertainty": ["ยังไม่พบราคา"],
         },
         ensure_ascii=False,
@@ -197,7 +210,7 @@ def test_untrusted_url_not_fixable_fails_required_search():
                     "geography": "thailand",
                 },
             ],
-            "recommendations": ["เน้นหน้าจอใหญ่"],
+            "evidence_based_recommendations": [], "strategic_hypotheses": [],
             "uncertainty": ["ยังไม่พบราคา"],
         },
         ensure_ascii=False,
@@ -211,8 +224,9 @@ def test_untrusted_url_not_fixable_fails_required_search():
     assert "**required_search_failed: true**" in result
 
 
-def test_thai_evidence_requires_thai_source():
-    """evidence.geography=thailand but source is not thailand -> reject."""
+def test_thai_evidence_with_global_source_is_accepted():
+    """evidence.geography=thailand but code detects global source — model-decided
+    geography is accepted (warning, not hard block).  Evidence is rendered."""
     fixture = _load_fixture()
     bad = json.dumps(
         {
@@ -234,7 +248,7 @@ def test_thai_evidence_requires_thai_source():
                     "geography": "thailand",
                 },
             ],
-            "recommendations": ["เน้นหน้าจอใหญ่"],
+            "evidence_based_recommendations": [], "strategic_hypotheses": [],
             "uncertainty": ["ยังไม่พบราคา"],
         },
         ensure_ascii=False,
@@ -244,7 +258,7 @@ def test_thai_evidence_requires_thai_source():
     prompt = agent.build_prompt(fixture["product_spec"], fixture["competitor_data"])
     result = agent.run(prompt)
 
-    assert len(fake.calls) == 2
+    # Geography is model-decided — evidence is rendered without revision
     assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" in result
 
 
@@ -297,7 +311,7 @@ def test_revise_url_outside_manifest_rejected():
                     "geography": "thailand",
                 },
             ],
-            "recommendations": ["เน้นหน้าจอ"],
+            "evidence_based_recommendations": [], "strategic_hypotheses": [],
             "uncertainty": ["ยังไม่พบราคา"],
         },
         ensure_ascii=False,
@@ -366,7 +380,7 @@ def test_invalid_free_field_rejected_after_revision():
                     "geography": "thailand",
                 },
             ],
-            "recommendations": ["เน้นหน้าจอ"],
+            "evidence_based_recommendations": [], "strategic_hypotheses": [],
             "uncertainty": ["ยังไม่พบ"],
         },
         ensure_ascii=False,
@@ -424,7 +438,13 @@ def _base_payload(**overrides):
         "target_model": "CACGO K77",
         "competitor_names": ["Xiaomi Watch S3"],
         "evidence": [_evidence_template()],
-        "recommendations": ["เน้นหน้าจอ"],
+        "evidence_based_recommendations": [
+            {
+                "text": "เน้นหน้าจอ",
+                "supporting_evidence_urls": [_evidence_template()["url"]],
+            },
+        ],
+        "strategic_hypotheses": [],
         "uncertainty": ["ยังไม่พบราคา"],
     }
     for k, v in overrides.items():
@@ -451,9 +471,14 @@ def test_rejects_too_long_claim():
 
 def test_rejects_too_many_recommendations():
     agent = CompetitorAnalysisAgent(_evidence_config(), FakeLLM())
-    payload = _base_payload(recommendations=["a", "b", "c", "d"])
+    payload = _base_payload(evidence_based_recommendations=[
+        {"text": "a", "supporting_evidence_urls": []},
+        {"text": "b", "supporting_evidence_urls": []},
+        {"text": "c", "supporting_evidence_urls": []},
+        {"text": "d", "supporting_evidence_urls": []},
+    ])
     ok, err, _ = agent._validate_research_json(payload)
-    assert not ok and "recommendations has more than 3" in err
+    assert not ok and "evidence_based_recommendations has more than 3" in err
 
 
 def test_rejects_too_long_uncertainty():

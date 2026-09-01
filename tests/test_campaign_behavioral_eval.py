@@ -17,11 +17,11 @@ from tests.test_campaign_real_eval import FakeLLM
 def _positive_k2_output() -> str:
     return (
         "## ราคาแนะนำ\n"
-        "- [LAGENIO K2](https://lagenio.com/k2) ราคาขายปลีก: ฿12,000 (estimate)\n"
-        "- ราคาโปรโมชัน: ฿10,200 (indicative)\n"
+        "- ราคาขายปลีก: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
+        "- ราคาโปรโมชัน: ไม่สามารถเสนอตัวเลขได้ *(pending financial validation)*\n"
         "- [Xiaomi S10 comparison](https://lagenio.com/competitor): ฿11,500\n\n"
         "## แคมเปญหลัก\n"
-        "- ชื่อ: Launch\n\n"
+        "- ชื่อ: Launch Campaign สำหรับ LAGENIO K2\n\n"
         "## แคมเปญเสริม\n"
         "- แคมเปญ 1\n\n"
         "## ช่องทางโปรโมท\n"
@@ -31,7 +31,6 @@ def _positive_k2_output() -> str:
         "## งบประมาณประมาณการ\n"
         "- ใช้งบ 100,000 บาท (estimate)\n\n"
         "## แหล่งอ้างอิง\n"
-        "- [LAGENIO K2](https://lagenio.com/k2)\n"
         "- [Xiaomi S10 comparison](https://lagenio.com/competitor)\n"
     )
 

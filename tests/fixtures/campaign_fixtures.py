@@ -25,6 +25,19 @@ def _base() -> str:
     )
 
 
+def _retail_with_competitor_basis() -> str:
+    """A valid retail price section with evidence-backed positioning hypothesis.
+    Used by fixtures that need a valid retail price as setup for testing other rules.
+    """
+    return (
+        "## ราคาแนะนำ\n"
+        "- ราคาขายปลีก (Indicative Estimate): ฿2,490-2,790 *(pending financial validation)* "
+        "วางตำแหน่งต่ำกว่า [imoo Z1 2,990 บาท](https://shopee.co.th/imoo-z1) "
+        "COGS และ margin ยังไม่ทราบ\n"
+        "- ราคาโปรโมชัน: ไม่สามารถเสนอตัวเลขได้ *(pending financial validation)*\n\n"
+    )
+
+
 def _tail(sources: str) -> str:
     return "## แหล่งอ้างอิง\n" + sources + "\n"
 
@@ -36,8 +49,10 @@ def _good_product_only() -> str:
 def _with_competitor_source() -> str:
     return (
         "## ราคาแนะนำ\n"
-        "- ราคาขายปลีก: ฿2,490-2,790 (estimate)\n"
-        "- ราคาโปรโมชัน: ฿2,240 (indicative)\n"
+        "- ราคาขายปลีก (Indicative Estimate): ฿2,490-2,790 *(pending financial validation)* "
+        "วางตำแหน่งต่ำกว่า [imoo Z1 2,990 บาท](https://shopee.co.th/imoo-z1) "
+        "COGS และ margin ยังไม่ทราบ\n"
+        "- ราคาโปรโมชัน: ไม่สามารถเสนอตัวเลขได้ *(pending financial validation)*\n"
         "- ราคาคู่แข่ง imoo Z1: 2,990 บาท [Shopee](https://shopee.co.th/imoo-z1)\n\n"
         "## แคมเปญหลัก\n"
         "- ชื่อ: Launch\n\n"
@@ -117,6 +132,7 @@ CASES: list[dict] = [
         "quick_brief": "",
         "output": (
             "## ราคาแนะนำ\n"
+            "- ราคาขายปลีก: ไม่สามารถเสนอตัวเลขได้ *(pending financial validation)*\n"
             "- ราคาโปรโมชัน: ฿2,000 (indicative, ลด 40%, pending financial validation)\n\n"
             "## แคมเปญหลัก\n"
             "- แคมเปญ Launch\n\n"
@@ -193,8 +209,8 @@ CASES: list[dict] = [
         "quick_brief": "",
         "output": (
             "## ราคาแนะนำ\n"
-            "- ราคาขายปลีก: ฿2,490-2,790 (estimate)\n"
-            "- ราคาโปรโมชัน: ฿2,240 (indicative)\n"
+            "- ราคาขายปลีก: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
+            "- ราคาโปรโมชัน: ไม่สามารถเสนอตัวเลขได้ *(pending financial validation)*\n"
             "- ราคาส่ง: ฿1,500\n\n"
             "## แคมเปญหลัก\n- Launch\n\n"
             "## แคมเปญเสริม\n- แคมเปญ 1\n\n"
@@ -214,7 +230,7 @@ CASES: list[dict] = [
         "quick_brief": "",
         "output": (
             "## ราคาแนะนำ\n"
-            "- ราคาขายปลีก: ฿2,490-2,790 (estimate)\n"
+            "- ราคาขายปลีก: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
             "- [Shopee search](https://shopee.co.th/search?q=smartwatch)\n\n"
             "## แคมเปญหลัก\n- Launch\n\n"
             "## แคมเปญเสริม\n- แคมเปญ 1\n\n"
@@ -271,7 +287,7 @@ CASES: list[dict] = [
         "quick_brief": "",
         "output": (
             "## ราคาแนะนำ\n"
-            "- ราคาขายปลีก: ฿2,490-2,790 (estimate)\n"
+            "- ราคาขายปลีก: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
             "- ราคาโปรโมชัน: ฿2,240 (indicative)\n\n"
             "## แคมเปญหลัก\n"
             "- ชื่อ: Launch\n\n"
@@ -297,7 +313,7 @@ CASES: list[dict] = [
         "quick_brief": "",
         "output": (
             "## ราคาแนะนำ\n"
-            "- ราคาขายปลีก: ฿2,490-2,790 (estimate)\n"
+            "- ราคาขายปลีก: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
             "- ราคาโปรโมชัน: ฿2,240 (indicative)\n\n"
             "## แคมเปญหลัก\n"
             "- ชื่อ: Launch\n\n"
@@ -323,8 +339,8 @@ CASES: list[dict] = [
         "quick_brief": "",
         "output": (
             "## ราคาแนะนำ\n"
-            "- ราคาขายปลีก: ฿2,490-2,790 (estimate)\n"
-            "- ราคาโปรโมชัน: ฿2,240 (indicative)\n"
+            "- ราคาขายปลีก: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
+            "- ราคาโปรโมชัน: ไม่สามารถเสนอตัวเลขได้ *(pending financial validation)*\n"
             "- [Shopee search](https://shopee.co.th/search?q=smartwatch)\n\n"
             "## แคมเปญหลัก\n"
             "- ชื่อ: Launch\n\n"
@@ -350,7 +366,7 @@ CASES: list[dict] = [
         "quick_brief": "",
         "output": (
             "## ราคาแนะนำ\n"
-            "- ราคาขายปลีก: ฿2,490-2,790 (estimate)\n"
+            "- ราคาขายปลีก: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
             "- ราคาโปรโมชัน: ฿2,240 (indicative)\n\n"
             "## แคมเปญหลัก\n- ชื่อ: Launch\n\n"
             "## แคมเปญเสริม\n- แคมเปญ 1\n\n"
@@ -418,7 +434,7 @@ CASES: list[dict] = [
         "quick_brief": "",
         "output": (
             "## ราคาแนะนำ\n"
-            "- ราคาขายปลีก: ฿2,490-2,790 (estimate)\n"
+            "- ราคาขายปลีก: ไม่สามารถเสนอตัวเลขได้เนื่องจากไม่มีข้อมูลต้นทุน (pending validation)\n"
             "- ราคาโปรโมชัน: ฿2,240 (indicative)\n\n"
             "## แคมเปญหลัก\n- ชื่อ: Launch\n\n"
             "## แคมเปญเสริม\n- แคมเปญ 1\n\n"
@@ -436,13 +452,25 @@ CASES: list[dict] = [
     {
         "case_id": "T_discount_money_bypass",
         "description": "ส่วนลดเงิน ฿1,000 จากราคา ฿2,000 = 50% เกิน ceiling 30%",
-        "context": {"product": "LAGENIO K2"},
-        "instructions": {"discount_max": "30"},
+        "context": {
+            "product": "LAGENIO K2",
+            "competitors": (
+                "คู่แข่ง: imoo Z1\n"
+                "ราคา: 2,990 บาท\n"
+                "แหล่ง: [Shopee](https://shopee.co.th/imoo-z1)"
+            ),
+        },
+        "instructions": {
+            "discount_max": "30",
+            "selected_evidence_urls": ["https://shopee.co.th/imoo-z1"],
+        },
         "quick_brief": "",
         "output": (
             "## ราคาแนะนำ\n"
-            "- ราคาขายปลีก: ฿2,000 (estimate)\n"
-            "- ราคาโปรโมชัน: ฿2,240 (indicative)\n"
+            "- ราคาขายปลีก (Indicative Estimate): ฿2,000 *(pending financial validation)* "
+            "วางตำแหน่งต่ำกว่า [imoo Z1 2,990 บาท](https://shopee.co.th/imoo-z1) "
+            "COGS และ margin ยังไม่ทราบ\n"
+            "- ราคาโปรโมชัน: ไม่สามารถเสนอตัวเลขได้ *(pending financial validation)*\n"
             "- ลด ฿1,000\n\n"
             "## แคมเปญหลัก\n- ชื่อ: Launch\n\n"
             "## แคมเปญเสริม\n- แคมเปญ 1\n\n"
@@ -451,7 +479,7 @@ CASES: list[dict] = [
             "## งบประมาณประมาณการ\n"
             "- ประมาณ 50,000 บาท (estimate)\n\n"
             "## แหล่งอ้างอิง\n"
-            "- ไม่มี external factual claim\n"
+            "- [Shopee - imoo Z1](https://shopee.co.th/imoo-z1)\n"
         ),
         "expected_ok": False,
         "expected_rule": "discount_max_enforced",

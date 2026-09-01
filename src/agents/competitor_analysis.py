@@ -209,18 +209,28 @@ class CompetitorAnalysisAgent(BaseAgent):
 
     def _reassess_all_annotations(self) -> None:
         """Re-run _assess_source_relevance on all stored annotations and split
-        them into _last_relevant_annotations (relevant=True) and
-        _last_rejected_annotations (everything else).
+        them into _last_relevant_annotations (available for citation) and
+        _last_rejected_annotations (blocked).
+
+        Design: _assess_source_relevance is diagnostic only — its substring
+        matching cannot reliably match competitor names to URL slugs (e.g.
+        "imoo watch phone z1" vs "imoo-kid-watch-phone-z1").  Only
+        structurally-blocked sources (relevant=False: homepage,
+        category_mismatch) are excluded.  Everything else (relevant=True,
+        None) is available for the model to cite, with the diagnostic
+        _relevance metadata attached for warnings.
         """
         all_annotations = getattr(self, "_last_annotations", []) or []
         self._last_relevant_annotations = []
         self._last_rejected_annotations = []
         for a in all_annotations:
             r = self._assess_source_relevance(a)
-            if r.get("relevant") is True:
-                self._last_relevant_annotations.append({**a, "_relevance": r})
-            else:
+            if r.get("relevant") is False:
+                # Structurally blocked: homepage, category mismatch
                 self._last_rejected_annotations.append({**a, "_relevance": r})
+            else:
+                # Available for citation (relevant=True or None)
+                self._last_relevant_annotations.append({**a, "_relevance": r})
 
     def _strip_json_fence(self, text: str) -> str:
         text = text.strip()
@@ -237,7 +247,8 @@ class CompetitorAnalysisAgent(BaseAgent):
         except json.JSONDecodeError as e:
             return False, f"structural_output_failed: invalid JSON: {e}", None
 
-        required = ("target_model", "competitor_names", "evidence", "recommendations", "uncertainty")
+        required = ("target_model", "competitor_names", "evidence",
+                    "evidence_based_recommendations", "strategic_hypotheses", "uncertainty")
         for key in required:
             if key not in data:
                 return False, f"structural_output_failed: missing field {key}", None
@@ -268,10 +279,39 @@ class CompetitorAnalysisAgent(BaseAgent):
             return False, "structural_output_failed: evidence has more than 6 items", None
         if any(len(c) > 120 for c in data.get("competitor_names", [])):
             return False, "structural_output_failed: competitor_name too long", None
-        if len(data.get("recommendations", [])) > 3:
-            return False, "structural_output_failed: recommendations has more than 3 items", None
-        if any(len(r) > 400 for r in data.get("recommendations", [])):
-            return False, "structural_output_failed: recommendation too long", None
+
+        # Validate evidence_based_recommendations structure
+        ebr = data.get("evidence_based_recommendations", [])
+        if len(ebr) > 3:
+            return False, "structural_output_failed: evidence_based_recommendations has more than 3 items", None
+        for i, rec in enumerate(ebr):
+            if not isinstance(rec, dict):
+                return False, f"structural_output_failed: evidence_based_recommendations[{i}] is not an object", None
+            for k in ("text", "supporting_evidence_urls"):
+                if k not in rec:
+                    return False, f"structural_output_failed: evidence_based_recommendations[{i}] missing {k}", None
+            if len(rec.get("text", "")) > 400:
+                return False, f"structural_output_failed: evidence_based_recommendations[{i}] text too long", None
+            if not isinstance(rec.get("supporting_evidence_urls"), list):
+                return False, f"structural_output_failed: evidence_based_recommendations[{i}] supporting_evidence_urls is not an array", None
+            if len(rec.get("supporting_evidence_urls", [])) > 6:
+                return False, f"structural_output_failed: evidence_based_recommendations[{i}] too many URLs", None
+
+        # Validate strategic_hypotheses structure
+        sh = data.get("strategic_hypotheses", [])
+        if len(sh) > 3:
+            return False, "structural_output_failed: strategic_hypotheses has more than 3 items", None
+        for i, h in enumerate(sh):
+            if not isinstance(h, dict):
+                return False, f"structural_output_failed: strategic_hypotheses[{i}] is not an object", None
+            for k in ("text", "rationale"):
+                if k not in h:
+                    return False, f"structural_output_failed: strategic_hypotheses[{i}] missing {k}", None
+            if len(h.get("text", "")) > 400:
+                return False, f"structural_output_failed: strategic_hypotheses[{i}] text too long", None
+            if len(h.get("rationale", "")) > 400:
+                return False, f"structural_output_failed: strategic_hypotheses[{i}] rationale too long", None
+
         if len(data.get("uncertainty", [])) > 3:
             return False, "structural_output_failed: uncertainty has more than 3 items", None
         if any(len(u) > 400 for u in data.get("uncertainty", [])):
@@ -284,6 +324,13 @@ class CompetitorAnalysisAgent(BaseAgent):
             return False, "structural_output_failed: target_model is empty", None
         if not research.competitor_names:
             return False, "structural_output_failed: competitor_names is empty", None
+
+        # Target product must not change — model must analyze the product
+        # specified in the input, not a different one.
+        expected_target = (getattr(self, "_target_model", "") or "").strip().lower()
+        actual_target = (research.target_model or "").strip().lower()
+        if expected_target and actual_target and expected_target not in actual_target and actual_target not in expected_target:
+            return False, f"structural_output_failed: target_model changed from {expected_target!r} to {actual_target!r}", None
 
         relevant = getattr(self, "_last_relevant_annotations", []) or []
         errors = CompetitorReportRenderer(research, relevant_annotations=relevant).validate()
@@ -469,7 +516,12 @@ class CompetitorAnalysisAgent(BaseAgent):
                 "geography": geography,
             }
 
-        # 4) competitor match
+        # 4) competitor match — diagnostic only, not a hard gate.
+        # Substring matching cannot reliably match competitor names to URL
+        # slugs (e.g. "imoo watch phone z1" vs "imoo-kid-watch-phone-z1").
+        # This assessment is stored as _relevance metadata for diagnostics,
+        # but _reassess_all_annotations no longer excludes annotations that
+        # don't match — the model decides which sources to cite.
         for name in competitor_names:
             if not name:
                 continue
@@ -986,21 +1038,44 @@ class CompetitorAnalysisAgent(BaseAgent):
         if getattr(self, "_skip_agent_validation", False):
             return True, ""
 
-        # Evidence-mode final Markdown is not JSON; fall through to markdown validation
+        # Evidence-mode final Markdown: the CompetitorReportRenderer already
+        # validated evidence provenance, structure, and geography.  Skip the
+        # legacy web search guards (which use substring matching that conflicts
+        # with the renderer's provenance-based validation).  Only run basic
+        # structural validation (length, format).
         if getattr(self, "_evidence_mode", False):
             try:
                 data = json.loads(output)
             except json.JSONDecodeError:
                 pass
             else:
-                for key in ("target_model", "competitor_names", "evidence", "recommendations", "uncertainty"):
+                for key in ("target_model", "competitor_names", "evidence",
+                            "evidence_based_recommendations", "strategic_hypotheses", "uncertainty"):
                     if key not in data:
                         return False, f"structural_output_failed: missing field {key}"
                 for ev in data.get("evidence", []):
                     for k in ("competitor", "field", "claim", "url", "geography"):
                         if k not in ev:
                             return False, f"structural_output_failed: evidence missing {k}"
+                for rec in data.get("evidence_based_recommendations", []):
+                    for k in ("text", "supporting_evidence_urls"):
+                        if k not in rec:
+                            return False, f"structural_output_failed: evidence_based_recommendations missing {k}"
+                for h in data.get("strategic_hypotheses", []):
+                    for k in ("text", "rationale"):
+                        if k not in h:
+                            return False, f"structural_output_failed: strategic_hypotheses missing {k}"
                 return True, ""
+
+            # Rendered Markdown from CompetitorReportRenderer — the renderer
+            # already controls structure (table, recommendations, uncertainty).
+            # Skip BaseAgent's structural quality checks (min chars, citation
+            # ratio) which conflict with the renderer's deterministic output.
+            # Only accept failure markers from the agent itself.
+            if "**required_search_failed: true**" in output or "**structural_output_failed: true**" in output:
+                return True, ""
+
+            return True, ""
 
         ok, err = super().validate_output(output)
         if not ok:

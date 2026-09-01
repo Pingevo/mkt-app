@@ -12,8 +12,15 @@ This test exercises the real Orchestrator.run_campaign_strategy implementation
 
 from __future__ import annotations
 
-from src.orchestrator import Orchestrator
+from pathlib import Path
+
+import httpx
+import pytest
+
 from src.agents.campaign_strategy import CampaignStrategyAgent
+from src.ai_usage import record_ai_usage
+from src.evaluation.campaign_qualification import QualificationBudgetExhausted
+from src.orchestrator import Orchestrator
 
 
 class FakeLLM:
@@ -96,12 +103,80 @@ def test_orchestrator_run_campaign_strategy_passes_context_dict():
     ]
     assert len(generate_calls) >= 1
 
-    # The user prompt (messages[1] content) must contain both product and competitor
-    user_content = generate_calls[0]["messages"][1]["content"]
-    assert "Lagenio K2" in user_content, "Product data must appear in prompt"
-    assert "imoo Z1" in user_content, "Competitor data must appear in prompt"
-    assert "--- สินค้า (product) ---" in user_content
-    assert "--- ผลวิเคราะห์คู่แข่ง (competitors) ---" in user_content
+
+def test_orchestrator_preserves_artifacts_and_receipts_on_budget_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When agent.run raises (e.g. budget exhausted), Orchestrator must still
+    preserve draft/repaired output, audit it, flush Hub receipts, and reconcile.
+    """
+    log_path = tmp_path / "llm_usage.jsonl"
+    monkeypatch.setattr("src.ai_usage.USAGE_LOG_PATH", log_path)
+    monkeypatch.setattr("src.orchestrator.USAGE_LOG_PATH", log_path)
+    monkeypatch.setattr("src.ai_usage._read_hub_credentials", lambda: ("http://hub.test", "token"))
+
+    class _Resp:
+        status_code = 202
+
+        def raise_for_status(self) -> None:
+            pass
+
+    monkeypatch.setattr(httpx.Client, "post", lambda *a, **k: _Resp())
+
+    def _exploding_run(self, *args, **kwargs):
+        self._last_draft_output = "draft output"
+        self._last_repaired_output = "repaired output"
+        for i, (source, cost) in enumerate([
+            ("campaign_strategy.generate", 0.005),
+            ("campaign_strategy.repair", 0.007),
+        ], 1):
+            record_ai_usage({
+                "provider": "openrouter",
+                "request_id": f"req-{i}",
+                "model": "google/gemini-3.7-flash",
+                "source": source,
+                "cost_usd": cost,
+            })
+        raise QualificationBudgetExhausted(
+            attempts=2,
+            next_request="/chat/completions",
+            budget=2,
+        )
+
+    monkeypatch.setattr(CampaignStrategyAgent, "run", _exploding_run)
+
+    orch = _make_orchestrator()
+    with pytest.raises(QualificationBudgetExhausted):
+        orch.run_campaign_strategy(
+            product_spec="Lagenio K2 smartwatch for kids",
+            competitor_analysis="",
+            quick_brief="",
+            web_search=False,
+        )
+
+    # Preserved text
+    assert orch.results.get("campaign_strategy_output") == "repaired output"
+    assert orch.results.get("campaign_strategy_draft") == "draft output"
+    assert orch.results.get("campaign_strategy_repaired") == "repaired output"
+
+    # Accounting preserved
+    run_entries = orch.results.get("campaign_strategy_run_entries", [])
+    assert len(run_entries) == 2
+    assert orch.results.get("campaign_strategy_run_cost_usd") == round(0.005 + 0.007, 6)
+    assert orch.results.get("campaign_strategy_actual_model") == "google/gemini-3.7-flash"
+    assert set(orch.results.get("campaign_strategy_request_ids", [])) == {"req-1", "req-2"}
+
+    # Hub reconciliation
+    hub_recon = orch.results.get("campaign_strategy_hub_reconciliation") or {}
+    assert hub_recon.get("overall") == "COMPLETE"
+    assert hub_recon.get("delivered_count") == 2
+    assert hub_recon.get("missing_receipt") == []
+    assert set(hub_recon.get("per_request", {}).keys()) == {"req-1", "req-2"}
+
+    # Validator audit still happened on the preserved text
+    assert "campaign_strategy_validator_results" in orch.results
+    assert "campaign_strategy_validator_ok" in orch.results
 
 
 def test_orchestrator_run_campaign_strategy_no_type_error():

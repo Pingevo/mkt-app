@@ -1,0 +1,125 @@
+{
+  "case_id": 10,
+  "case_name": "k77_thailand_web_search",
+  "run": 1,
+  "model": "google/gemini-3.5-flash",
+  "request_id": "gen-1787891957-VzAogsKbB17VhPg6gEL1",
+  "web_search_mode": "required",
+  "total_cost_usd": 0.174529,
+  "tool_status": "tool_invoked_with_relevant_annotations",
+  "hub_status": "hub_delivered",
+  "output": "# รายงานการวิเคราะห์เปรียบเทียบคู่แข่ง: CACGO K77\n\nรายงานฉบับนี้จัดทำขึ้นเพื่อวิเคราะห์เปรียบเทียบสมาร์ทวอทช์รุ่น **CACGO K77** กับคู่แข่งสำคัญในตลาดประเทศไทย ได้แก่ **Xiaomi Watch S3**, **Kieslect AI Smartwatch Elite2 (Lumina / Noir Edition)** และ **Samsung Galaxy Watch9** เพื่อให้นักการตลาดสามารถนำข้อมูลไปใช้กำหนดกลยุทธ์ได้อย่างมีประสิทธิภาพ\n\n---\n\n## 1. ตารางเปรียบเทียบคุณสมบัติและสเปก (Specification Comparison)\n\n| คุณสมบัติ | CACGO K77 (สินค้าของเรา) | Xiaomi Watch S3 | Kieslect AI Smartwatch Elite2<br>(Lumina / Noir Edition) | Samsung Galaxy Watch9 |\n| :--- | :--- | :--- | :--- | :--- |\n| **หน้าจอ** | 1.7\" IPS ทรงกลม<br>(ความละเอียด 360x360) | 1.43\" AMOLED<br>(ความละเอียด 466x466, 600 nits, AOD) | 1.46\" LTPO 2.0 AMOLED<br>(ความละเอียด 480x480, 1000 nits, AOD) | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **ชิปเซ็ต / OS** | Realtek 8773EWE-VP | ไม่ระบุ / HyperOS | BES2700 Series Quad-Core / KS OS | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **แบตเตอรี่** | **1,000 mAh** | 586 mAh (ใช้งานทั่วไปสูงสุด 15 วัน) | 510 mAh (ใช้งานทั่วไปสูงสุด 14 วัน) | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **การเชื่อมต่อ** | Bluetooth 5.0 | Bluetooth 5.2, NFC | Bluetooth 5.3, NFC | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n\n\n---\n\n**แหล่งอ้างอิง (fallback):**\n- [SHENZHEN CACGO INTELLIGENT CO.,LTD FCC ID Applications (2BGT5)](https://fccid.io/2BGT5)\n- [https://www.amazon.com/BOVUGAC-Compatible-Smartwatch-Anti-Scratch-Ultra-Thin/dp/B0GSFDDW8X](https://www.amazon.com/BOVUGAC-Compatible-Smartwatch-Anti-Scratch-Ultra-Thin/dp/B0GSFDDW8X)\n- [Xiaomi Watch S3 สมาร์ทวอทช์หน้าปัด 47 มม. ราคา ...](https://www.siamphone.com/smartwatch/xiaomi/watch-s3)\n- [XIAOMI \n                        \n                     \n                     \n- [เปิดตัว ‘Xiaomi 14 Series’ อย่างเป็นทางการในประเทศไทย พร้อมประกาศวางจำหน่าย Xiaomi Watch 2, Xiaomi Watch S3 และ Xiaomi Smart Band 8 Pro](https://www.appdisqus.com/xiaomi-14-series-launch-thai-watch-s3-smart-band-8-pro/)\n- [Xiaomi Watch S3 และ Xiaomi Watch 2 นาฬิกา HyperOS และ ...](https://droidsans.com/xiaomi-watch-2-watch-s3-specs-price-thailand/)\n- [Tag - Elite2 - kieslectthailand.com](https://www.kieslectthailand.com/en/tag/Elite2)\n- [Tag - Elite2 - kieslectthailand.com](https://www.kieslectthailand.com/tag/Elite2)\n- [Kieslect AI Smartwatch Elite2 Noir Edition](https://www.kieslectthailand.com/en/product/72123/kieslect-ai-smartwatch-elite2-noir-edition)",
+  "draft_output": "# รายงานการวิเคราะห์เปรียบเทียบคู่แข่ง: CACGO K77\n\nรายงานฉบับนี้จัดทำขึ้นเพื่อวิเคราะห์เปรียบเทียบสมาร์ทวอทช์รุ่น **CACGO K77** กับคู่แข่งสำคัญในตลาดประเทศไทย ได้แก่ **Xiaomi Watch S3**, **Kieslect AI Smartwatch Elite2 (Lumina / Noir Edition)** และ **Samsung Galaxy Watch9** เพื่อให้นักการตลาดสามารถนำข้อมูลไปใช้กำหนดกลยุทธ์ได้อย่างมีประสิทธิภาพ\n\n---\n\n## 1. ตารางเปรียบเทียบคุณสมบัติและสเปก (Specification Comparison)\n\n| คุณสมบัติ | CACGO K77 (สินค้าของเรา) | Xiaomi Watch S3 | Kieslect AI Smartwatch Elite2<br>(Lumina / Noir Edition) | Samsung Galaxy Watch9 |\n| :--- | :--- | :--- | :--- | :--- |\n| **หน้าจอ** | 1.7\" IPS ทรงกลม<br>(ความละเอียด 360x360) | 1.43\" AMOLED<br>(ความละเอียด 466x466, 600 nits, AOD) | 1.46\" LTPO 2.0 AMOLED<br>(ความละเอียด 480x480, 1000 nits, AOD) | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **ชิปเซ็ต / OS** | Realtek 8773EWE-VP | ไม่ระบุ / HyperOS | BES2700 Series Quad-Core / KS OS | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **แบตเตอรี่** | **1,000 mAh** | 586 mAh (ใช้งานทั่วไปสูงสุด 15 วัน) | 510 mAh (ใช้งานทั่วไปสูงสุด 14 วัน) | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n| **การเชื่อมต่อ** | Bluetooth 5.0 | Bluetooth 5.2, NFC | Bluetooth 5.3, NFC | *ไม่มีข้อมูลอย่างเป็นทางการ* |\n\n\n---\n\n**แหล่งอ้างอิง (fallback):**\n- [SHENZHEN CACGO INTELLIGENT CO.,LTD FCC ID Applications (2BGT5)](https://fccid.io/2BGT5)\n- [https://www.amazon.com/BOVUGAC-Compatible-Smartwatch-Anti-Scratch-Ultra-Thin/dp/B0GSFDDW8X](https://www.amazon.com/BOVUGAC-Compatible-Smartwatch-Anti-Scratch-Ultra-Thin/dp/B0GSFDDW8X)\n- [Xiaomi Watch S3 สมาร์ทวอทช์หน้าปัด 47 มม. ราคา ...](https://www.siamphone.com/smartwatch/xiaomi/watch-s3)\n- [XIAOMI \n                        \n                     \n                     \n                        Silver Xiaomi Watch S3](https://www.central.co.th/en/xiaomi-silver-xiaomi-watch-s3-mkp1709647)\n- [เปิดตัว ‘Xiaomi 14 Series’ อย่างเป็นทางการในประเทศไทย พร้อมประกาศวางจำหน่าย Xiaomi Watch 2, Xiaomi Watch S3 และ Xiaomi Smart Band 8 Pro](https://www.appdisqus.com/xiaomi-14-series-launch-thai-watch-s3-smart-band-8-pro/)\n- [Xiaomi Watch S3 และ Xiaomi Watch 2 นาฬิกา HyperOS และ ...](https://droidsans.com/xiaomi-watch-2-watch-s3-specs-price-thailand/)\n- [Xiaomi Watch S3 สมาร์ทวอทช์เปลี่ยนกรอบหน้าปัดได้ ราคาเริ่มต้นราว 3,990 บาท - Flashfly Dot Net](https://www.flashfly.net/wp/438189)\n- [Tag - Elite2 - kieslectthailand.com](https://www.kieslectthailand.com/en/tag/Elite2)\n- [Tag - Elite2 - kieslectthailand.com](https://www.kieslectthailand.com/tag/Elite2)\n- [Kieslect AI Smartwatch Elite2 Noir Edition](https://www.kieslectthailand.com/en/product/72123/kieslect-ai-smartwatch-elite2-noir-edition)",
+  "relevant_annotations": [
+    {
+      "url": "https://fccid.io/2BGT5",
+      "title": "SHENZHEN CACGO INTELLIGENT CO.,LTD FCC ID Applications (2BGT5)",
+      "content": "to\n\n...\n\n# SHENZHEN CACGO INTELLIGENT CO.,LTD\n\n...\n\n#### FCC Grantee Code 2BGT5\n\n...\n\n13 FCC IDs · Longhua district, ShenZhen,, N/A, China\n\n...\n\nWebsite cacgo.net\n\n...\n\n| Company | SHENZHEN CACGO INTELLIGENT CO.,LTD |\n| --- | --- |\n| Grantee Code | 2BGT5 |\n| Mailing Address | 1105 Yifenghua Bld, 28 Yifenghua Innovation Industrial Park, Dalang street, |\n| City | Longhua district, ShenZhen, |\n| Country | China |\n| Contact | Maggie Kuang |\n| Date Received | 2024-06-04 |\n| FCC Registration Numbers | FRN 0035518349 |\n\n...\n\n## FCC ID applications by 2BGT5 (SHENZHEN CACGO INTELLIGENT CO.,LTD) - Page 1 of 1\n\n...\n\n| FCC IDApplication Date | Product PurposeApplication Type |\n| --- | --- |\n| ** 2BGT5-K78**2026-07-24 | SMART WATCHOriginal Equipment |\n| ** 2BGT5-K77**2026-06-09 | SMART WATCHOriginal Equipment |\n| ** 2BGT5-K76A**2026-01-21 | SMART WATCHOriginal Equipment |\n| ** 2BGT5-K73**2025-11-28 | SMART WATCHOriginal Equipment |\n| ** 2BGT5-K72**2025-09-02 | smart watchOriginal Equipment |\n| ** 2BGT5-K71**2025-07-07 | smart watchOriginal Equipment |\n| ** 2BGT5-K70A**2025-05-07 | smart watchOriginal Equipment |\n| ** 2BGT5-K68**2025-04-14 | smart watchOriginal Equipment |\n| ** 2BGT5-K69**2025-0",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.amazon.com/BOVUGAC-Compatible-Smartwatch-Anti-Scratch-Ultra-Thin/dp/B0GSFDDW8X",
+      "title": "",
+      "content": "# [5 Pack] for HOMOGO K77 1.83 Inch Smart Watch Screen Protector, Clear TPU Soft Film Compatible with HOMOGO K77 1.83 Inch Smartwatch,Anti-Scratch Ultra-Thin\nBrand: BOVUGAC\nCategory: Smartwatch Accessories > Smartwatch Screen Protectors\n\n...\n\n## Features\n[5 Pack] This product includes 5 Pack screen protectors. Specially designed for HOMOGO K77 1.83 Inch Smart Watches,not compatible with other models; High Transparency High-Transparency maintains the original viewing experience.provides you superb transmittance and high restoration of the original color of the screen.; Scratch ResistanceMade of 6H hardness TPU Film and could effectively protect the device from unwanted scratches and rubs; Touchscreen Sensitivity Maintain the original response sensitivity, which ensures quick and accurate typing, smooth games and video playing.; Easy installationIt's easy to install and we also send cleaing-up accessories in the package And we can provide friendly reply for any questions. pls feel free to contact us .\n\n...\n\n## Specifications\nMaterial: Thermoplastic Polyurethane; Product Dimensions: 0.1\"L x 0.1\"W; Special Features: Touch Sensitive; Compatible Devices: K77-B; Item Hardness: 6H\n\n...\n\n##",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "target",
+        "reason": "source matches target model K77",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
+      "title": "Xiaomi Watch S3 สมาร์ทวอทช์หน้าปัด 47 มม. ราคา ...",
+      "content": "Xiaomi Watch S3 สมาร์ทวอทช์หน้าปัด 47 มม. ราคา 5,490 บาท | Siamphone.com\n\n...\n\n์\n\n...\n\n4\n\n...\n\nราคา\n\n...\n\n5,\n\n...\n\n90 บาท\n\n...\n\ncom\n\n...\n\nBlackSilver\n47 มม.\nขนาด: 47 × 47 × 12 มม. น้ำหนัก 44 กรัม\nXiaomi Watch S3\nเครื่องศูนย์**฿ 4,890**\nราคากลาง\nราคาโดยประมาณจาก สยามโฟนฯ\n(คำนวณหาค่าเฉลี่ย x̄ จากร้านค้าทั้งหมดที่มีจำหน่ายผลิตภัณฑ์รุ่นนี้)\n**฿ 4,890**\nเช็คราคา Xiaomi Watch S3\nPowered by store.siamphone.com\n\n...\n\nเค\n\n...\n\n]\n\n...\n\nXiaomi\n**\n#### หน้าปัดวงกลม\nขนาด 47 มม.\n**\n#### HyperOS\n**\n#### หน่วยความจำ\nไม่ระบุ\n**\n#### แบตเตอรี่\n586 mAh\nนานสุด 15 วัน\n**\n#### การแจ้งเตือน\n**\n#### รับสายโทรศัพท์\n**\n#### เข็มทิศ\n**\n#### ลำโพง\n**\n#### ไมโครโฟน\n**\n#### ออกกำลังกาย\n**\n#### นับรอบเดือน\n**\n#### ควบคุมเพลง\n**\n#### มี GPS\n**\n#### การชำระเงิน\n**\n#### ค่าออกซิเจนในเลือด\n**\n#### ตอบข้อความเสียงได้\n**\n#### eSim\n## ข้อมูลทั่วไป Xiaomi Watch S3\n* เปิดตัวครั้งแรก ตุลาคม 66 (สยามโฟนฯ)\n* สถานะ มีวางจำหน่ายในประเทศไทย\n* วางจำหน่าย ไตรมาสที่ 1 ปี 2024 (มีนาคม 67)\n* ราคาเปิดตัว 5,490 บาท (มีนาคม 67)\n## ข้อมูลตัวเครื่อง\n* สมาร์ทวอทช์ (นาฬิกาอัจฉริยะ Smartwatch)\n* **หน้าจอ** จอแสดงผล (600 นิต)\n- หน้าจอ วงกลม\n- ระบบสัมผัส Multi-Touch\n- จอภาพ AMOLED\n**ขนาด 1.43 นิ้ว **\n- กว้าง 47 มม. (แนวทะแยง) x ยาว 47 มม. x ",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Xiaomi Watch S3",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.central.co.th/en/xiaomi-silver-xiaomi-watch-s3-mkp1709647",
+      "title": "XIAOMI \n                        \n                     \n                     \n                        Silver Xiaomi Watch S3",
+      "content": "XIAOMI Silver Xiaomi Watch S3 on discount\n\n...\n\nWatch\n\n...\n\n* **\n*\n\n...\n\n* Email icon\n* **\nProduct IDMKP1709647\n# XIAOMI\nSilver Xiaomi Watch S3\nSold by:**MAC MODERN**\nSave2%\n฿5,379\n฿5,490\nSave฿111\nRedeem LogoGet this item with43,032Points\nPre-order product will be started shipping from.\nThis Variation is not available\nPre-order product will be started shipping from.\nOK\n1**\n* 1\n* 2\n* 3\n* 4\n* 5\n* 6\n* 7\n* 8\n* 9\n* 10\nADD TO BAG\nRedeem LogoGet this item with43,032Points\n* PRODUCT DETAILS\n* DELIVERY & RETURNS\nXiaomi Watch S3, the newest smartwatch. Comes with premium materials. With a frame and body made from aluminum alloy. that gives shine and is lightweight Fits comfortably on the wrist. The frame can be removed and changed according to the user's lifestyle. Comes with a built-in battery that can be used for a long time with a clear screen. With a brightness of up to 600 nits and color details of up to 16.7 million colors, ready for you to use to their full potential.\nSpecification\n•1.43 inch AMOLED screen\n•Battery lasts up to 15 days\n•Supports calls via Bluetooth\n•Clean, simple and elegant design\n•Product size (L x W x H): ‎0.47 x 0.47 x 0.12 cm.\n•Product weight: 0.485 kg.\nproduct wa",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Xiaomi Watch S3",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.appdisqus.com/xiaomi-14-series-launch-thai-watch-s3-smart-band-8-pro/",
+      "title": "เปิดตัว ‘Xiaomi 14 Series’ อย่างเป็นทางการในประเทศไทย พร้อมประกาศวางจำหน่าย Xiaomi Watch 2, Xiaomi Watch S3 และ Xiaomi Smart Band 8 Pro",
+      "content": "ม\n\n...\n\n### Xiaomi Watch S3\n\n...\n\nXiaomi Watch S3 โดดเด่นด้วยหน้าจอแสดงผล AMOLED ทรงกลมขนาดใหญ่ 1.43 นิ้ว และกรอบอลูมิเนียมอัลลอยด์น้ำหนักเบา สามารถปรับแต่งอย่างเหนือระดับด้วยกรอบและสายรัดที่สามารถเปลี่ยนได้ นอกจากนี้ Xiaomi Watch S3 ยังมาพร้อมกับหน้าปัดนาฬิกาฟรีกว่า 180 แบบ\n\n...\n\nและผู้ใช้ยังสามารถค้นหาเพิ่มเติมได้ในตลาดหน้าปัดนาฬิกา (The watch face market) เพื่อเลือกสไตล์ที่ชอบได้อีกด้วย Xiaomi Watch S3 มอบประสิทธิภาพที่เหนือกว่าและประสบการณ์ผู้ใช้อันเหนือระดับด้วยระบบ Xiaomi HyperOS ซึ่งให้การเชื่อมต่อที่เร็วขึ้นและการซิงโครไนซ์ข้อมูลที่ดีขึ้น ตัวอุปกรณ์มาพร้อมอายุการใช้งานแบตเตอรี่ที่ยาวนานเป็นพิเศษซึ่งสามารถใช้งานได้ยาวนานถึง 15 วัน นอกจากนี้ยังสามารถชาร์จเร็วได้โดยสามารถใช้งานได้นานสูงสุด 2 วันด้วยการชาร์จเพียง 5 นาทีเท่านั้น\n\n...\n\nXiaomi Watch S3 รองรับโหมดกีฬามากกว่า 150 โหมด และยังมีโมดูลตรวจสอบอัตราการเต้นของหัวใจ 12 ช่อง โดยวัดอัตราการเต้นของหัวใจได้แม่นยำกว่าอุปกรณ์รุ่นก่อนๆ โดยมาพร้อมกับการตรวจสอบระดับออกซิเจนในเลือดและความดันของผู้ใช้ตลอดทั้งวัน และยิ่งไปกว่านั้น Xiaomi Watch S3 ยังมี Sleep Animals ในแอป Mi Fitness เพื่อการวิเคราะห์การนอนหลับอีกด้วย\n\n...\n\nXiaomi Watch S3 พร้อมให้คุณเป็นเจ้าของแล้วในราคาพิเศษ 4,890 บาท (จากราคาปกติ 5,490 บาท) ตั้งแต่วันนี้ ถึง 30 เมษาย",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Xiaomi Watch S3",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://droidsans.com/xiaomi-watch-2-watch-s3-specs-price-thailand/",
+      "title": "Xiaomi Watch S3 และ Xiaomi Watch 2 นาฬิกา HyperOS และ ...",
+      "content": "Watch S3 และ Xiaomi Watch 2 นาฬิกา HyperOS และ Wear OS เปิดราคา\n\n...\n\n5,\n\n...\n\n90 บาท\n\n...\n\nXiaomi เปิดตัวสมาร์ทวอทช์รุ่นใหม่ในประเทศไทย 2 รุ่น รุ่นแรกคือ Xiaomi Watch S3 ที่มาพร้อมระบบปฏิบัติการ HyperOS รุ่นแรกของค่าย ส่วนอีกรุ่นอีกคือ Xiaomi Watch 2 ที่ใช้ระบบปฏิบัติการ Wear OS เวอร์ชันใหม่ของ Google และได้ชิป Snapdragon W5+ Gen 1 ตัวท็อปจาก Qualcomm สนนราคา 5,490 บาท และ 7,490 บาท ตามลำดับ โดยในช่วงพรีออร์เดอร์จะมีส่วนลดเพิ่มเติมให้อีกด้วย\n\n...\n\nสำหรับ Xiaomi Watch S3รุ่นที่นำเข้ามาวางขายในไทยจะเป็นรุ่น Bluetooth ซึ่งจะรองรับฟีเจอร์การโทรผ่าน Bluetooth และมีจุดเด่นคือ หน้าปัดสเตนเลสที่สามารถถอดเปลี่ยนมิกแอนด์แมตช์ให้เข้ากับสายได้ (กรอบมีจำหน่ายแยก) ส่วนฟีเจอร์อื่น ๆ ก็จัดมาให้แบบครบครัน ทั้งคุณสมบัติกันน้ำระดับ 5 ATM โหมดออกกำลังกายกว่า 150 แบบ และการติดตามข้อมูลด้านสุขภาพ เช่น วัดอัตราการเต้นของหัวใจ วัดระดับออกซิเจนในเลือด (SpO2) วัดระดับความเครียด นับรอบประจำเดือน เป็นต้น\n\n...\n\nสมาร์ทวอทช์ทั้งสองรุ่น มากับหน้าปัดจอ AMOLED ขนาด 1.43 นิ้ว คมชัด 326 ppi เท่ากัน จุดแตกต่างสำคัญคือ Xiaomi Watch S3 ใช้งานต่อเนื่องได้นานสุด 15 วันต่อชาร์จ ส่วน Xiaomi Watch 2 ใช้งานต่อเนื่องได้นานสุด 65 ชั่วโมงต่อชาร์จ หรือประมาณ 2 วันกว่า เกือบ 3 วัน\n\n...\n\n## สเปค Xiaomi Watch S3 (เบื้องต้น)\n\n...\n\nก",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Xiaomi Watch S3",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.flashfly.net/wp/438189",
+      "title": "Xiaomi Watch S3 สมาร์ทวอทช์เปลี่ยนกรอบหน้าปัดได้ ราคาเริ่มต้นราว 3,990 บาท - Flashfly Dot Net",
+      "content": "Xiaomi Watch S3 ได้รับการออกแบบมาอย่างสวยงามทันสมัย เหมาะสำหรับใช้เป็นเครื่องประดับบนข้อมือ ตัวเรือนเบาแต่แข็งแรงด้วยวัสดุอะลูมิเนียมอัลลอย มาพร้อมกรอบหน้าปัดแบบวงแหวนที่สามารถถอดเปลี่ยนได้ โดยมีวัสดุกรอบให้เลือกหลายแบบ ไม่ว่าจะเป็นเซรามิก, คาร์บอนไฟเบอร์ และ สเตนเลสสตีล เพื่อปรับให้เข้ากับแฟชันของตนเอง อีกทั้งยังสามารถต้านทานน้ำในระดับ 5 ATM\n\n...\n\nXiaomi Watch S3 มาพร้อมจอแสดงผล OLED ความละเอียด 466 x 466 พิกเซล ขนาด 1.43 นิ้ว ความหนาแน่นของพิกเซลสูง 326 พิกเซลต่อนิ้ว ความสว่าง 600 นิต รองรับโหมด AOD (Always-On Display) และสามารถปรับแต่งหน้าปัดนาฬิกาได้หลากหลาย\n\n...\n\nXiaomi Watch S3 รองรับฟีเจอร์ติดตามอัตราการเต้นของหัวใจ ที่มีความแม่นยำสูง 97.95% สามารถติดตามการออกกำลังกายได้มากกว่า 150 โหมด มีฟีเจอร์ SOS สำหรับการโทรอัตโนมัติ เพื่อขอความช่วยเหลือในกรณีที่เกิดอุบัติเหตุหกล้ม และสามารถระบุตำแหน่งได้อย่างแม่นยำผ่านระบบดาวเทียม BeiDou, GPS, GLONASS, Galileo และ QZSS\n\n...\n\nXiaomi Watch S3 มีให้เลือก 2 เวอร์ชัน ได้แก่ Bluetooth ราคา 799 หยวน หรือราว 3,990 บาท และ eSIM ราคา 999 หยวน หรือราว 4,990 บาท\n\n...\n\nทั้งนี้ Xiaomi Watch S3 รุ่น Bluetooth ให้อายุการใช้งานแบตเตอรี่ยาวนานสูงสุด 15 วันต่อการชาร์จหนึ่งครั้ง หรือ นานสูงสุด 5 วัน เมื่อเปิดโหมด AOD ขณะที่รุ่น eSIM ให้อายุการใช้งานแบตเตอ",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Xiaomi Watch S3",
+        "geography": "global"
+      }
+    },
+    {
+      "url": "https://www.kieslectthailand.com/en/tag/Elite2",
+      "title": "Tag - Elite2 - kieslectthailand.com",
+      "content": "Tag - Elite2 - kieslectthailand.com\n...\nKieslect AI Smartwatch Elite2 Lumina Edition\n...\nKieslect AI Smartwatch Elite2 Noir Edition\n...\nKieslect AI Smartwatch Elite2",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Kieslect AI Smartwatch Elite2 Lumina Edition",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.kieslectthailand.com/tag/Elite2",
+      "title": "Tag - Elite2 - kieslectthailand.com",
+      "content": "สมาร์ทวอทช์ Kieslect AI Smartwatch Elite2 Lumina Edition\n...\nสมาร์ทวอทช์ Kieslect AI Smartwatch Elite2 Noir Edition\n...\nสมาร์ทวอทช์ Kieslect AI Smartwatch Elite2",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Kieslect AI Smartwatch Elite2 Lumina Edition",
+        "geography": "thailand"
+      }
+    },
+    {
+      "url": "https://www.kieslectthailand.com/en/product/72123/kieslect-ai-smartwatch-elite2-noir-edition",
+      "title": "Kieslect AI Smartwatch Elite2 Noir Edition",
+      "content": "Kieslect AI Smartwatch Elite2 Noir Edition\n\n...\n\nNew Arrival\n\n...\n\n# Kieslect AI Smartwatch Elite2 Noir Edition\n\n...\n\n฿8,590\n\n...\n\n฿3,290\n\n...\n\nOptions\n\n...\n\nPlease Select\n\n...\n\n- Please Select\n- Noir Edition\n\n...\n\nQuantity\n\n...\n\n2\n\n...\n\nProduct description\n\n...\n\n[[Product Highlights]]- Kieslect AI, an intelligent wrist assistant based on ChatGPT.* Supports up to 25 languages for both text and voice communication.Note: Auto-reply is only available on Android. It is not yet available on iOS.* Convenient operation, allowing you to activate various modes or set reminders.* AI-powered nutritional reports and recommendations.- Elegant design seamlessly blending classic style with engineering.- Nano-ceramic bezel for ultimate shine and durability.* Higher durability than stainless steel and titanium.- 316L Stainless Steel crown for strength, durability, and fast response.- Lightweight at only 42.5 grams, comfortable for all-day wear.- Top-tier 1.46-inch LTPO 2.0 AMOLED display.* Auto brightness sensor automatically adjusts screen brightness.* Smooth 60Hz refresh rate and high screen brightness up to 1000 Nits.* Upgraded 24-bit color for deeper colors. More realistic- Flagship-level Quad-",
+      "_relevance": {
+        "relevant": true,
+        "relevance_type": "competitor",
+        "reason": "source matches competitor Kieslect AI Smartwatch Elite2 Lumina Edition",
+        "geography": "thailand"
+      }
+    }
+  ]
+}

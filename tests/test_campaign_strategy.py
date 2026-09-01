@@ -241,3 +241,75 @@ def test_run_does_not_force_web_search_when_disabled():
     generate_calls = [c for c in llm.calls if "generate" in c["kwargs"].get("source", "")]
     tools = generate_calls[0]["kwargs"].get("tools", [])
     assert not any(t.get("type") == "openrouter:web_search" for t in tools)
+
+
+def test_extracts_requested_competitor_from_quick_brief():
+    quick = "หาข้อมูลคู่แข่งราคาปัจจุบัน imoo Z1 แล้วเสนอราคาแนะนำ"
+    assert CampaignStrategyAgent._extract_competitor_tokens(quick) == {"z1"}
+
+
+def test_ignores_model_like_token_not_requested_as_competitor():
+    quick = "LAGENIO K2 เปิดตัว Q1"
+    assert CampaignStrategyAgent._extract_competitor_tokens(quick) == set()
+
+
+def test_annotation_confirms_competitor_only_with_corroborating_evidence():
+    annotation = {"title": "imoo Z1 price", "content": "imoo Z1 is ฿3,999", "url": "https://example.com/z1"}
+    assert CampaignStrategyAgent._annotation_confirms_competitor(annotation, {"z1"})
+    assert not CampaignStrategyAgent._annotation_confirms_competitor(annotation, {"k3"})
+
+
+def test_on_annotations_ready_creates_selected_evidence_and_confirmed_models():
+    cfg = _campaign_config()
+    cfg["web_search"] = False
+    llm = FakeLLM(generate_output=_valid_output())
+    agent = CampaignStrategyAgent(cfg, llm)
+    agent._last_quick_brief = "หาข้อมูลคู่แข่ง imoo Z1"
+    agent._requested_competitor_models = {"z1"}
+    agent._last_annotations = [
+        {"title": "imoo Z1 official", "content": "imoo Z1 ฿3,999", "url": "https://example.com/z1"},
+        {"title": "random tablet", "content": "some tablet", "url": "https://example.com/tablet"},
+    ]
+    # all raw are relevant because CampaignStrategyAgent has no _assess_source_relevance
+    agent._last_relevant_annotations = agent._last_annotations
+    agent._on_annotations_ready()
+
+    assert agent._selected_evidence == agent._last_annotations
+    assert set(agent._selected_evidence_urls) == {"https://example.com/z1", "https://example.com/tablet"}
+    assert agent._evidence_confirmed_competitor_models == {"z1"}
+
+
+def test_repair_receives_compact_evidence_bundle():
+    cfg = _campaign_config()
+    cfg["web_search"] = False
+    llm = FakeLLM(generate_output="repaired output")
+    agent = CampaignStrategyAgent(cfg, llm)
+    agent._selected_evidence = [
+        {
+            "title": "imoo Z1 Central",
+            "url": "https://www.central.co.th/th/imoo-z1",
+            "content": "IMOO Z1 สีเขียว ฿3,999",
+        }
+    ]
+    agent._repair_output("bad output", "test error", [{"role": "user", "content": "prompt"}])
+    repair_calls = [c for c in llm.calls if "repair" in c["kwargs"].get("source", "")]
+    assert len(repair_calls) == 1
+    user_msg = repair_calls[0]["messages"][-1]["content"]
+    assert "Selected evidence" in user_msg or "ข้อมูลหลักฐาน" in user_msg
+    assert "https://www.central.co.th/th/imoo-z1" in user_msg
+    assert "฿3,999" in user_msg
+
+
+def test_repair_does_not_dump_full_page():
+    cfg = _campaign_config()
+    cfg["web_search"] = False
+    llm = FakeLLM(generate_output="repaired output")
+    agent = CampaignStrategyAgent(cfg, llm)
+    long_content = "x " * 5000
+    agent._selected_evidence = [
+        {"title": "long page", "url": "https://example.com", "content": long_content}
+    ]
+    agent._repair_output("bad output", "test error", [{"role": "user", "content": "prompt"}])
+    repair_calls = [c for c in llm.calls if "repair" in c["kwargs"].get("source", "")]
+    user_msg = repair_calls[0]["messages"][-1]["content"]
+    assert user_msg.count("x ") < 2000

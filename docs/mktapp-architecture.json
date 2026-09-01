@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "MKTApp — ระบบ AI สำหรับการตลาด",
+    "quality_profile": "showcase",
+    "viewBox": [1380, 780],
+    "views": [
+      { "id": "run", "label": "เริ่มงานจากหน้าจอเว็บ", "focus": ["user", "web-ui", "fastapi", "agent-system"], "note": "ผู้ใช้เลือกสินค้าและ Agent จากหน้าจอเว็บ แล้ว FastAPI เริ่มการทำงาน" },
+      { "id": "agents", "label": "Agent การตลาด 4 ตัว", "focus": ["agent-system", "llm-api", "product-data", "brand-context"], "note": "ระบบรวมข้อมูลสินค้าและแบรนด์ก่อนเรียก LLM ตามลำดับ Agent" },
+      { "id": "delivery", "label": "ผลลัพธ์ที่ส่งมอบ", "focus": ["agent-system", "outputs"], "note": "ผลลัพธ์ของแต่ละรอบถูกบันทึกเพื่อแสดง ดาวน์โหลด และตรวจย้อนหลัง" }
+    ]
+  },
+  "components": [
+    { "id": "user", "type": "external", "label": "ผู้ใช้ฝ่ายการตลาด", "sublabel": "เลือกสินค้าและ Agent", "pos": [55, 265], "size": [150, 64] },
+    { "id": "web-ui", "type": "frontend", "label": "หน้าจอเว็บ", "sublabel": "web_viewer.py + wizard_ui.js", "pos": [300, 265], "size": [180, 64] },
+    { "id": "fastapi", "type": "backend", "label": "FastAPI", "sublabel": "อัปโหลด · API · สถานะ SSE", "pos": [575, 265], "size": [180, 64] },
+    { "id": "agent-system", "type": "backend", "label": "ผู้ควบคุม Flow + 4 Agents", "sublabel": "สินค้า → คู่แข่ง → แคมเปญ → คอนเทนต์", "pos": [860, 255], "size": [235, 84] },
+    { "id": "llm-api", "type": "external", "label": "ผู้ให้บริการ LLM", "sublabel": "OpenRouter / model APIs", "pos": [1200, 265], "size": [160, 64] },
+    { "id": "product-data", "type": "database", "label": "ข้อมูลสินค้า", "sublabel": "data/ · ไฟล์ · ไฟล์แนบ", "pos": [440, 570], "size": [185, 64] },
+    { "id": "brand-context", "type": "database", "label": "บริบทแบรนด์", "sublabel": "brand/ · กติกา · แนวทางภาพ", "pos": [720, 570], "size": [195, 64] },
+    { "id": "outputs", "type": "database", "label": "ผลลัพธ์ที่ส่งมอบ", "sublabel": "output/ · staging · ประวัติ", "pos": [1005, 570], "size": [195, 64] }
+  ],
+  "connections": [
+    { "from": "user", "to": "web-ui", "label": "ใช้งานผ่านเบราว์เซอร์", "variant": "emphasis", "route": "straight", "labelDy": -28 },
+    { "from": "web-ui", "to": "fastapi", "label": "HTTP + SSE", "variant": "emphasis", "route": "straight", "labelDy": -28 },
+    { "from": "fastapi", "to": "agent-system", "label": "เริ่มการทำงานของ Agent", "variant": "emphasis", "route": "straight", "labelDy": -36 },
+    { "from": "agent-system", "to": "llm-api", "label": "เรียกใช้ LLM", "variant": "dashed", "route": "straight", "labelDy": -28 },
+    { "from": "product-data", "to": "agent-system", "label": "สินค้าและไฟล์แนบ", "route": "orthogonal-v", "labelDx": -52 },
+    { "from": "brand-context", "to": "agent-system", "label": "กติกาแบรนด์", "route": "orthogonal-v", "labelDx": 56 },
+    { "from": "agent-system", "to": "outputs", "label": "ผลลัพธ์และการใช้งาน", "variant": "emphasis", "route": "orthogonal-v", "labelDx": 55 }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "จุดเริ่มต้น", "items": ["หน้าจอเว็บและ FastAPI อยู่ใน web_viewer.py", "FastAPI รับไฟล์และส่งสถานะการรันแบบต่อเนื่อง"] },
+    { "dot": "violet", "title": "ลำดับการทำงานของ Agent", "items": ["สเปกสินค้า → วิเคราะห์คู่แข่ง → วางแคมเปญ → สร้างคอนเทนต์", "Orchestrator รวม config, บริบทแบรนด์ และ run context"] },
+    { "dot": "emerald", "title": "ข้อมูลและผลลัพธ์", "items": ["ข้อมูลสินค้าและแบรนด์เป็น input", "ผลลัพธ์เก็บแยกเพื่อดูย้อนหลังและดาวน์โหลด"] }
+  ]
+}

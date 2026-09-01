@@ -30,10 +30,10 @@
     "preset": "balanced",
     "focus": [
       "USP",
-      "differentiation",
-      "sales_info"
+      "customer_benefit",
+      "technical"
     ],
-    "detail_level": "standard",
+    "detail_level": "detailed",
     "rules_must": [
       "แยก fact กับ assumption ชัดเจน",
       "ถ้าไม่มีข้อมูลให้ระบุว่าไม่มีข้อมูล",
@@ -144,7 +144,7 @@
     "budget_max": "",
     "discount_max": "",
     "forbid_tactics": [],
-    "custom": ""
+    "custom": "หลักการสำคัญ: เมื่อขาดข้อมูลต้นทุน, COGS, มาร์จิ้น, งบประมาณ, หรือ baseline — ให้เสนอกลยุทธ์เชิงคุณภาพ, อธิบายหมวดหมู่งบประมาณโดยไม่ใส่ตัวเลขหรือเปอร์เซ็นต์, ไม่แบ่งสัดส่วนงบ, ไม่ตั้งเป้า KPI/ROAS/conversion เป็นตัวเลข, ไม่ระบุส่วนลด/ราคา/กำไรโดยไม่มีพื้นฐาน. ถ้าตัวอย่างตัวเลขมีประโยชน์จริง ต้องใส่ฉลาก 'สมมติฐาน' หรือ 'pending financial/operational validation' ชัดเจน. ถ้าต้องการข้อมูลเพิ่มให้ถามเฉพาะคำถามที่จำเป็นเพื่อตัดสินใจเชิงตัวเลขเท่านั้น. ไม่บังคับโครงสร้างหมายเลขคงที่ และไม่ต้องถามทุกครั้งถ้าสามารถตอบเชิงคุณภาพได้ใช้งานได้"
   },
   "content_creator": {
     "custom": "ทุกคอนเทนต์ที่เป็นสื่อ ต้องมีโลโก้แบรนด์เสมอ\nถ้าเป็น platform Tiktok รูปภาพและวิดีโอจะต้องเป็นแนวตั้งเสมอ",
@@ -153,7 +153,7 @@
       "friendly",
       "professional"
     ],
-    "hook_style": "problemsolution",
+    "hook_style": "emotional",
     "sell_style": "balanced",
     "language": "conversational",
     "rules_must": [

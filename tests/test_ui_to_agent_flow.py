@@ -24,9 +24,19 @@ class FakeLLM:
 
     def chat(self, messages, **kwargs):
         self.calls.append({"messages": messages, "kwargs": kwargs})
+        out = (
+            "## ราคาแนะนำ\n- ราคา pending financial validation\n"
+            "## แคมเปญหลัก\n- ชื่อ: Launch Campaign เปิดตัวสินค้ารุ่นใหม่\n"
+            "- วัตถุประสงค์: สร้างการรับรู้และกระตุ้นยอดขาย\n"
+            "## แคมเปญเสริม\n- Influencer Review ใช้บล็อกเกอร์ทดลองสินค้า\n"
+            "## ช่องทางโปรโมท\n- Facebook Ads และ TikTok สำหรับ Gen Z\n"
+            "## KPI ที่ควรวัดผล\n- Reach และ CTR ต้องกำหนดหลังมี baseline\n"
+            "## งบประมาณประมาณการ\n- ต้องอนุมัติทางการเงินก่อนกำหนดสัดส่วนงบ\n"
+            "## แหล่งอ้างอิง\n- ไม่มี URL ภายนอกใน context นี้\n"
+        )
         if kwargs.get("return_annotations"):
-            return "## ราคาแนะนำ\n- t\n\n## แคมเปญหลัก\n- t\n\n## แคมเปญเสริม\n- t\n\n## ช่องทางโปรโมท\n- t\n\n## KPI ที่ควรวัดผล\n- t\n\n## งบประมาณประมาณการ\n- t\n\n## แหล่งอ้างอิง\n- t", []
-        return "## ราคาแนะนำ\n- t\n\n## แคมเปญหลัก\n- t\n\n## แคมเปญเสริม\n- t\n\n## ช่องทางโปรโมท\n- t\n\n## KPI ที่ควรวัดผล\n- t\n\n## งบประมาณประมาณการ\n- t\n\n## แหล่งอ้างอิง\n- t"
+            return out, []
+        return out
 
     def close(self):
         pass
