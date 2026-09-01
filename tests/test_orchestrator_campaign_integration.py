@@ -395,13 +395,10 @@ def test_campaign_strategy_citations_appended_without_verification():
 
 
 def test_campaign_strategy_output_section_validation_still_works():
-    """required_output_sections validation must still reject missing sections."""
+    """validate_output still rejects missing sections when required_sections is explicitly supplied."""
     from src.output_validators import validate_output
-    from src.config_loader import load_config, get_agent_config
 
-    cfg = load_config()
-    agent_cfg = get_agent_config(cfg, "campaign_strategy")
-    required = agent_cfg.get("required_output_sections")
+    required = ["ราคาแนะนำ", "แคมเปญหลัก", "แหล่งอ้างอิง"]
 
     # Output missing "แหล่งอ้างอิง" section
     incomplete_output = (

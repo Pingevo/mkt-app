@@ -3,7 +3,8 @@
 TDD: red → green สำหรับ scope ที่ user กำหนด
 - quick_brief ต้องปรากฏในข้อความที่ส่ง LLM
 - StepRunContext brief ต้องปรากฏครั้งเดียว ไม่ซ้ำ
-- prompt ต้องบอกชัดว่า brief ห้าม override raw data, hard rules, output format
+- prompt ต้องบอกชัดว่า quick_brief สามารถ override deliverable/output format ได้
+  แต่ห้าม override raw data, hard rules, identity, brand constraints
 - default Agent 1 ไม่มีคำสั่งบังคับให้ยืนยันว่าเห็นรูป
 - tests เก่ายังผ่าน
 """
@@ -141,11 +142,10 @@ def test_prompt_hierarchy_in_system_and_user_prompts():
     system_prompt = cfg["system_prompt"]
 
     assert "ข้อมูลดิบของสินค้า" in system_prompt
-    assert "source of truth" in system_prompt
     assert "quick_brief" in system_prompt
-    assert "ห้ามสร้างหรืออนุมานข้อเท็จจริง" in system_prompt
-    assert "required output" in system_prompt or "รูปแบบ output ที่กำหนด" in system_prompt
-    assert "hard brand" in system_prompt or "hard rules" in system_prompt
+    assert "ห้ามอนุมาน" in system_prompt or "ห้ามเติม" in system_prompt
+    assert "quick_brief สามารถ override" in system_prompt or "เลือกรูปแบบ" in system_prompt
+    assert "ข้อจำกัดที่ตายตัว" in system_prompt or "ข้อมูลแบรนด์" in system_prompt
 
     # 2) user prompt wrapper ต้องบอกใช้ brief เพื่อ steer และห้าม override
     agent = _make_agent(system_prompt)

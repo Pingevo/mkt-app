@@ -275,7 +275,8 @@ class BaseAgent:
             extra_image_paths: list[str] | None = None,
             resource_context: str = "", response_format: dict | None = None,
             step_context: "StepRunContext" | None = None,
-            provider: dict | None = None) -> str:
+            provider: dict | None = None,
+            research_required: bool = False) -> str:
         """Generate output then review/refine it.
 
         Returns the final (possibly refined) text response.
@@ -298,6 +299,16 @@ class BaseAgent:
                          (สถาปัตยกรรมใหม่: agent เห็นรูปจริงเหมือนมนุษย์ ไม่ใช่คำบรรยาย)
         """
         system_prompt = self._build_system_prompt()
+
+        # Reset per-run web evidence so stale annotations from a previous run cannot
+        # pass a research_required gate on a new run.
+        self._last_annotations = []
+        if hasattr(self, "_last_relevant_annotations"):
+            self._last_relevant_annotations = []
+        if hasattr(self, "_selected_evidence"):
+            self._selected_evidence = []
+        if hasattr(self, "_selected_evidence_urls"):
+            self._selected_evidence_urls = set()
 
         if extra_image_paths is None:
             extra_image_paths = []
@@ -326,8 +337,17 @@ class BaseAgent:
                 f"--- สิ้นสุดคำสั่งเฉพาะรอบนี้ ---\n"
                 f"หมายเหตุ: คำสั่งข้างต้นใช้เพื่อ steer รูปแบบ ระดับรายละเอียด กลุ่มผู้อ่าน และหัวข้อที่เน้นเท่านั้น\n"
                 f"ห้ามสร้างหรืออนุมานข้อเท็จจริงนอก \"ข้อมูลต้นทางที่ส่งมาใน user prompt\"\n"
-                f"ห้ามขัดแย้งกับ system guardrails, hard brand rules และรูปแบบ output ที่กำหนดไว้\n"
-                f"ถ้าขัดแย้ง ให้ system guardrails, ข้อมูลต้นทางใน user prompt และ required output format ชนะเสมอ"
+                f"ห้ามขัดแย้งกับ system guardrails, hard brand rules และข้อมูลต้นทาง\n"
+                f"quick_brief สามารถขอรูปแบบ output / deliverable format อื่นได้ โดยไม่ขัด guardrails และข้อมูลต้นทาง\n"
+                f"ถ้าขัดแย้ง ให้ system guardrails และข้อมูลต้นทางใน user prompt ชนะเสมอ"
+            )
+
+        if research_required:
+            user_prompt += (
+                "\n\n--- คำสั่นเฉพาะรอบนี้: ต้องใช้ web search ---\n"
+                "รอบนี้ต้องการข้อมูลปัจจุบัน กรุณาใช้ web_search tool ก่อนสร้าง final answer "
+                "และอ้างอิงแหล่งทางการใน output\n"
+                "ถ้าไม่ค้นหาเว็บจริง ระบบจะปฏิเสธคำตอบ"
             )
 
         web_search = self.config.get("web_search")
@@ -388,6 +408,13 @@ class BaseAgent:
 
         # เก็บ draft ก่อน review — ถ้า reviewer ล้มเหลว จะได้คืน draft ไม่ใช่ว่าง
         draft = output
+
+        # Research-required run: ต้องมีหลักฐาน web search จริงจากการค้นหา
+        if research_required:
+            if not self.config.get("web_search"):
+                raise ValueError(f"Agent {self.agent_name} ถูกเรียกด้วย research_required แต่ไม่ได้เปิด web_search ใน config")
+            if not getattr(self, "_last_annotations", []):
+                raise ValueError("research_required: ต้องมีการค้นหาเว็บจริงและพบแหล่งอ้างอิง")
 
         # --- Phase 3: Review & Refine (optional) ---
         # ถ้า max_review_iterations > 0 → สั่ง LLM ตรวจงานตัวเองรอบที่ 2
@@ -757,8 +784,16 @@ class BaseAgent:
         return output
 
     def validate_output(self, output: str) -> tuple[bool, str]:
-        """ตรวจ output ของ agent ว่าตรงกับรูปแบบที่กำหนดไหม."""
-        required = self.config.get("required_output_sections")
+        """ตรวจ output ของ agent ว่าตรงกับรูปแบบที่กำหนดไหม.
+
+        required_output_sections ที่กำหนดใน config จะกลายเป็น "คำแนะนำ/โครงสร้าง default"
+        เมื่อ user ไม่ระบุรูปแบบอื่น แต่จะถูกบังคับจริงก็ต่อเมื่อเปิด strict_output_sections เท่านั้น
+        """
+        if self.config.get("strict_output_sections"):
+            required = self.config.get("required_output_sections")
+        else:
+            # ปล่อยให้โมเดลยืดหยุ่นตาม quick_brief — ไม่ fallback ไปอ่าน config ส่วนกลาง
+            required = []
         quality = self.config.get("output_quality")
         return _validate_output(self.agent_name, output, required, output_quality=quality)
 

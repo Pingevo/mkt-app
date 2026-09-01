@@ -303,3 +303,43 @@ def test_unknown_agent_passes():
     ok, err = validate_output("unknown", "whatever")
     assert ok is True
     assert err == ""
+
+
+def _tiktok_post(omit=None):
+    post = {
+        "platform": "TikTok",
+        "concept": "ราคา",
+        "title": "TikTok K3",
+        "caption": "caption",
+        "hashtags": "#tag",
+        "asset_ids": [],
+        "script": "",
+        "image_prompts": [],
+        "video_prompts": [],
+    }
+    for k in omit or []:
+        post.pop(k, None)
+    return {"posts": [post]}
+
+
+def test_tiktok_post_omits_image_prompts():
+    """TikTok ทีไม่ต้องรูป ข้าม image_prompts ได้."""
+    data = _tiktok_post(omit={"image_prompts"})
+    ok, err = validate_output("content_creator", json.dumps(data, ensure_ascii=False))
+    assert ok is True, err
+
+
+def test_non_video_post_omits_script_and_video_prompts():
+    """Facebook ไม่ใช่วิดีโอ ข้าม script และ video_prompts ได้."""
+    data = _tiktok_post(omit={"script", "video_prompts"})
+    data["posts"][0]["platform"] = "Facebook"
+    ok, err = validate_output("content_creator", json.dumps(data, ensure_ascii=False))
+    assert ok is True, err
+
+
+def test_content_missing_asset_ids_still_fails():
+    """asset_ids ยัง required สำหรับ downstream media pipeline."""
+    data = _tiktok_post(omit={"asset_ids"})
+    ok, err = validate_output("content_creator", json.dumps(data, ensure_ascii=False))
+    assert ok is False
+    assert "asset_ids" in err

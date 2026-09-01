@@ -3162,9 +3162,8 @@ async def api_run_flows(request: Request) -> StreamingResponse:
 
                 folders = flow.get("folders", [])
                 flow_agents = [a for a in flow.get("agents", []) if a in AGENT_ORDER]
-                # TEMP LOCK: แต่ละ flow รัน agent เดียวก่อน จนกว่าจะแก้ให้ agent ทำงานร่วมกันได้
-                # (multi-agent code ยังอยู่ แค่ truncate ที่นี่)
-                flow_agents = flow_agents[:1]
+                # Multi-agent flow: ให้ run_flow_steps รัน agent ทัังหมดตามลำดับที user เลือกไว้
+                # context/handoff จัดการโดย AGENT_DEPENDENCIES ใน flow_runner อยู่แล้ว
                 content_count = _clamp_content_count(flow.get("content_count", 1))
                 platforms = flow.get("platforms", ["facebook", "tiktok"])
                 media_type = flow.get("media_type", "image")

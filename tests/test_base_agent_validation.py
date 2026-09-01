@@ -32,6 +32,7 @@ def _config():
         "use_brand_reference": False,
         "max_review_iterations": 0,
         "max_retry_limit": 3,
+        "strict_output_sections": True,
         "required_output_sections": ["ชื่อสินค้า"],
         "model": "x",
         "temperature": 0.7,
@@ -208,3 +209,63 @@ def test_reviewer_receives_image_paths():
             "reviewer ต้องได้ multimodal content (text + image) เหมือน generator"
     finally:
         os.unlink(tmp_img)
+
+
+class FakeLLMWithAnnotations:
+    """Fake LLM สำหรับ web_search path คืน (text, annotations) tuple."""
+
+    def __init__(self, outputs):
+        self.outputs = outputs
+        self.calls = 0
+        self.captured_messages = []
+
+    def chat(self, messages, **kwargs):
+        self.captured_messages.append(messages)
+        out, ann = self.outputs[self.calls % len(self.outputs)]
+        self.calls += 1
+        if kwargs.get("return_annotations"):
+            return out, ann
+        return out
+
+    def close(self):
+        pass
+
+
+def _config_research():
+    cfg = _config()
+    cfg["strict_output_sections"] = False
+    cfg["web_search"] = True
+    cfg["verify_urls"] = False
+    cfg["citation_policy"] = {"mode": "default"}
+    return cfg
+
+
+def test_research_required_injects_web_search_instruction():
+    """research_required=True ต้องสอดแทรกคำสั่งบังคับค้นหาใน user prompt."""
+    llm = FakeLLMWithAnnotations([("output", [{"url": "http://example.com", "title": "x"}])])
+    agent = DummyAgent(_config_research(), llm)
+    agent.run("prompt", research_required=True)
+    user_msg = llm.captured_messages[0][1]["content"]
+    assert "ต้องใช้ web search" in user_msg
+
+
+def test_research_required_fails_when_no_annotations():
+    """research_required=True แต่ LLM ไม่ค้น (ไม่มี annotations) ต้อง fail."""
+    llm = FakeLLMWithAnnotations([("output", [])])
+    agent = DummyAgent(_config_research(), llm)
+    with pytest.raises(ValueError) as exc:
+        agent.run("prompt", research_required=True)
+    assert "research_required" in str(exc.value)
+
+
+def test_research_required_resets_annotations_between_runs():
+    """_last_annotations ต้อง reset ทีต้น run — ข้อมูลเก่าห้ามทำให้ run ถัดไปผ่าน."""
+    llm = FakeLLMWithAnnotations([
+        ("first", [{"url": "http://old", "title": "old"}]),
+        ("second", []),
+    ])
+    agent = DummyAgent(_config_research(), llm)
+    agent.run("prompt", research_required=True)
+    with pytest.raises(ValueError) as exc:
+        agent.run("prompt", research_required=True)
+    assert "research_required" in str(exc.value)

@@ -100,17 +100,6 @@ product_spec:
     5. Target Audience, Strengths และ Benefit ที่ source ไม่ได้ระบุโดยตรง ต้องติดป้ายว่าเป็น "ข้อเสนอเชิงวิเคราะห์" หรือ "ประโยชน์เชิงอนุมาน"; ห้ามนำ inference ไปเขียนเป็น factual product specification
 
     วิธีตรวจ: อ่านข้อกำหนดหลัก อ่านผลงาน เทียบทีละข้อกับ source ถ้าทุกข้อผ่านส่งผลงานเดิมกลับมา ถ้าไม่ผ่านให้แก้แล้วส่งเฉพาะผลงานฉบับสุดท้าย
-  required_output_sections:
-  - ชื่อสินค้า
-  - หมวดหมู่
-  - คำอธิบายสั้น
-  - คุณสมบัติเด่น
-  - คุณสมบัติทางเทคนิค
-  - กลุ่มเป้าหมาย
-  - จุดแข็ง
-  - จุดที่ควรระวัง
-  - ราคาต้นทุน
-  - USP
   system_prompt: 'คุณคือ "นักวิเคราะห์สินค้า" (Product Analyst) ในทีมการตลาด
 
     หน้าที่ของคุณคือรับข้อมูลดิบของสินค้า (ไม่ว่าจะเป็น note, รายละเอียดจากโรงงาน,
@@ -129,39 +118,19 @@ product_spec:
     ถ้าข้อมูลดิบไม่ได้ระบุชื่อแบรนด์ ก็ไม่ต้องใส่ชื่อแบรนด์ลงในสเปค
 
 
-    รูปแบบผลลัพธ์ที่ต้องได้:
+    วิธีทำงาน:
+    - วิเคราะห์ข้อมูลดิบของสินค้า
+    - พิจารณาประเด็นที่เกี่ยวข้องกับสินค้าและโจทย์ เช่น identity, category, key features, technical facts, target audience, strengths, cautions, cost และ USP แต่ไม่จำเป็นต้องสร้างทุกหัวข้อ
+    - เลือกรูปแบบการนำเสนอ (structure / deliverable format) ทีเหมาะสมกับคำขอของ user เอง
+    - ถ้า quick_brief ระบุรูปแบบ เช่น executive brief, one-page, สั้นกระชับ ให้ทำตาม quick_brief
 
-    1. **ชื่อสินค้า (Product Name)** — ชื่อที่เหมาะกับการตลาด
-
-    2. **หมวดหมู่ (Category)** — หมวดหมู่สินค้า
-
-    3. **คำอธิบายสั้น (Short Description)** — 1-2 ประโยค บอกว่าสินค้าคืออะไร
-
-    4. **คุณสมบัติเด่น (Key Features)** — 3-5 จุดขายหลัก
-
-    5. **คุณสมบัติทางเทคนิค (Technical Specs)** — ข้อมูลเชิงเทคนิคที่มี
-
-    6. **กลุ่มเป้าหมาย (Target Audience)** — ใครควรซื้อ
-
-    7. **จุดแข็ง (Strengths)** — จุดเด่นเมื่อเทียบกับสินค้าทั่วไป
-
-    8. **จุดที่ควรระวัง (Cautions)** — ข้อจำกัดหรือสิ่งที่ควรทราบ
-
-    9. **ราคาต้นทุน (Cost Price)** — ถ้ามีข้อมูล
-
-    10. **USP (Unique Selling Point)** — จุดขายที่ไม่เหมือนใคร
-
+    ข้อจำกัดที่ตายตัว:
+    - สเปคสินค้าต้องมาจากข้อมูลดิบเท่านั้น
+    - ข้อมูลแบรนด์ใช้แค่บริบทอ้างอิง ห้ามนำมาใส่ในสเปคโดยไม่มีข้อมูลดิบรองรับ
+    - ห้ามเติม, อนุมาน, หรือสร้าง comparison นอกหลักฐาน
+    - ทุก claim ต้องระบุข้อจำกัดของข้อมูลถ้าไม่แน่ใจ
 
     ใช้ภาษาไทยเป็นหลัก กระชับ ชัดเจน ไม่ฟุ่มเฟือย
-
-
-    ลำดับ authority ที่ต้องเคารพ:
-    1. ระบบ guardrails, required output format และ hard brand rules มาก่อนเสมอ
-    2. ข้อมูลดิบของสินค้า (raw product data) เป็น source of truth เท่านั้น — ห้ามเดินนอก source
-    3. คำสั่งจากผู้ใช้สำหรับรอบนี้ (quick_brief) ใช้เพื่อ steer รูปแบบ ระดับรายละเอียด กลุ่มผู้อ่าน และหัวข้อที่เน้น
-       ห้ามสร้างหรืออนุมานข้อเท็จจริงนอกข้อมูลดิบ
-       ห้ามขัดกับข้อ 1 และ 2
-
     '
 competitor_analysis:
   model: google/gemini-3.5-flash
@@ -345,22 +314,27 @@ campaign_strategy:
   web_search: true
   verify_urls: false
   use_brand_reference: true
-  required_output_sections:
-  - ราคาแนะนำ
-  - แคมเปญหลัก
-  - แคมเปญเสริม
-  - ช่องทางโปรโมท
-  - KPI ที่ควรวัดผล
-  - งบประมาณประมาณการ
-  - แหล่งอ้างอิง
   citation_policy:
     mode: inline_first
     fallback_annotations_when_no_inline: false
   output_quality:
     min_total_chars: 250
     min_non_citation_chars: 150
-    min_analysis_blocks: 2
     forbid_citation_only: true
+  research_required_keywords:
+    - ราคาปัจจุบัน
+    - ตลาดปัจจุบัน
+    - คู่แข่งปัจจุบัน
+    - แคมเปญคู่แข่ง
+    - current
+    - now
+    - today
+    - ล่าสุด
+    - ปัจจุบัน
+    - trend
+    - เทรนด์
+    - ค้นเว็บ
+    - web search
   semantic_rules:
     estimate_labels:
       - estimate
@@ -587,7 +561,7 @@ campaign_strategy:
     1. วิเคราะห์ product ก่อน: จุดขาย กลุ่มเป้าหมาย positioning
     2. ใช้ context อื่น ๆ ถ้ามี เพื่อเสริมความแม่นยำ
     3. ตัดสินใจว่าอะไรเสนอได้ อะไรเสนอไม่ได้
-    4. สร้าง output ตามรูปแบบที่กำหนด — section ที่ไม่มีข้อมูลให้ระบุ "ไม่สามารถเสนอได้เนื่องจาก..."
+    4. เลือก deliverable format / structure ที่เหมาะกับคำขอ — ถ้า quick_brief ขอรูปแบบอื่น (executive brief, one-page, สั้นกระชับ, 3 โปรโมชั่น) ให้ปรับตาม quick_brief โดยไม่ขัด data/evidence/brand hard rules; ประเด็นที่ไม่มีข้อมูลให้ระบุ "ไม่สามารถเสนอได้เนื่องจาก..."
 
     กฎหลัก (ใช้กับทุก section):
     - ข้อมูลไม่พอให้ระบุ estimate / hypothesis / ไม่พบข้อมูล แทนการเติมเอง
@@ -613,14 +587,10 @@ campaign_strategy:
     - ห้ามแปะ URL ดิบ ห้ามสร้าง section แหล่งอ้างอิงทีมี URL ลอย
     - ถ้า selected evidence ไม่พอสำหรับ claim ใด ให้ใช้ estimate / ไม่พบข้อมูล แทนการ invent URL
 
-    รูปแบบผลลัพธ์:
-    1. **ราคาแนะนำ (Recommended Pricing)** — retail, promo, wholesale/agent, rationale
-    2. **แคมเปญหลัก (Main Campaign)** — ชื่อ, วัตถุประสงค์, กลุ่มเป้าหมาย, ระยะเวลา, กลไก
-    3. **แคมเปญเสริม (Supporting Campaigns)** — 2-3 แคมเปญ
-    4. **ช่องทางโปรโมท (Promotion Channels)** — ช่องทางและเหตุผล
-    5. **KPI ที่ควรวัดผล (Success Metrics)**
-    6. **งบประมาณประมาณการ (Estimated Budget Range)** — ถ้าระบุได้
-    7. **แหล่งอ้างอิง (Sources)** — URL ที่ใช้
+    วิธีทำงาน / coverage guidance:
+    - พิจารณาประเด็นที่เกี่ยวข้องกับโจทย์ เช่น pricing, campaign concept, promotion channels, KPI, budget, timeline และ evidence แต่ไม่จำเป็นต้องสร้างทุกหัวข้อ
+    - เลือก deliverable format / structure ที่เหมาะกับคำขอของ user เอง
+    - ถ้า quick_brief ระบุรูปแบบ เช่น executive brief, one-page, สั้นกระชับ, 3 โปรโมชั่น ให้ทำตาม quick_brief
 content_creator:
   model: google/gemini-3.7-flash
   temperature: 0.9
@@ -655,7 +625,7 @@ content_creator:
     - ถ้า user ระบุแพลตฟอร์มใน brief → ใช้แพลตฟอร์มนั้น
 
 
-    รูปแบบผลลัพธ์ที่ต้องได้:
+    รูปแบบผลลัพธ์ที่แนะนำ (default):
 
 
     ## 1. ข้อมูลโพสต์
@@ -716,17 +686,17 @@ content_creator:
     แนวคิด/มุมมองที่ใช้ (เช่น ราคา, คุณสมบัติ, lifestyle) - **title** (string): หัวข้อโพสต์
     (ภายในระบบ — ไม่ได้โพสต์จริง) - **caption** (string): ข้อความ caption พร้อมโพสต์จริง
     — ตามลักษณะของแต่ละ platform (TikTok: สั้น 80-150 ตัวอักษร, FB: 2-4 ย่อหน้า, IG:
-    สั้น+emoji). ห้ามใส่ label Hook:/Body:/CTA: - **script** (string): สคริปต์วิดีโอ/voiceover
-    สำหรับสร้างวิดีโอ (ถ้าเป็นวิดีโอ) — มี timestamp + scene + voiceover. ถ้าไม่ใช่วิดีโอ
-    → สตริงว่าง - **hashtags** (string): hashtags คั่นด้วย space เช่น "#tag1 #tag2
-    #tag3" - **image_prompts** (array): list ของ object ที่มี field: - **prompt**
+    สั้น+emoji). ห้ามใส่ label Hook:/Body:/CTA: - **script** (string, optional): สคริปต์วิดีโอ/voiceover
+    สำหรับสร้างวิดีโอ — ส่งเมื่อโพสต์นี้เป็นวิดีโอ; ถ้าไม่ใช่วิดีโอ ให้ข้ามหรือส่งสตริงว่าง - **hashtags** (string): hashtags คั่นด้วย space เช่น "#tag1 #tag2
+    #tag3" - **image_prompts** (array, optional): list ของ object (ข้ามหรือส่ง [] ถ้าโพสต์นี้ไม่ต้องมีรูป) - **prompt**
     (string): prompt ภาษาอังกฤษสำหรับ image generator - **aspect_ratio** (string,
     optional): เช่น "9:16", "16:9", "1:1" — ต้องตรงกับ platform (TikTok/IG Reels =
     9:16, Facebook/Youtube = 16:9) - **resolution** (string, optional): เช่น "1024x1024"
-    - **video_prompts** (array): list ของ object ที่มี field: - **prompt** (string):
+    - **video_prompts** (array, optional): list ของ object (ข้ามหรือส่ง [] ถ้าโพสต์นี้ไม่ต้องมีวิดีโอ) - **prompt** (string):
     prompt ภาษาอังกฤษสำหรับ video generator - **duration** (number, optional): duration
     เป็นวินาที - **aspect_ratio** (string, optional): เช่น "9:16", "16:9" — ต้องตรงกับ
-    platform - **resolution** (string, optional): เช่น "720p", "1080p"
+    platform - **resolution** (string, optional): เช่น "720p", "1080p" - **asset_ids** (array, required): ID
+    ของวัตถุดิบแบรนด์ที่ใช้ในโพสต์นี้ — ส่ง [] ถ้าไม่มี asset ที่ใช้
 
     **สำคัญ: ส่งเฉพาะ posts เท่านั้น — ห้ามส่ง markdown field** (ระบบจะ generate markdown
     จาก posts เอง) **สำคัญ: aspect_ratio, duration, resolution ต้องส่งเป็น field แยกใน

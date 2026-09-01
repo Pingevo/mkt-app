@@ -283,7 +283,37 @@ class CampaignStrategyAgent(BaseAgent):
             quick = args[1]
         self._last_quick_brief = quick or ""
         self._requested_competitor_models = self._extract_competitor_tokens(self._last_quick_brief)
+        # Preserve an explicit caller override; only auto-detect if the caller did not supply one.
+        kwargs.setdefault("research_required", self._is_research_required(self._last_quick_brief))
         return super().run(*args, **kwargs)
+
+    def _is_research_required(self, quick_brief: str) -> bool:
+        """Return True when the run must fetch current information from the web.
+
+        Triggered by an explicit config flag or by research-related intent in the quick_brief.
+        """
+        if self.config.get("research_required", False):
+            return True
+        if not quick_brief:
+            return False
+        lowered = quick_brief.lower()
+        keywords = self.config.get(
+            "research_required_keywords",
+            [
+                "ราคาปัจจุบัน",
+                "ตลาดปัจจุบัน",
+                "trend ปัจจุบัน",
+                "campaign คู่แข่ง",
+                "current",
+                "now",
+                "today",
+                "ล่าสุด",
+                "ปัจจุบัน",
+                "ค้นเว็บ",
+                "web search",
+            ],
+        )
+        return any(kw.lower() in lowered for kw in keywords)
 
     def _validator_instructions(self) -> dict[str, Any]:
         instructions = dict(self.instructions or {})
