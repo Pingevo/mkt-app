@@ -219,6 +219,33 @@ def test_parse_media_prompts_no_asset_ids():
     assert "asset_ids" not in parsed["images"][0]
 
 
+def test_parse_media_prompts_regression_a4_no_crash_on_string_prompts():
+    """Regression จาก A4 smoke artifact: image_prompts ที่เป็น string ต้องไม่ทำให้
+    parse_media_prompts เกิด AttributeError ตอนเรียก .get() บน string."""
+    from src.media_gen import parse_media_prompts
+    content = json.dumps({
+        "posts": [
+            {
+                "platform": "Facebook", "concept": "c1", "title": "t1",
+                "caption": "cap1", "script": "", "hashtags": "#f",
+                "image_prompts": [{"prompt": "valid prompt", "aspect_ratio": "16:9"}],
+                "video_prompts": [],
+            },
+            {
+                "platform": "TikTok", "concept": "c2", "title": "t2",
+                "caption": "cap2", "script": "", "hashtags": "#t",
+                # malformed: image_prompts มี string แทน dict
+                "image_prompts": ["malformed string prompt"],
+                "video_prompts": [],
+            },
+        ]
+    })
+    parsed = parse_media_prompts(content)
+    assert len(parsed.get("images", [])) == 1
+    assert parsed["images"][0]["prompt"] == "valid prompt"
+    assert any("dict" in w.lower() or "expected" in w.lower() for w in parsed.get("warnings", []))
+
+
 def test_build_input_references_merges_and_caps(tmp_path, monkeypatch):
     """build_input_references รวมรูปสินค้า + รูป asset และจำกัดจำนวนตาม config.
 

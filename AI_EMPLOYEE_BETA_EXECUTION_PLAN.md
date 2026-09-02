@@ -57,7 +57,7 @@ Beta ไม่ได้หมายถึงรองรับทุก prompt �
 
 ## สิ่งที่ไม่อยู่ในขอบเขต Beta
 
-- multi-Agent team workflow หรือ autonomous routing
+- multi-Agent team workflow หรือ autonomous routing (team flow เป็น feature ที่ต้องมี product decision, dependency UX และ acceptance criteria แยกก่อนเริ่ม; ห้ามใช้ผล backend runner หลาย agent เป็นหลักฐานว่า user-facing team flow พร้อมใช้)
 - การรองรับทุก prompt ที่คิดขึ้นได้
 - Production-grade variance testing ทุก model/provider
 - การสร้าง validator สำหรับ style, heading หรือถ้อยคำทุกกรณี

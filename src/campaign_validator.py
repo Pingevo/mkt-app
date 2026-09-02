@@ -710,7 +710,9 @@ def audit_campaign_output(
     # 0.5 Competitor mentions must be tied to evidence
     # -----------------------------------------------------------------------
     competitor_err = ""
-    all_competitor_models = competitor_models | requested_competitor_models
+    # Product identity tokens (e.g. K2, Lagenio) are not competitors and must
+    # not be treated as if they need competitor evidence.
+    all_competitor_models = (competitor_models | requested_competitor_models) - product_aliases
     all_competitor_urls = competitor_evidence_urls | selected_evidence
     if all_competitor_models and not all_competitor_urls:
         for line in body.split("\n"):

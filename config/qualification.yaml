@@ -1,0 +1,23 @@
+qualification:
+  # Default cost ceiling for qualification runs.
+  ceilings:
+    stage_a: 0.80
+    stage_b: 0.95
+    total: 1.35
+
+  # Conservative per-call USD ceiling used to reserve budget before each paid
+  # network call.  These are NOT average costs; they are intentionally high to
+  # act as a defensive reserve so the runner stops before the real ceiling.
+  cost_per_call_ceiling:
+    text: 0.05        # any chat/completions call: generate, review, repair
+    web_search: 0.15  # a dedicated web search call (if not routed through chat)
+    image: 0.08       # image generation endpoint
+    video: 0.60       # video generation endpoint
+
+  # Hard call ceiling per logical run.  The runner blocks the next paid call
+  # once this count is reached, regardless of actual observed cost.
+  default_max_calls:
+    product_spec: 2
+    competitor_analysis: 3
+    campaign_strategy: 4
+    content_creator: 6

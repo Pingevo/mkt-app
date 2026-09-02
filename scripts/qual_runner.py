@@ -18,6 +18,7 @@ budget would be exceeded.
 
 from __future__ import annotations
 
+import httpx
 import json
 import os
 import sys
@@ -44,9 +45,14 @@ if _env.exists():
 from src.orchestrator import Orchestrator
 from src.llm_client import LLMClient
 from src.ai_usage import USAGE_LOG_PATH, flush_usage_log, HubReceiptCollector, reconcile_hub_receipts
-from src.evaluation.campaign_qualification import read_usage_log_for_reference, snapshot_usage_log_offset
+from src.evaluation.campaign_qualification import (
+    QualificationBudgetExhausted,
+    read_usage_log_for_reference,
+    snapshot_usage_log_offset,
+)
 from src.flow_context import set_usage_reference, set_usage_metadata, clear_usage_context
 from src import product_db
+from src.config_loader import load_config, get_agent_config
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +62,43 @@ from src import product_db
 STAGE_A_CEILING = 0.40
 STAGE_B_CEILING = 0.95
 TOTAL_CEILING = 1.35
+
+# Per-run call budget (logical-run: generation + review + repair + web + media).
+# _RUN_MAX_CALLS is set from the dry-run plan before each run_case.
+_RUN_CALL_COUNT = 0
+_RUN_MAX_CALLS = 0
+
+# Cached qualification config (cost per call, max-call defaults, ceilings).
+_QUAL_CONFIG: dict[str, Any] | None = None
+
+
+def _load_qualification_config() -> dict[str, Any]:
+    """Load qualification tuning from config/qualification.yaml (config, not hardcode)."""
+    global _QUAL_CONFIG
+    if _QUAL_CONFIG is not None:
+        return _QUAL_CONFIG
+    import yaml
+    path = PROJECT_ROOT / "config" / "qualification.yaml"
+    if path.exists():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            _QUAL_CONFIG = data.get("qualification", {})
+        except Exception:
+            _QUAL_CONFIG = {}
+    else:
+        _QUAL_CONFIG = {}
+    return _QUAL_CONFIG
+
+
+def _qual_ceilings() -> dict[str, float]:
+    """Return stage/total ceilings from config or fallback constants."""
+    cfg = _load_qualification_config().get("ceilings", {})
+    return {
+        "stage_a": float(cfg.get("stage_a", STAGE_A_CEILING)),
+        "stage_b": float(cfg.get("stage_b", STAGE_B_CEILING)),
+        "total": float(cfg.get("total", TOTAL_CEILING)),
+    }
+
 
 # Session baseline: spend that existed BEFORE this qualification started.
 # The budget guard tracks only spend incurred DURING this qualification.
@@ -74,6 +117,8 @@ def _read_total_cost() -> float:
                 continue
             try:
                 entry = json.loads(line)
+                if not isinstance(entry, dict):
+                    continue
                 total += float(entry.get("cost_usd", 0) or 0)
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
@@ -109,7 +154,10 @@ def _read_entries_since(offset: int) -> list[dict[str, Any]]:
                 if not line:
                     continue
                 try:
-                    entries.append(json.loads(line))
+                    entry = json.loads(line)
+                    if not isinstance(entry, dict):
+                        continue
+                    entries.append(entry)
                 except json.JSONDecodeError:
                     continue
     except Exception:
@@ -117,24 +165,161 @@ def _read_entries_since(offset: int) -> list[dict[str, Any]]:
     return entries
 
 
-def budget_guard(stage: str, estimated_cost: float = 0.0, label: str = "") -> bool:
+def _per_call_ceiling(call_kind: str) -> float:
+    """Return the conservative USD reserve to set aside for one call of this kind."""
+    cfg = _load_qualification_config().get("cost_per_call_ceiling", {})
+    return float(cfg.get(call_kind, cfg.get("text", 0.05)))
+
+
+def _resolved_url(client: httpx.Client, url: str) -> str:
+    """Resolve a possibly relative request path against the httpx client base_url."""
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    base = str(client.base_url)
+    if not base:
+        return url
+    return base.rstrip("/") + "/" + url.lstrip("/")
+
+
+def _init_call_budget(max_calls: int) -> None:
+    """Reset the logical-run call counter and set the hard call cap."""
+    global _RUN_CALL_COUNT, _RUN_MAX_CALLS
+    _RUN_CALL_COUNT = 0
+    _RUN_MAX_CALLS = max(max_calls, 0)
+
+
+def _call_budget_state() -> dict[str, int]:
+    return {"used": _RUN_CALL_COUNT, "max": _RUN_MAX_CALLS}
+
+
+def budget_guard(stage: str, estimated_cost: float = 0.0, label: str = "", call_kind: str = "") -> bool:
     """Return True if the call is allowed, False if it must be blocked.
 
-    Checks cumulative spend + estimated cost against the stage ceiling.
-    Prints a clear BLOCK message when blocking.
+    Reserves a conservative per-call ceiling before allowing any paid network
+    request.  This is the single gate for call-count and USD budgets.
     """
+    global _RUN_CALL_COUNT
+    if _RUN_MAX_CALLS > 0 and _RUN_CALL_COUNT >= _RUN_MAX_CALLS:
+        print(f"[BUDGET GUARD] BLOCKED by call budget: call {_RUN_CALL_COUNT + 1}/{_RUN_MAX_CALLS} "
+              f"stage={stage} label={label}", flush=True)
+        return False
+
+    per_call = _per_call_ceiling(call_kind)
+    reserve = max(estimated_cost, per_call)
     cumulative = _read_cumulative_cost()
-    ceiling = STAGE_A_CEILING if stage == "A" else TOTAL_CEILING
-    projected = round(cumulative + estimated_cost, 6)
+    ceiling = _qual_ceilings()["stage_a"] if stage == "A" else _qual_ceilings()["total"]
+    projected = round(cumulative + reserve, 6)
     if projected > ceiling:
-        print(f"[BUDGET GUARD] BLOCKED: stage={stage} cumulative=${cumulative:.6f} "
-              f"estimated=${estimated_cost:.6f} projected=${projected:.6f} ceiling=${ceiling:.6f} "
+        print(f"[BUDGET GUARD] BLOCKED by USD: stage={stage} cumulative=${cumulative:.6f} "
+              f"reserve=${reserve:.6f} projected=${projected:.6f} ceiling=${ceiling:.6f} "
               f"label={label}", flush=True)
         return False
-    print(f"[BUDGET GUARD] ALLOW: stage={stage} cumulative=${cumulative:.6f} "
-          f"estimated=${estimated_cost:.6f} projected=${projected:.6f} ceiling=${ceiling:.6f} "
+    _RUN_CALL_COUNT += 1
+    print(f"[BUDGET GUARD] ALLOW: call={_RUN_CALL_COUNT}/{_RUN_MAX_CALLS or '?'} "
+          f"stage={stage} cumulative=${cumulative:.6f} "
+          f"reserve=${reserve:.6f} projected=${projected:.6f} ceiling=${ceiling:.6f} "
           f"label={label}", flush=True)
     return True
+
+
+def _is_paid_request(url: str) -> bool:
+    """Return True for outbound paid requests; exclude the AI-usage Hub."""
+    from src.ai_usage import _read_hub_credentials
+    hub_url = _read_hub_credentials()[0]
+    if hub_url and url.startswith(hub_url):
+        return False
+    # Qualification only counts known paid endpoints (OpenRouter LLM + media).
+    return "openrouter.ai" in url and any(p in url for p in ("/chat/completions", "/images", "/videos"))
+
+
+def _has_web_search_tool(kwargs: dict[str, Any]) -> bool:
+    """Return True if the chat payload carries an OpenRouter web tool."""
+    payload = kwargs.get("json") or {}
+    if not isinstance(payload, dict):
+        return False
+    tools = payload.get("tools") or []
+    if not isinstance(tools, list):
+        return False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        tool_type = (tool.get("type") or "").lower()
+        if tool_type in {"openrouter:web_search", "openrouter:web_fetch"}:
+            return True
+    return False
+
+
+def _detect_call_kind(url: str, kwargs: dict[str, Any] | None = None) -> str:
+    """Classify the paid request URL + payload into a call kind for cost reservation."""
+    low = url.lower()
+    if "/images" in low:
+        return "image"
+    if "/videos" in low:
+        return "video"
+    if "/chat/completions" in low:
+        if kwargs and _has_web_search_tool(kwargs):
+            return "web_search"
+        return "text"
+    return "text"  # default reserve for any other paid endpoint
+
+
+class PaidCallGuard:
+    """Context manager that wraps every paid httpx call with budget_guard.
+
+    This is the single hard guard for the qualification run.  It patches
+    ``httpx.Client.post`` and ``httpx.Client.stream`` so that each outbound
+    paid request is counted and a conservative per-call USD reserve is set
+    aside before the request is actually sent.
+    """
+
+    def __init__(self, stage: str, max_calls: int) -> None:
+        self.stage = stage
+        self.max_calls = max_calls
+        self._original_post = httpx.Client.post
+        self._original_stream = httpx.Client.stream
+        self._call_log: list[dict[str, Any]] = []
+
+    def __enter__(self) -> "PaidCallGuard":
+        _init_call_budget(self.max_calls)
+        guard = self
+
+        def _guarded_post(client: httpx.Client, url: str, **kwargs: Any) -> Any:
+            resolved = _resolved_url(client, url)
+            if not _is_paid_request(resolved):
+                return guard._original_post(client, url, **kwargs)
+            kind = _detect_call_kind(resolved, kwargs)
+            if not budget_guard(self.stage, label=resolved, call_kind=kind):
+                raise QualificationBudgetExhausted(
+                    _RUN_CALL_COUNT, resolved, self.max_calls
+                )
+            guard._call_log.append({"url": resolved, "kind": kind, "allowed": True})
+            return guard._original_post(client, url, **kwargs)
+
+        def _guarded_stream(
+            client: httpx.Client, method: str, url: str, **kwargs: Any
+        ) -> Any:
+            resolved = _resolved_url(client, url)
+            if not _is_paid_request(resolved):
+                return guard._original_stream(client, method, url, **kwargs)
+            kind = _detect_call_kind(resolved, kwargs)
+            if not budget_guard(self.stage, label=resolved, call_kind=kind):
+                raise QualificationBudgetExhausted(
+                    _RUN_CALL_COUNT, resolved, self.max_calls
+                )
+            guard._call_log.append({"url": resolved, "kind": kind, "allowed": True})
+            return guard._original_stream(client, method, url, **kwargs)
+
+        httpx.Client.post = _guarded_post
+        httpx.Client.stream = _guarded_stream
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        httpx.Client.post = self._original_post
+        httpx.Client.stream = self._original_stream
+
+    def actual_calls(self) -> list[dict[str, Any]]:
+        """Return the paid calls that were allowed through the guard."""
+        return list(self._call_log)
 
 
 def current_spend() -> dict[str, float]:
@@ -185,12 +370,17 @@ def run_case(
     - calls the same orch.run_* method
     - captures usage log entries + Hub receipts
     """
-    if not budget_guard(stage, estimated_cost, label=case_id):
-        return {
-            "case_id": case_id,
-            "blocked_by_budget": True,
-            "cumulative_spend": _read_cumulative_cost(),
-        }
+    # Pre-flight dry-run plan: no model calls, just expected calls + upper-bound cost
+    plan = dry_run_cost_plan(
+        agent_key=agent_key,
+        product_id=product_id,
+        quick_brief=quick_brief,
+        content_count=content_count,
+        platforms=platforms,
+        auto_image=auto_image,
+        auto_video=auto_video,
+    )
+    _print_dry_run_plan(plan)
 
     if output_dir is None:
         output_dir = PROJECT_ROOT / "data" / "all_agents_beta_qualification" / "run_outputs"
@@ -224,114 +414,120 @@ def run_case(
     error = None
     hub_results: list[dict] = []
     hub_ack = False
+    call_guard: PaidCallGuard | None = None
     start_time = time.time()
 
     try:
-        with HubReceiptCollector() as hub_collector:
-            # Fix #4: UI parity — send product images like web_viewer does
-            image_paths = orch._get_product_image_paths()
+        with PaidCallGuard(stage, plan["max_calls"]) as call_guard:
+            with HubReceiptCollector() as hub_collector:
+                # Fix #4: UI parity — send product images like web_viewer does
+                image_paths = orch._get_product_image_paths()
 
-            if agent_key == "product_spec":
-                raw_data = product_db.get_scoped_context_text([product_id])
-                if not raw_data.strip():
-                    raw_data = ""
-                result_text = orch.run_product_spec(
-                    raw_data, image_paths, llm=llm, quick_brief=quick_brief,
-                )
-            elif agent_key == "competitor_analysis":
-                result_text = orch.run_competitor_analysis(
-                    "", None, llm=llm, quick_brief=quick_brief,
-                )
-            elif agent_key == "campaign_strategy":
-                # Fix #3: pass competitor analysis text if provided in context
-                competitor_text = ""
-                if context and isinstance(context, dict):
-                    competitor_text = context.get("competitor_analysis", "")
-                result_text = orch.run_campaign_strategy(
-                    "", competitor_text, llm=llm, quick_brief=quick_brief,
-                )
-            elif agent_key == "content_creator":
-                # UI path: loops per platform, count_per_platform posts each
-                platform_names = {"facebook": "Facebook", "tiktok": "TikTok"}
-                target_platforms = platforms if platforms else [""]
-                _n_plat = max(1, len(target_platforms))
-                count_per_platform = max(1, (content_count + _n_plat - 1) // _n_plat)
-                all_posts = []
-
-                # Fix #4: UI parity — add content history like web_viewer does
-                try:
-                    from src import content_history
-                    _product_history_text = content_history.format_product_history_for_prompt(
-                        PROJECT_ROOT, product_id,
+                if agent_key == "product_spec":
+                    raw_data = product_db.get_scoped_context_text([product_id])
+                    if not raw_data.strip():
+                        raw_data = ""
+                    result_text = orch.run_product_spec(
+                        raw_data, image_paths, llm=llm, quick_brief=quick_brief,
                     )
-                except Exception:
-                    _product_history_text = ""
+                elif agent_key == "competitor_analysis":
+                    result_text = orch.run_competitor_analysis(
+                        "", None, llm=llm, quick_brief=quick_brief,
+                    )
+                elif agent_key == "campaign_strategy":
+                    # Fix #3: pass competitor analysis text if provided in context
+                    competitor_text = ""
+                    if context and isinstance(context, dict):
+                        competitor_text = context.get("competitor_analysis", "")
+                    result_text = orch.run_campaign_strategy(
+                        "", competitor_text, llm=llm, quick_brief=quick_brief,
+                    )
+                elif agent_key == "content_creator":
+                    # UI path: loops per platform, count_per_platform posts each
+                    platform_names = {"facebook": "Facebook", "tiktok": "TikTok"}
+                    target_platforms = platforms if platforms else [""]
+                    _n_plat = max(1, len(target_platforms))
+                    count_per_platform = max(1, (content_count + _n_plat - 1) // _n_plat)
+                    all_posts = []
 
-                # Fix #4: UI parity — use competitor/campaign context if provided
-                analysis_text = ""
-                campaign_text = ""
-                if context and isinstance(context, dict):
-                    analysis_text = context.get("competitor_analysis", "")
-                    campaign_text = context.get("campaign_strategy", "")
-
-                for platform in target_platforms:
-                    platform_label = platform_names.get(platform, platform) if platform else ""
-                    for post_idx in range(count_per_platform):
-                        multi_brief = quick_brief
-                        if count_per_platform > 1:
-                            multi_brief = f"โพสต์ที่ {post_idx+1} จาก {count_per_platform} โพสต์ — สร้างคอนเทนต์ที่แตกต่างจากโพสต์ก่อนหน้า"
-                            if all_posts:
-                                multi_brief += "\n\n--- คอนเทนต์ที่สร้างไปแล้ว (ห้ามซ้ำ) ---\n"
-                                for j, p in enumerate(all_posts):
-                                    multi_brief += f"\nโพสต์ที่ {j+1}:\n{json.dumps(p, ensure_ascii=False)[:800]}\n"
-                                multi_brief += "--- สิ้นสุด ---\n"
-                                multi_brief += "สร้างโพสต์ใหม่ที่มีมุมมอง/concept ต่างจากโพสต์ก่อนหน้า"
-                            if quick_brief:
-                                multi_brief += f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
-                        # Fix #4: UI parity — add content history
-                        if _product_history_text:
-                            multi_brief = (multi_brief or "") + "\n\n" + _product_history_text + "\n"
-                            multi_brief += "วิเคราะห์สินค้านี้แล้วเลือกมุมมองใหม่ที่ต่างจากที่เคยใช้ แล้วสร้างโพสต์จากมุมมองนั้น"
-                        else:
-                            multi_brief = (multi_brief or "") + "\n\nวิเคราะห์สินค้านี้แล้วเลือกมุมมองที่เหมาะสมที่สุด แล้วสร้างโพสต์จากมุมมองนั้น"
-                        if platform_label:
-                            multi_brief = (multi_brief or "") + f"\nแพลตฟอร์มที่ต้องสร้างสำหรับโพสต์นี้: {platform_label} เท่านั้น"
-                        result = orch.run_content_creator(
-                            "", analysis_text, campaign_text,
-                            llm=llm, quick_brief=multi_brief,
-                            media_type=media_type,
+                    # Fix #4: UI parity — add content history like web_viewer does
+                    try:
+                        from src import content_history
+                        _product_history_text = content_history.format_product_history_for_prompt(
+                            PROJECT_ROOT, product_id,
                         )
-                        try:
-                            parsed = json.loads(result)
+                    except Exception:
+                        _product_history_text = ""
+
+                    # Fix #4: UI parity — use competitor/campaign context if provided
+                    analysis_text = ""
+                    campaign_text = ""
+                    if context and isinstance(context, dict):
+                        analysis_text = context.get("competitor_analysis", "")
+                        campaign_text = context.get("campaign_strategy", "")
+
+                    for platform in target_platforms:
+                        platform_label = platform_names.get(platform, platform) if platform else ""
+                        for post_idx in range(count_per_platform):
+                            multi_brief = quick_brief
+                            if count_per_platform > 1:
+                                multi_brief = f"โพสต์ที่ {post_idx+1} จาก {count_per_platform} โพสต์ — สร้างคอนเทนต์ที่แตกต่างจากโพสต์ก่อนหน้า"
+                                if all_posts:
+                                    multi_brief += "\n\n--- คอนเทนต์ที่สร้างไปแล้ว (ห้ามซ้ำ) ---\n"
+                                    for j, p in enumerate(all_posts):
+                                        multi_brief += f"\nโพสต์ที่ {j+1}:\n{json.dumps(p, ensure_ascii=False)[:800]}\n"
+                                    multi_brief += "--- สิ้นสุด ---\n"
+                                    multi_brief += "สร้างโพสต์ใหม่ที่มีมุมมอง/concept ต่างจากโพสต์ก่อนหน้า"
+                                if quick_brief:
+                                    multi_brief += f"\n\nคำขอเพิ่มเติมจาก user: {quick_brief}"
+                            # Fix #4: UI parity — add content history
+                            if _product_history_text:
+                                multi_brief = (multi_brief or "") + "\n\n" + _product_history_text + "\n"
+                                multi_brief += "วิเคราะห์สินค้านี้แล้วเลือกมุมมองใหม่ที่ต่างจากที่เคยใช้ แล้วสร้างโพสต์จากมุมมองนั้น"
+                            else:
+                                multi_brief = (multi_brief or "") + "\n\nวิเคราะห์สินค้านี้แล้วเลือกมุมมองที่เหมาะสมที่สุด แล้วสร้างโพสต์จากมุมมองนั้น"
+                            if platform_label:
+                                multi_brief = (multi_brief or "") + f"\nแพลตฟอร์มที่ต้องสร้างสำหรับโพสต์นี้: {platform_label} เท่านั้น"
+                            result = orch.run_content_creator(
+                                "", analysis_text, campaign_text,
+                                llm=llm, quick_brief=multi_brief,
+                                media_type=media_type,
+                            )
+                            try:
+                                parsed = json.loads(result)
+                            except (json.JSONDecodeError, TypeError) as exc:
+                                raise ValueError(f"content creator output is not valid JSON: {exc}") from exc
+                            if not isinstance(parsed, dict):
+                                raise ValueError(
+                                    f"content creator output was not a JSON object; got {type(parsed).__name__}"
+                                )
                             posts = parsed.get("posts", [])
                             if posts:
                                 if platform_label:
                                     posts[0]["platform"] = platform_label
                                 all_posts.append(posts[0])
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                combined = {"posts": all_posts}
-                result_text = json.dumps(combined, ensure_ascii=False, indent=2)
+                    combined = {"posts": all_posts}
+                    result_text = json.dumps(combined, ensure_ascii=False, indent=2)
 
-                # Auto media generation (mirrors UI)
-                if (auto_image or auto_video) and all_posts:
-                    _run_media_gen(
-                        orch, llm, result_text, output_dir,
-                        auto_image=auto_image or False,
-                        auto_video=auto_video or False,
-                        product_id=product_id,
-                        case_id=case_id,
-                        stage=stage,
-                    )
-            else:
-                raise ValueError(f"Unknown agent: {agent_key}")
+                    # Auto media generation (mirrors UI)
+                    if (auto_image or auto_video) and all_posts:
+                        _run_media_gen(
+                            orch, llm, result_text, output_dir,
+                            auto_image=auto_image or False,
+                            auto_video=auto_video or False,
+                            product_id=product_id,
+                            case_id=case_id,
+                            stage=stage,
+                        )
+                else:
+                    raise ValueError(f"Unknown agent: {agent_key}")
 
-            # Fix #5: Hub receipt race — flush and read results INSIDE the
-            # `with` block, before __exit__ uninstalls the callback.  This
-            # ensures any background POST threads can still append receipts
-            # while we wait for flush to complete.
-            hub_ack = flush_usage_log(timeout=5.0)
-            hub_results = list(hub_collector.results)
+                # Fix #5: Hub receipt race — flush and read results INSIDE the
+                # `with` block, before __exit__ uninstalls the callback.  This
+                # ensures any background POST threads can still append receipts
+                # while we wait for flush to complete.
+                hub_ack = flush_usage_log(timeout=5.0)
+                hub_results = list(hub_collector.results)
     except Exception as exc:
         error = str(exc)
     finally:
@@ -382,6 +578,8 @@ def run_case(
         "num_paid_requests": len(run_entries),
         "hub_results": hub_results,
         "hub_reconciliation": hub_reconciliation,
+        "dry_run_plan": plan,
+        "actual_call_classifications": (call_guard.actual_calls() if call_guard is not None else []),
         "cumulative_spend_after": _read_cumulative_cost(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -507,9 +705,6 @@ def _run_media_gen(
     if auto_image:
         for j, img in enumerate(parsed.get("images", [])):
             img_path = output_dir / f"{case_id}_image_{j+1}.png"
-            if not budget_guard(stage, 0.05, label=f"{case_id}:image_{j+1}"):
-                print(f"[BUDGET GUARD] image {j+1} blocked", flush=True)
-                return
             img_kwargs: dict = {}
             if img.get("aspect_ratio"):
                 img_kwargs["aspect_ratio"] = img["aspect_ratio"]
@@ -531,9 +726,6 @@ def _run_media_gen(
     if auto_video:
         for j, vid in enumerate(parsed.get("videos", [])):
             vid_path = output_dir / f"{case_id}_video_{j+1}.mp4"
-            if not budget_guard(stage, 0.50, label=f"{case_id}:video_{j+1}"):
-                print(f"[BUDGET GUARD] video {j+1} blocked", flush=True)
-                return
             vid_kwargs: dict = {}
             if vid.get("duration"):
                 vid_kwargs["duration"] = int(vid["duration"])
@@ -565,6 +757,120 @@ def save_evidence(evidence: dict, qual_dir: Path) -> Path:
     path = qual_dir / f"{case_id}_evidence.json"
     path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return path
+
+
+def dry_run_cost_plan(
+    agent_key: str,
+    product_id: str = "Lagenio K2",
+    quick_brief: str = "",
+    content_count: int = 1,
+    platforms: list[str] | None = None,
+    auto_image: bool | None = None,
+    auto_video: bool | None = None,
+) -> dict[str, Any]:
+    """Return a pre-flight cost plan for one qualification case without calling the model.
+
+    The plan counts generation, review/repair, web-search and media calls as one
+    logical-run budget, and computes an upper-bound cost from
+    config/qualification.yaml (no hardcoded prices in the runner).
+    """
+    import re
+
+    cfg = _load_qualification_config()
+    cost_per = cfg.get("cost_per_call_ceiling", {})
+    defaults = cfg.get("default_max_calls", {})
+    ceilings = _qual_ceilings()
+
+    agent_cfg = get_agent_config(load_config(), agent_key) or {}
+    max_review = int(agent_cfg.get("max_review_iterations", 0))
+    web_search_enabled = bool(agent_cfg.get("web_search", False))
+
+    calls: list[dict[str, Any]] = []
+    upper = 0.0
+    web_calls = 0
+    media_calls = 0
+
+    # text generation for the agent's main output
+    calls.append({"kind": "text", "label": f"{agent_key}:generate"})
+    upper += float(cost_per.get("text", 0.05))
+
+    # review/repair per agent config
+    for i in range(max_review):
+        calls.append({"kind": "text", "label": f"{agent_key}:review_{i + 1}"})
+        upper += float(cost_per.get("text", 0.05))
+        calls.append({"kind": "text", "label": f"{agent_key}:repair_{i + 1}"})
+        upper += float(cost_per.get("text", 0.05))
+
+    # web-search calls: limited by competitor names in quick_brief + 1 discovery guard
+    if web_search_enabled:
+        if agent_key == "competitor_analysis":
+            # Count likely competitor model tokens in the brief (e.g. imoo Z1)
+            toks = re.findall(r"[A-Za-z]+\d[\w]*", quick_brief)
+            web_calls = max(1, len(toks)) + 1  # discovery + one per named competitor
+        elif agent_key == "campaign_strategy":
+            web_calls = 1
+        for i in range(web_calls):
+            calls.append({"kind": "web_search", "label": f"{agent_key}:web_search_{i + 1}"})
+            upper += float(cost_per.get("web_search", 0.15))
+
+    # content creator media calls
+    if agent_key == "content_creator":
+        _platforms = platforms or ["facebook"]
+        _n_plat = max(1, len(_platforms))
+        count_per = max(1, (content_count + _n_plat - 1) // _n_plat)
+        if auto_image:
+            for p in _platforms:
+                for i in range(count_per):
+                    calls.append({"kind": "image", "label": f"{p}:image_{i + 1}"})
+                    upper += float(cost_per.get("image", 0.08))
+                    media_calls += 1
+        if auto_video:
+            for p in _platforms:
+                for i in range(count_per):
+                    calls.append({"kind": "video", "label": f"{p}:video_{i + 1}"})
+                    upper += float(cost_per.get("video", 0.60))
+                    media_calls += 1
+
+    configured_cap = int(defaults.get(agent_key, 0))
+    max_calls = configured_cap if configured_cap > 0 else len(calls)
+    conservative = round(
+        sum(float(cost_per.get(c["kind"], 0.05)) for c in calls[:max_calls]), 6
+    )
+
+    if len(calls) > max_calls:
+        status = f"exceeds call cap (blocks after call {max_calls})"
+    elif conservative > ceilings["stage_a"]:
+        status = "exceeds cost ceiling"
+    else:
+        status = "under ceiling"
+
+    return {
+        "agent_key": agent_key,
+        "product_id": product_id,
+        "quick_brief_summary": quick_brief[:120] if quick_brief else "(default job)",
+        "expected_calls": calls,
+        "max_calls": max_calls,
+        "text_calls": 1 + 2 * max_review,
+        "web_search_calls": web_calls,
+        "media_calls": media_calls,
+        "conservative_estimate": conservative,
+        "ceiling_stage_a": ceilings["stage_a"],
+        "ceiling_total": ceilings["total"],
+        "status": status,
+    }
+
+
+def _print_dry_run_plan(plan: dict[str, Any]) -> None:
+    print("[DRY-RUN COST PLAN]", flush=True)
+    print(f"  agent: {plan['agent_key']} | product: {plan['product_id']}", flush=True)
+    print(f"  quick_brief: {plan['quick_brief_summary']!r}", flush=True)
+    print(f"  max calls: {plan['max_calls']}  "
+          f"(text={plan['text_calls']}, web={plan['web_search_calls']}, media={plan['media_calls']})", flush=True)
+    print(f"  conservative estimate: ${plan['conservative_estimate']:.6f} USD", flush=True)
+    print(f"  status: {plan['status']}", flush=True)
+    print(f"  ceiling (stage A): ${plan['ceiling_stage_a']:.2f} USD", flush=True)
+    for c in plan["expected_calls"]:
+        print(f"    - {c['kind']:15s} {c['label']}", flush=True)
 
 
 if __name__ == "__main__":

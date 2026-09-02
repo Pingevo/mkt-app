@@ -1226,6 +1226,7 @@ def parse_media_prompts(content: str) -> dict[str, list[dict[str, str]]]:
        ดึง duration, aspect_ratio, resolution ออกมาด้วยถ้ามี
     """
     # --- Path 1: JSON (structured output) ---
+    warnings: list[str] = []
     try:
         import json as _json
         parsed = _json.loads(content)
@@ -1235,8 +1236,14 @@ def parse_media_prompts(content: str) -> dict[str, list[dict[str, str]]]:
             for post in parsed.get("posts", []):
                 # asset_ids ของโพสต์ — ติดไปกับทุก image/video item
                 # (media_gen ใช้ดึงรูป asset เป็น input_references)
+                if not isinstance(post, dict):
+                    warnings.append(f"expected post dict, got {type(post).__name__}")
+                    continue
                 post_asset_ids = post.get("asset_ids", [])
                 for ip in post.get("image_prompts", []):
+                    if not isinstance(ip, dict):
+                        warnings.append(f"expected image prompt dict, got {type(ip).__name__}")
+                        continue
                     p = ip.get("prompt", "").strip()
                     if p:
                         img_item = {"prompt": p}
@@ -1248,6 +1255,9 @@ def parse_media_prompts(content: str) -> dict[str, list[dict[str, str]]]:
                             img_item["asset_ids"] = post_asset_ids
                         images.append(img_item)
                 for vp in post.get("video_prompts", []):
+                    if not isinstance(vp, dict):
+                        warnings.append(f"expected video prompt dict, got {type(vp).__name__}")
+                        continue
                     p = vp.get("prompt", "").strip()
                     if p:
                         vid_item = {"prompt": p}
@@ -1260,7 +1270,7 @@ def parse_media_prompts(content: str) -> dict[str, list[dict[str, str]]]:
                         if post_asset_ids:
                             vid_item["asset_ids"] = post_asset_ids
                         videos.append(vid_item)
-            return {"images": images, "videos": videos}
+            return {"images": images, "videos": videos, "warnings": warnings}
     except (_json.JSONDecodeError, TypeError, ValueError):
         pass
 
@@ -1492,4 +1502,4 @@ def parse_media_prompts(content: str) -> dict[str, list[dict[str, str]]]:
                 elif is_video:
                     videos.append(entry)
 
-    return {"images": images, "videos": videos}
+    return {"images": images, "videos": videos, "warnings": warnings}

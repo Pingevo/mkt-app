@@ -1190,6 +1190,34 @@ def test_qualitative_kpi_without_number_passes():
     assert bench.ok, f"qualitative KPI should pass: {bench.reason}"
 
 
+def test_product_name_not_treated_as_competitor_for_grounding():
+    """The current product name (e.g. Lagenio K2) must not be treated as a
+    competitor that needs inline evidence. Only actual competitor tokens do."""
+    flags = extract_context_flags({
+        "product": "Product: LAGENIO K2 smartwatch for kids.",
+        "business": "",
+        "competitors": "",
+        "market": "",
+        "customers": "",
+    })
+    flags["competitor_models"] = ["z1"]
+    flags["requested_competitor_models"] = ["k2", "z1"]
+    flags["evidence_confirmed_competitor_models"] = ["z1"]
+    flags["competitor_evidence_urls"] = ["https://www.central.co.th/th/imoo-z1"]
+    output = (
+        "# Executive Brief: Lagenio K2\n"
+        "- กลยุทธ์ราคาคู่แข่ง [imoo Z1](https://www.central.co.th/th/imoo-z1) ราคาประมาณการ ฿3,999\n"
+        "- Lagenio K2 วางตำแหน่งเป็นสมาร์ทวอทช์เด็ก\n"
+    )
+    results = _audit_with_flags(
+        output,
+        flags,
+        {"selected_evidence_urls": ["https://www.central.co.th/th/imoo-z1"]},
+    )
+    competitor = next(r for r in results if r.rule == "competitor_mentions_grounded")
+    assert competitor.ok, f"product name should not trigger competitor grounding: {competitor.reason}"
+
+
 def test_user_provided_baseline_not_misclassified_as_benchmark():
     """A user-provided baseline is not an external benchmark."""
     flags = extract_context_flags({
