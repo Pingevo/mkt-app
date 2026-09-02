@@ -465,6 +465,18 @@ def run_case(
                     count_per_platform = max(1, (content_count + _n_plat - 1) // _n_plat)
                     all_posts = []
 
+                    # UI-equivalent media_type: the web UI always passes a media_type;
+                    # the harness derives it from auto_image/auto_video when not supplied.
+                    if not media_type:
+                        if auto_image and auto_video:
+                            media_type = "both"
+                        elif auto_image:
+                            media_type = "image"
+                        elif auto_video:
+                            media_type = "video"
+                        else:
+                            media_type = ""
+
                     # Fix #4: UI parity — add content history like web_viewer does
                     try:
                         from src import content_history

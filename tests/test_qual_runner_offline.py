@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
+import json
 import pytest
 
 # qual_runner is in scripts/, not src/.
@@ -312,3 +313,187 @@ def test_qual_runner_run_case_multi_product_no_cross_contamination(monkeypatch, 
     assert "K2" in raw
     assert "K3" in raw
     assert "Lagenio K2 + Lagenio K3" not in raw  # must not appear as one bogus product id
+
+
+def _setup_media_type_test(monkeypatch, tmp_path, captured):
+    """Shared helper for media_type mapping tests."""
+    import qual_runner
+    from src.orchestrator import Orchestrator
+
+    def fake_run_content_creator(orch_self, *args, **kwargs):
+        captured["media_type"] = kwargs.get("media_type")
+        return json.dumps({
+            "posts": [{
+                "platform": "TikTok",
+                "concept": "c",
+                "title": "t",
+                "caption": "c",
+                "hashtags": "#h",
+                "asset_ids": [],
+                "image_prompts": [],
+                "video_prompts": [],
+            }]
+        })
+
+    def fake_make_llm(orch):
+        return MagicMock()
+
+    monkeypatch.setattr(Orchestrator, "run_content_creator", fake_run_content_creator)
+    monkeypatch.setattr(qual_runner, "make_llm", fake_make_llm)
+    monkeypatch.setattr(qual_runner, "_init_session_baseline", lambda: None)
+
+
+def test_qual_runner_content_creator_auto_image_maps_to_image(monkeypatch, tmp_path):
+    """auto_image=True / auto_video=False forces media_type='image'."""
+    import qual_runner
+    captured = {}
+    _setup_media_type_test(monkeypatch, tmp_path, captured)
+    qual_runner.run_case(
+        case_id="A4_map_image",
+        agent_key="content_creator",
+        product_id="Lagenio K2",
+        platforms=["tiktok"],
+        auto_image=True,
+        auto_video=False,
+        output_dir=tmp_path,
+    )
+    assert captured["media_type"] == "image"
+
+
+def test_qual_runner_content_creator_auto_video_maps_to_video(monkeypatch, tmp_path):
+    """auto_image=False / auto_video=True forces media_type='video'."""
+    import qual_runner
+    captured = {}
+    _setup_media_type_test(monkeypatch, tmp_path, captured)
+    qual_runner.run_case(
+        case_id="A4_map_video",
+        agent_key="content_creator",
+        product_id="Lagenio K2",
+        platforms=["tiktok"],
+        auto_image=False,
+        auto_video=True,
+        output_dir=tmp_path,
+    )
+    assert captured["media_type"] == "video"
+
+
+def test_qual_runner_content_creator_auto_both_maps_to_both(monkeypatch, tmp_path):
+    """auto_image=True / auto_video=True forces media_type='both'."""
+    import qual_runner
+    captured = {}
+    _setup_media_type_test(monkeypatch, tmp_path, captured)
+    qual_runner.run_case(
+        case_id="A4_map_both",
+        agent_key="content_creator",
+        product_id="Lagenio K2",
+        platforms=["tiktok"],
+        auto_image=True,
+        auto_video=True,
+        output_dir=tmp_path,
+    )
+    assert captured["media_type"] == "both"
+
+
+def test_qual_runner_content_creator_auto_none_maps_to_empty(monkeypatch, tmp_path):
+    """auto_image=False / auto_video=False leaves media_type empty."""
+    import qual_runner
+    captured = {}
+    _setup_media_type_test(monkeypatch, tmp_path, captured)
+    qual_runner.run_case(
+        case_id="A4_map_none",
+        agent_key="content_creator",
+        product_id="Lagenio K2",
+        platforms=["tiktok"],
+        auto_image=False,
+        auto_video=False,
+        output_dir=tmp_path,
+    )
+    assert captured["media_type"] == ""
+
+
+def test_qual_runner_content_creator_explicit_media_type_not_overridden(monkeypatch, tmp_path):
+    """Explicit media_type takes precedence over auto_image/auto_video."""
+    import qual_runner
+    captured = {}
+    _setup_media_type_test(monkeypatch, tmp_path, captured)
+    qual_runner.run_case(
+        case_id="A4_explicit_video",
+        agent_key="content_creator",
+        product_id="Lagenio K2",
+        platforms=["tiktok"],
+        media_type="video",
+        auto_image=True,
+        auto_video=False,
+        output_dir=tmp_path,
+    )
+    assert captured["media_type"] == "video"
+
+
+def test_qual_runner_content_creator_image_9_16_flow(monkeypatch, tmp_path):
+    """Runner passes aspect_ratio through to image generation when image_prompts contain 9:16."""
+    import qual_runner
+    from src.orchestrator import Orchestrator
+
+    captured = {}
+
+    def fake_run_content_creator(orch_self, *args, **kwargs):
+        captured["media_type"] = kwargs.get("media_type")
+        return json.dumps({
+            "posts": [{
+                "platform": "TikTok",
+                "concept": "c",
+                "title": "t",
+                "caption": "c",
+                "hashtags": "#h",
+                "asset_ids": [],
+                "image_prompts": [{
+                    "prompt": "vertical image",
+                    "aspect_ratio": "9:16",
+                    "resolution": "768x1366",
+                }],
+                "video_prompts": [],
+            }]
+        })
+
+    def fake_make_llm(orch):
+        return MagicMock()
+
+    def fake_generate_image(prompt, img_path, llm=None, **kwargs):
+        captured["generate_kwargs"] = kwargs
+        return {"ok": True, "prompt": prompt}
+
+    from src import media_gen
+
+    monkeypatch.setattr(Orchestrator, "run_content_creator", fake_run_content_creator)
+    monkeypatch.setattr(qual_runner, "make_llm", fake_make_llm)
+    monkeypatch.setattr(qual_runner, "_init_session_baseline", lambda: None)
+    monkeypatch.setattr(media_gen, "generate_image_with_retry", fake_generate_image)
+    monkeypatch.setattr(media_gen, "save_retry_history", lambda *a, **k: None)
+
+    qual_runner.run_case(
+        case_id="A4_image_9_16",
+        agent_key="content_creator",
+        product_id="Lagenio K2",
+        platforms=["tiktok"],
+        auto_image=True,
+        auto_video=False,
+        output_dir=tmp_path,
+    )
+
+    assert captured["media_type"] == "image"
+    assert captured.get("generate_kwargs", {}).get("aspect_ratio") == "9:16"
+
+
+def test_a4_tiktok_artifact_replay_no_image_prompts():
+    """Original A4 TikTok artifact had no image_prompts; parser correctly produces empty images list."""
+    from src import media_gen
+    from pathlib import Path
+
+    artifact = Path("data/all_agents_beta_qualification/run_outputs/A4_tiktok_text_image_output.txt")
+    assert artifact.exists()
+    content = artifact.read_text(encoding="utf-8")
+    parsed = media_gen.parse_media_prompts(content)
+
+    assert parsed["images"] == []
+    assert len(parsed["videos"]) == 1
+    assert parsed["videos"][0].get("aspect_ratio") == "9:16"
