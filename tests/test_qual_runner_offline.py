@@ -557,3 +557,124 @@ def test_paid_call_guard_content_creator_hard_cap_6():
         platforms=["facebook"],
         auto_image=True,
     )["max_calls"] == 6
+
+
+class _FakeLLM:
+    """Deterministic LLM double for evidence-mode competitor analysis."""
+
+    def __init__(self, generate_output: str, annotations=None):
+        self.generate_output = generate_output
+        self.annotations = annotations or []
+        self.calls = []
+
+    def chat(self, messages, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        if kwargs.get("return_annotations"):
+            return self.generate_output, self.annotations
+        return self.generate_output
+
+    def close(self):
+        pass
+
+
+_GOOD_RESEARCH_RESPONSE = json.dumps(
+    {
+        "target_model": "K77",
+        "competitor_names": ["Xiaomi Watch S3", "Kieslect"],
+        "evidence": [
+            {
+                "competitor": "Xiaomi Watch S3",
+                "field": "display",
+                "claim": '1.43" AMOLED (466×466 px)',
+                "url": "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
+                "geography": "global",
+            },
+            {
+                "competitor": "Kieslect",
+                "field": "battery",
+                "claim": "510mAh",
+                "url": "https://www.kieslectthailand.com/en/product/72123/kieslect-ai-smartwatch-elite2-noir-edition",
+                "geography": "thailand",
+            },
+        ],
+        "evidence_based_recommendations": [
+            {
+                "text": "เน้นหน้าจอใหญ่ของ K77 เปรียบเทียบกับ Xiaomi Watch S3",
+                "supporting_evidence_urls": [
+                    "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
+                ],
+            }
+        ],
+        "strategic_hypotheses": [
+            {
+                "text": "ชูแบตอึดเป็นจุดขาย",
+                "rationale": "K77 มีแบตใหญ่กว่า Kieslect ตามสเปก",
+            }
+        ],
+        "uncertainty": ["ยังไม่พบราคา Kieslect"],
+    },
+    ensure_ascii=False,
+)
+
+
+_FAKE_ANNOTATIONS = [
+    {
+        "url": "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
+        "title": "Xiaomi Watch S3",
+        "content": "Xiaomi Watch S3 1.43 AMOLED 466x466",
+        "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "thailand"},
+    },
+    {
+        "url": "https://www.kieslectthailand.com/en/product/72123/kieslect-ai-smartwatch-elite2-noir-edition",
+        "title": "Kieslect AI Smartwatch Elite2 Noir Edition",
+        "content": "Kieslect Elite2 510 mAh battery",
+        "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "thailand"},
+    },
+]
+
+
+def test_qual_runner_competitor_analysis_returns_bullet_brief(monkeypatch, tmp_path):
+    """qual_runner.run_case passes quick_brief through and returns final Markdown brief."""
+    import qual_runner
+
+    fake = _FakeLLM(_GOOD_RESEARCH_RESPONSE, _FAKE_ANNOTATIONS)
+    monkeypatch.setattr(qual_runner, "make_llm", lambda orch: fake)
+
+    result = qual_runner.run_case(
+        case_id="A2_brief_harness_test",
+        agent_key="competitor_analysis",
+        product_id="K77",
+        quick_brief="สรุปแบบ bullet executive brief ห้ามใช้ตาราง",
+        output_dir=tmp_path,
+    )
+
+    assert result["error"] is None
+    assert result["num_paid_requests"] == 0
+    assert result["result_text"]
+    assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" not in result["result_text"]
+    assert "| คุณสมบัติ |" not in result["result_text"]
+    assert "https://www.siamphone.com/smartwatch/xiaomi/watch-s3" in result["result_text"]
+    assert "## สมมติฐานเชิงกลยุทธ์ (ยังไม่ยืนยัน)" in result["result_text"]
+    assert "## ข้อจำกัด" in result["result_text"]
+    assert (tmp_path / "A2_brief_harness_test_output.txt").exists()
+
+
+def test_qual_runner_competitor_analysis_default_still_table(monkeypatch, tmp_path):
+    """qual_runner.run_case without non-table brief still returns table."""
+    import qual_runner
+
+    fake = _FakeLLM(_GOOD_RESEARCH_RESPONSE, _FAKE_ANNOTATIONS)
+    monkeypatch.setattr(qual_runner, "make_llm", lambda orch: fake)
+
+    result = qual_runner.run_case(
+        case_id="A2_default_harness_test",
+        agent_key="competitor_analysis",
+        product_id="K77",
+        quick_brief="",
+        output_dir=tmp_path,
+    )
+
+    assert result["error"] is None
+    assert result["num_paid_requests"] == 0
+    assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" in result["result_text"]
+    assert "| คุณสมบัติ |" in result["result_text"]
