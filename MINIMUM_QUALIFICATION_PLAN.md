@@ -26,20 +26,22 @@ Beta requires all of the following in representative UI-equivalent real-model ru
 
 We reconciled `FULL_BETA_GAP_AUDIT.md`, `AGENT_PRODUCTION_READINESS_SPEC.md`, `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md` and the current UI code (`src/wizard_ui.js`, `src/orchestrator.py`, `config/agent_instructions.json`) to determine which capabilities are actually open.
 
-| Agent | UI-open capability | Current real-model evidence | Smallest test case | Paid / Offline | Expected calls | Conservative cost | Hard cap | Classification |
+| Agent | UI-open capability | Current real-model evidence | Smallest test case | Paid / Offline | Expected calls | Expected cost | Hard cap | Classification |
 |-------|--------------------|-----------------------------|--------------------|----------------|----------------|-------------------:|----------|----------------|
-| **A1** | Multi-product selection (`product_ids` in `orchestrator.py:542+`, display in `wizard_ui.js:1132`) | **PASS** — `A1_multi_product_spec` ran 2 calls, $0.028, K2/K3 separate, no cross-contamination | `A1_multi_product_spec` (`product_ids=["Lagenio K2", "Lagenio K3"]`) | **Done** | 2 (generate + review) | `$0.10` conservative / $0.028 actual | `product_spec` cap 2 | **Required for current UI** |
+| **A1** | Multi-product selection (`product_ids` in `orchestrator.py:542+`, display in `wizard_ui.js:1132`) | **PASS** — `A1_multi_product_spec` ran 2 calls, $0.028, K2/K3 separate, no cross-contamination | `A1_multi_product_spec` (`product_ids=["Lagenio K2", "Lagenio K3"]`) | **Done** | 2 (generate + review) | `$0.10` expected / $0.028 actual | `product_spec` cap 2 | **Required for current UI** |
 | **A2** | Persistent Agent Settings (`config/agent_instructions.json:49-134`, `openAgentSettings` in `wizard_ui.js:470`) | `UNPROVEN` | `A2_agent_settings_effect` — run with `agent_settings_override` and focused brief | **Paid** | 3 (1 text + 2 web_search) | `$0.35` | `competitor_analysis` cap 3 | **Required** |
 | **A2** | Quick Brief deliverable steering (Quick Brief field in `wizard_ui.js:149`, table renderer in `competitor_evidence.py:350+`) | `UNPROVEN` | `A2_flexible_deliverable` — brief: "สรุปแบบ bullet points ไม่ใช่ตาราง" | **Paid** | 3 (1 text + 2 web_search) | `$0.35` | `competitor_analysis` cap 3 | **Required for Full Beta** |
 | **A3** | Persistent Agent Settings (`config/agent_instructions.json:136-148`, `openAgentSettings`) | `UNPROVEN` | `A3_agent_settings_effect` — run with budget/forbid/discount override and brief | **Paid** | 4 (1 text + 1 web_search + 1 review + 1 repair) | `$0.20` | `campaign_strategy` cap 4 | **Required** |
-| **A4** | TikTok platform (`wizard_ui.js:598`, `platform: ['facebook','tiktok']`) | `UNPROVEN` | `A4_tiktok_text_image` — `platforms=["tiktok"], content_count=1, auto_image=True` | **Paid** | 4 (3 text + 1 image) | `$0.23` | `content_creator` cap 6 | **Required for current UI** |
-| **A4** | Multi-post count 1–20 (`wizard_ui.js:609`, `min=1 max=20`) | `UNPROVEN` | `A4_multi_post_facebook` — `platforms=["facebook"], content_count=2, auto_image=True` | **Paid** | 5 (3 text + 2 images) | `$0.31` | `content_creator` cap 6 | **Required for current UI** |
+| **A4** | TikTok platform (`wizard_ui.js:598`, `platform: ['facebook','tiktok']`) | **PASS** — `A4_tiktok_text_image` ran 3 calls, $0.105, 1 TikTok post with 9:16 image prompt and actual PNG | `A4_tiktok_text_image` — `platforms=["tiktok"], content_count=1, auto_image=True` | **Done** | 3 (2 text + 1 image) | `$0.18` expected / $0.105 actual | `content_creator` cap 6 | **Required for current UI** |
+| **A4** | Multi-post count 1–20 (`wizard_ui.js:609`, `min=1 max=20`) | **PASS (functional)** — `A4_multi_post_facebook` ran 6 calls, $0.216, 2 distinct Facebook posts + 2 actual PNG images; cost-plan defect remediated offline | `A4_multi_post_facebook` — `platforms=["facebook"], content_count=2, auto_image=True` | **Done / no rerun** | 6 (4 text + 2 images) | `$0.36` expected / $0.216 actual | `content_creator` cap 6 | **Required for current UI** |
 
 **Already proven — do not rerun:**
 - A1 single-product one-page spec with image (`PAID_SMOKE_QUALIFICATION_REPORT.md` A1)
 - A2 default web discovery with evidence (`PAID_SMOKE_QUALIFICATION_REPORT.md` A2)
 - A3 web search + flexible executive brief + validator (`PAID_RERUN_A3_A4_REPORT.md` A3)
 - A4 Facebook single-post + actual PNG image (`PAID_RERUN_A3_A4_REPORT.md` A4 re-run)
+- A4 TikTok 1 post + 9:16 PNG image (`PAID_RERUN_A3_A4_REPORT.md` A4 re-run)
+- A4 multi-post Facebook 2 distinct posts + 2 actual PNG images (`PAID_RERUN_A3_A4_REPORT.md` A4 multi-post)
 - A4 ask-before media (`tests/test_bug3_ask_mode_no_auto_media.py`)
 
 ---
@@ -63,15 +65,15 @@ We reconciled `FULL_BETA_GAP_AUDIT.md`, `AGENT_PRODUCTION_READINESS_SPEC.md`, `A
 
 Qualify **every control that the UI currently exposes**. No scope reduction.
 
-| Case | Conservative cost |
+| Case | Expected cost |
 |------|-------------------|
 | A1 multi-product spec (after harness ready) | `$0.10` |
 | A2 Agent Settings effect | `$0.35` |
 | A2 flexible deliverable | `$0.35` |
 | A3 Agent Settings effect | `$0.20` |
-| A4 TikTok 1 post + image | `$0.23` |
-| A4 multi-post Facebook 2 | `$0.31` |
-| **Total conservative** | **$1.54** |
+| A4 TikTok 1 post + image | `$0.18` |
+| A4 multi-post Facebook 2 | `$0.36` |
+| **Total expected** | **$1.54** |
 
 **What you get:**
 - Full Beta label for all 4 Agents with current UI open.
@@ -92,11 +94,11 @@ Close or hide several UI controls, then qualify only what remains open.
 | Post count input (`wizard_ui.js:609`, `min=1 max=20`) | Limit Agent 4 to 1 post per run; cap `max=1` or hide the count input |
 | Quick Brief deliverable-format steering for Competitor Analysis (`wizard_ui.js:149` Quick Brief field) | Limit Agent 2 to table-only output; document that Quick Brief does not change competitor report format |
 
-| Case to run | Conservative cost |
+| Case to run | Expected cost |
 |-------------|-------------------|
 | A2 Agent Settings effect | `$0.35` |
 | A3 Agent Settings effect | `$0.20` |
-| **Total conservative** | **$0.55** |
+| **Total expected** | **$0.55** |
 
 **What you get:**
 - A valid, honest Limited Beta with a smaller public scope.
@@ -133,14 +135,19 @@ No real-model qualification now. Keep as roadmap.
 
 All costs are computed from `config/qualification.yaml` with `qual_runner.dry_run_cost_plan()`; no paid calls were made.
 
-| Case | Expected calls | Conservative cost | Hard call cap |
+| Case | Expected calls | Expected cost | Hard call cap |
 |------|----------------|-------------------:|---------------|
 | A1 multi-product spec | 2 | `$0.10` | `product_spec` 2 |
 | A2 Agent Settings effect | 3 | `$0.35` | `competitor_analysis` 3 |
 | A2 flexible deliverable | 3 | `$0.35` | `competitor_analysis` 3 |
 | A3 Agent Settings effect | 4 | `$0.20` | `campaign_strategy` 4 |
-| A4 TikTok 1 post + image | 4 | `$0.23` | `content_creator` 6 |
-| A4 multi-post Facebook 2 | 5 | `$0.31` | `content_creator` 6 |
+| A4 TikTok 1 post + image | 3 (2 text + 1 image) | `$0.18` | `content_creator` 6 |
+| A4 multi-post Facebook 2 | 6 (4 text + 2 images) | `$0.36` | `content_creator` 6 |
+
+**Hard-cap feasibility / stop condition:**
+- `A4 multi-post Facebook 2` uses the full `content_creator` hard cap of 6 calls (0 spare calls).
+- Conditional repair or any extra call per post would exceed the cap and `PaidCallGuard` would block before the image-generation calls, so the run would fail to produce the second image.
+- Current `max_review_iterations` for `content_creator` is 1, so the happy path (generate + one review per post + media) fits exactly; the estimate above is the expected happy path, not a conservative worst case.
 
 ---
 

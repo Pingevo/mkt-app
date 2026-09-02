@@ -819,16 +819,27 @@ def dry_run_cost_plan(
     web_calls = 0
     media_calls = 0
 
-    # text generation for the agent's main output
-    calls.append({"kind": "text", "label": f"{agent_key}:generate"})
-    upper += float(cost_per.get("text", 0.05))
+    # content_creator runs per (platform, post) and each run gets generate + review
+    _content_count = 1
+    if agent_key == "content_creator":
+        _platforms = platforms or ["facebook"]
+        _n_plat = max(1, len(_platforms))
+        _content_count = max(1, (content_count + _n_plat - 1) // _n_plat)
+        for post_i in range(_content_count):
+            calls.append({"kind": "text", "label": f"{agent_key}:generate_post_{post_i + 1}"})
+            upper += float(cost_per.get("text", 0.05))
+            for r in range(max_review):
+                calls.append({"kind": "text", "label": f"{agent_key}:review_{r + 1}_post_{post_i + 1}"})
+                upper += float(cost_per.get("text", 0.05))
+    else:
+        # text generation for the agent's main output
+        calls.append({"kind": "text", "label": f"{agent_key}:generate"})
+        upper += float(cost_per.get("text", 0.05))
 
-    # review/repair per agent config
-    for i in range(max_review):
-        calls.append({"kind": "text", "label": f"{agent_key}:review_{i + 1}"})
-        upper += float(cost_per.get("text", 0.05))
-        calls.append({"kind": "text", "label": f"{agent_key}:repair_{i + 1}"})
-        upper += float(cost_per.get("text", 0.05))
+        # review pass per agent config (not repair, which is conditional)
+        for r in range(max_review):
+            calls.append({"kind": "text", "label": f"{agent_key}:review_{r + 1}"})
+            upper += float(cost_per.get("text", 0.05))
 
     # web-search calls: limited by competitor names in quick_brief + 1 discovery guard
     if web_search_enabled:
@@ -842,20 +853,17 @@ def dry_run_cost_plan(
             calls.append({"kind": "web_search", "label": f"{agent_key}:web_search_{i + 1}"})
             upper += float(cost_per.get("web_search", 0.15))
 
-    # content creator media calls
-    if agent_key == "content_creator":
-        _platforms = platforms or ["facebook"]
-        _n_plat = max(1, len(_platforms))
-        count_per = max(1, (content_count + _n_plat - 1) // _n_plat)
+    # content creator media calls (per platform per post)
+    if agent_key == "content_creator" and _platforms:
         if auto_image:
             for p in _platforms:
-                for i in range(count_per):
+                for i in range(_content_count):
                     calls.append({"kind": "image", "label": f"{p}:image_{i + 1}"})
                     upper += float(cost_per.get("image", 0.08))
                     media_calls += 1
         if auto_video:
             for p in _platforms:
-                for i in range(count_per):
+                for i in range(_content_count):
                     calls.append({"kind": "video", "label": f"{p}:video_{i + 1}"})
                     upper += float(cost_per.get("video", 0.60))
                     media_calls += 1
@@ -873,16 +881,26 @@ def dry_run_cost_plan(
     else:
         status = "under ceiling"
 
+    spare_calls = max_calls - len(calls)
+    feasibility = (
+        f"hard cap {max_calls} fully used; no spare calls for conditional repair; "
+        f"any repair would block after call {max_calls} and prevent remaining media calls"
+        if spare_calls <= 0 else
+        f"{spare_calls} spare call(s) available before hard cap {max_calls}"
+    )
+
     return {
         "agent_key": agent_key,
         "product_id": product_id,
         "quick_brief_summary": quick_brief[:120] if quick_brief else "(default job)",
         "expected_calls": calls,
         "max_calls": max_calls,
-        "text_calls": 1 + 2 * max_review,
+        "text_calls": _content_count * (1 + max_review),
         "web_search_calls": web_calls,
         "media_calls": media_calls,
-        "conservative_estimate": conservative,
+        "expected_estimate": conservative,
+        "feasibility_note": feasibility,
+        "spare_calls": spare_calls,
         "ceiling_stage_a": ceilings["stage_a"],
         "ceiling_total": ceilings["total"],
         "status": status,
@@ -895,8 +913,9 @@ def _print_dry_run_plan(plan: dict[str, Any]) -> None:
     print(f"  quick_brief: {plan['quick_brief_summary']!r}", flush=True)
     print(f"  max calls: {plan['max_calls']}  "
           f"(text={plan['text_calls']}, web={plan['web_search_calls']}, media={plan['media_calls']})", flush=True)
-    print(f"  conservative estimate: ${plan['conservative_estimate']:.6f} USD", flush=True)
+    print(f"  expected (happy-path) estimate: ${plan['expected_estimate']:.6f} USD", flush=True)
     print(f"  status: {plan['status']}", flush=True)
+    print(f"  feasibility: {plan['feasibility_note']}", flush=True)
     print(f"  ceiling (stage A): ${plan['ceiling_stage_a']:.2f} USD", flush=True)
     for c in plan["expected_calls"]:
         print(f"    - {c['kind']:15s} {c['label']}", flush=True)

@@ -32,8 +32,8 @@ def test_dry_run_cost_plan_content_creator():
     assert plan["agent_key"] == "content_creator"
     assert plan["max_calls"] > 0
     assert plan["media_calls"] > 0
-    assert plan["conservative_estimate"] > 0
-    assert plan["conservative_estimate"] <= plan["ceiling_stage_a"]
+    assert plan["expected_estimate"] > 0
+    assert plan["expected_estimate"] <= plan["ceiling_stage_a"]
     assert any(c["kind"] == "image" for c in plan["expected_calls"])
     assert all(c.get("kind") for c in plan["expected_calls"])
 
@@ -49,7 +49,7 @@ def test_dry_run_cost_plan_competitor_analysis_counts_web_search():
         quick_brief="Compare with imoo Z1 and myFirst R1s",
     )
     assert plan["web_search_calls"] > 0
-    assert plan["conservative_estimate"] > 0
+    assert plan["expected_estimate"] > 0
     assert plan["max_calls"] == qual_runner._load_qualification_config()["default_max_calls"]["competitor_analysis"]
     assert plan["status"].startswith("exceeds call cap") or len(plan["expected_calls"]) <= plan["max_calls"]
 
@@ -484,8 +484,8 @@ def test_qual_runner_content_creator_image_9_16_flow(monkeypatch, tmp_path):
     assert captured.get("generate_kwargs", {}).get("aspect_ratio") == "9:16"
 
 
-def test_a4_tiktok_artifact_replay_no_image_prompts():
-    """Original A4 TikTok artifact had no image_prompts; parser correctly produces empty images list."""
+def test_a4_tiktok_artifact_replay_has_image_9_16():
+    """A4 TikTok rerun artifact now carries a 9:16 image prompt; parser extracts it correctly."""
     from src import media_gen
     from pathlib import Path
 
@@ -494,6 +494,66 @@ def test_a4_tiktok_artifact_replay_no_image_prompts():
     content = artifact.read_text(encoding="utf-8")
     parsed = media_gen.parse_media_prompts(content)
 
-    assert parsed["images"] == []
-    assert len(parsed["videos"]) == 1
-    assert parsed["videos"][0].get("aspect_ratio") == "9:16"
+    assert len(parsed["images"]) == 1
+    assert parsed["images"][0].get("aspect_ratio") == "9:16"
+    assert parsed["videos"] == []
+
+
+def test_dry_run_cost_plan_content_creator_facebook_single_has_spare_calls():
+    """Single Facebook post leaves spare calls for a possible repair before hitting the hard cap."""
+    import qual_runner
+
+    plan = qual_runner.dry_run_cost_plan(
+        agent_key="content_creator",
+        product_id="Lagenio K2",
+        quick_brief="Single Facebook post with image",
+        content_count=1,
+        platforms=["facebook"],
+        auto_image=True,
+        auto_video=False,
+    )
+    assert plan["expected_estimate"] == 0.18
+    assert plan["spare_calls"] == 3
+    assert plan["status"] == "under ceiling"
+
+
+def test_dry_run_cost_plan_content_creator_facebook_multi_post():
+    """content_count=2 on a single Facebook platform counts per-post text review and 2 images."""
+    import qual_runner
+
+    plan = qual_runner.dry_run_cost_plan(
+        agent_key="content_creator",
+        product_id="Lagenio K2",
+        quick_brief="Create 2 distinct Facebook posts with images",
+        content_count=2,
+        platforms=["facebook"],
+        auto_image=True,
+        auto_video=False,
+    )
+    assert plan["max_calls"] == qual_runner._load_qualification_config()["default_max_calls"]["content_creator"]
+    assert plan["text_calls"] == 4
+    assert plan["media_calls"] == 2
+    assert plan["expected_estimate"] == 0.36
+    assert len(plan["expected_calls"]) == 6
+    assert plan["spare_calls"] == 0
+    assert plan["status"] == "under ceiling"
+    assert "no spare calls for conditional repair" in plan["feasibility_note"]
+    image_labels = [c["label"] for c in plan["expected_calls"] if c["kind"] == "image"]
+    assert image_labels == ["facebook:image_1", "facebook:image_2"]
+
+
+def test_paid_call_guard_content_creator_hard_cap_6():
+    """PaidCallGuard uses the configured default_max_calls for content_creator (6)."""
+    import qual_runner
+
+    cfg = qual_runner._load_qualification_config()
+    configured = cfg["default_max_calls"]["content_creator"]
+    guard = qual_runner.PaidCallGuard("A", configured)
+    assert guard.max_calls == 6
+    # Cap is reported by the dry-run planner as the hard ceiling.
+    assert qual_runner.dry_run_cost_plan(
+        agent_key="content_creator",
+        content_count=2,
+        platforms=["facebook"],
+        auto_image=True,
+    )["max_calls"] == 6
