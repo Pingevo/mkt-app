@@ -239,8 +239,14 @@ class CompetitorReportRenderer:
 
     _NO_EVIDENCE = "*ไม่มีหลักฐานยืนยัน*"
 
-    def __init__(self, research: ResearchResponse, relevant_annotations: list[dict] | None = None):
+    def __init__(
+        self,
+        research: ResearchResponse,
+        relevant_annotations: list[dict] | None = None,
+        quick_brief: str = "",
+    ):
         self.research = research
+        self.quick_brief = (quick_brief or "").lower().strip()
         self.rel_map: dict[str, dict] = {}
         for a in relevant_annotations or []:
             key = (a.get("url") or "").lower().rstrip("/")
@@ -347,13 +353,138 @@ class CompetitorReportRenderer:
         selected = [f for f in self.DEFAULT_FIELDS if f in by_field]
         return tuple(selected)
 
+    def _classify_recommendations(
+        self,
+    ) -> tuple[list[EvidenceBasedRecommendation], list[StrategicHypothesis]]:
+        """Split recommendations into verified and hypothesis, same as table view."""
+        validated_urls = {
+            (ev.url or "").lower().rstrip("/")
+            for ev in self.research.evidence
+            if self._validate_evidence(ev)[0]
+        }
+        promoted_hypotheses: list[StrategicHypothesis] = []
+        evidence_based: list[EvidenceBasedRecommendation] = []
+
+        for rec in self.research.evidence_based_recommendations:
+            urls_ok = all(
+                (u or "").lower().rstrip("/") in validated_urls
+                for u in rec.supporting_evidence_urls
+            )
+            if urls_ok and rec.supporting_evidence_urls:
+                evidence_based.append(rec)
+            else:
+                promoted_hypotheses.append(StrategicHypothesis(
+                    text=rec.text,
+                    rationale="เดิมอ้างเป็น evidence_based แต่ URL รองรับไม่ผ่าน validation",
+                ))
+
+        all_hypotheses = list(self.research.strategic_hypotheses) + promoted_hypotheses
+        return evidence_based, all_hypotheses
+
+    def _wants_brief(self) -> bool:
+        """Detect explicit non-table deliverable requests from the Quick Brief."""
+        text = self.quick_brief
+        brief_signals = [
+            "bullet",
+            "executive brief",
+            "ห้ามใช้ตาราง",
+            "ไม่ใช้ตาราง",
+            "ไม่ตาราง",
+            "ห้ามตาราง",
+        ]
+        return any(s in text for s in brief_signals)
+
+    def _render_brief(self, product_spec: str) -> str:
+        """Render a bullet executive brief from the same validated evidence.
+
+        No new facts are introduced; URLs and provenance are preserved.
+        Hypotheses and uncertainty are labelled the same way as the table view.
+        """
+        by_field = self._index_validated()
+        fields = self._fields_to_render(product_spec)
+        product_cells = self._product_cells(product_spec, fields)
+
+        competitors = [
+            comp
+            for comp in self.research.competitor_names
+            if any(comp in by_field.get(f, {}) for f in fields)
+        ]
+
+        if not fields or not competitors:
+            return self._render_limited_analysis(product_spec)
+
+        lines = [
+            f"# Executive Brief: {self.research.target_model}",
+            "",
+            "## คู่แข่งที่วิเคราะห์",
+            "",
+        ]
+        for comp in competitors:
+            lines.append(f"- {comp}")
+
+        # product spec summary
+        lines.extend(["", "## สินค้าของเรา", ""])
+        for f in fields:
+            label = FIELD_CATALOG[f]["label"]
+            value = product_cells.get(f, "-")
+            lines.append(f"- **{label}:** {value}")
+
+        for comp in competitors:
+            lines.extend(["", f"## {comp}", ""])
+            for f in fields:
+                label = FIELD_CATALOG[f]["label"]
+                entry = by_field.get(f, {}).get(comp)
+                if entry:
+                    ev, a = entry
+                    title = (a.get("title") or ev.title or "แหล่งอ้างอิง").strip()
+                    lines.append(
+                        f"- **{label}:** {ev.claim} "
+                        f"[{title}]({a.get('url', ev.url)})"
+                    )
+                else:
+                    lines.append(f"- **{label}:** {self._NO_EVIDENCE}")
+
+        # Evidence-based recommendations: same classification as table view
+        evidence_based, all_hypotheses = self._classify_recommendations()
+
+        if evidence_based:
+            lines.extend(["", "## ข้อเสนอแนะที่มีหลักฐานรองรับ", ""])
+            for rec in evidence_based:
+                lines.append(f"- {rec.text}")
+        if all_hypotheses:
+            lines.extend([
+                "",
+                "## สมมติฐานเชิงกลยุทธ์ (ยังไม่ยืนยัน)",
+                "",
+                "*ข้อความในส่วนนี้เป็นสมมติฐาน ไม่ใช่ข้อเท็จจริงที่ผ่านการตรวจสอบ*",
+                "",
+            ])
+            for h in all_hypotheses:
+                lines.append(f"- {h.text}")
+                if h.rationale:
+                    lines.append(f"  - เหตุผล: {h.rationale}")
+
+        if self.research.uncertainty:
+            lines.extend(["", "## ข้อจำกัด", ""])
+            for u in self.research.uncertainty:
+                lines.append(f"- {u}")
+
+        return "\n".join(lines)
+
     def render(self, product_spec: str) -> str:
         """Return deterministic Markdown report.
+
+        If the Quick Brief asks for a non-table deliverable, return a bullet
+        executive brief instead.  Presentation changes; evidence and guardrails
+        stay the same.
 
         If no evidence passes validation, return a limited analysis report
         instead of an empty stub — the user gets a usable summary of what
         was found and what's missing, rather than a blank report.
         """
+        if self._wants_brief():
+            return self._render_brief(product_spec)
+
         by_field = self._index_validated()
         fields = self._fields_to_render(product_spec)
         product_cells = self._product_cells(product_spec, fields)
@@ -397,35 +528,12 @@ class CompetitorReportRenderer:
         # If any URL is not validated, demote the recommendation to a
         # strategic hypothesis (don't drop it — the model's insight may
         # still be useful, but it must be labeled as unverified).
-        validated_urls = {
-            (ev.url or "").lower().rstrip("/")
-            for ev in self.research.evidence
-            if self._validate_evidence(ev)[0]
-        }
-        promoted_hypotheses: list[StrategicHypothesis] = []
-
-        evidence_based: list[EvidenceBasedRecommendation] = []
-        for rec in self.research.evidence_based_recommendations:
-            urls_ok = all(
-                (u or "").lower().rstrip("/") in validated_urls
-                for u in rec.supporting_evidence_urls
-            )
-            if urls_ok and rec.supporting_evidence_urls:
-                evidence_based.append(rec)
-            else:
-                # Demote to hypothesis — unsupported claim must not appear
-                # as a verified recommendation.
-                promoted_hypotheses.append(StrategicHypothesis(
-                    text=rec.text,
-                    rationale="เดิมอ้างเป็น evidence_based แต่ URL รองรับไม่ผ่าน validation",
-                ))
+        evidence_based, all_hypotheses = self._classify_recommendations()
 
         if evidence_based:
             lines.extend(["", "## ข้อเสนอแนะที่มีหลักฐานรองรับ", ""])
             for rec in evidence_based:
                 lines.append(f"- {rec.text}")
-
-        all_hypotheses = list(self.research.strategic_hypotheses) + promoted_hypotheses
         if all_hypotheses:
             lines.extend([
                 "",

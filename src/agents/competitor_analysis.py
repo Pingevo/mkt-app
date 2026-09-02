@@ -147,6 +147,9 @@ class CompetitorAnalysisAgent(BaseAgent):
         # renderer can match evidence URLs against relevant annotations.
         self._reassess_for_default_discovery(json_output)
 
+        # Keep quick_brief for the final renderer so it can choose presentation.
+        self._quick_brief = quick_brief
+
         ok, err, research = self._validate_research_json(json_output)
         final_json = json_output
         if not ok:
@@ -163,7 +166,11 @@ class CompetitorAnalysisAgent(BaseAgent):
         self._last_validated_research_json = final_json
 
         relevant = getattr(self, "_last_relevant_annotations", []) or []
-        renderer = CompetitorReportRenderer(research, relevant_annotations=relevant)
+        renderer = CompetitorReportRenderer(
+            research,
+            relevant_annotations=relevant,
+            quick_brief=getattr(self, "_quick_brief", ""),
+        )
 
         # Stage 3: render Markdown from validated evidence only
         markdown = renderer.render(self._product_spec)

@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 
 from src.agents.competitor_analysis import CompetitorAnalysisAgent
-from src.agents.competitor_evidence import EVIDENCE_SYSTEM_PROMPT, RESEARCH_RESPONSE_SCHEMA
+from src.agents.competitor_evidence import (
+    CompetitorReportRenderer,
+    EVIDENCE_SYSTEM_PROMPT,
+    RESEARCH_RESPONSE_SCHEMA,
+    ResearchResponse,
+)
 from src.config_loader import load_config, get_agent_config
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "agent2_quality_good.json"
@@ -419,6 +424,81 @@ def test_canonical_fields_render_two_competitor_facts_and_one_thai():
     assert outcome["thai_fact_cells"] >= 1
     assert outcome["cited_fact_cells"] >= 2
     assert outcome["no_evidence_ratio"] < 1.0
+
+
+def test_default_renderer_uses_table():
+    """CompetitorReportRenderer defaults to table when no quick_brief requested."""
+    fixture = _load_fixture()
+    research = ResearchResponse.from_dict(json.loads(_good_research_response()))
+    renderer = CompetitorReportRenderer(research, relevant_annotations=fixture["relevant_annotations"])
+    output = renderer.render(fixture["product_spec"])
+    assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" in output
+    assert "| คุณสมบัติ |" in output
+
+
+def test_quick_brief_without_non_table_request_stays_table():
+    """A generic summary brief must not switch renderer to bullet mode."""
+    fixture = _load_fixture()
+    research = ResearchResponse.from_dict(json.loads(_good_research_response()))
+    renderer = CompetitorReportRenderer(
+        research,
+        relevant_annotations=fixture["relevant_annotations"],
+        quick_brief="สรุปคู่แข่ง",
+    )
+    output = renderer.render(fixture["product_spec"])
+    assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" in output
+    assert "| คุณสมบัติ |" in output
+
+
+def test_brief_renderer_outputs_bullets_no_table():
+    """Quick Brief asking for bullet executive brief renders bullet list with evidence URLs."""
+    fixture = _load_fixture()
+    research = ResearchResponse.from_dict(json.loads(_good_research_response()))
+    renderer = CompetitorReportRenderer(
+        research,
+        relevant_annotations=fixture["relevant_annotations"],
+        quick_brief="สรุปแบบ bullet executive brief ห้ามใช้ตาราง",
+    )
+    output = renderer.render(fixture["product_spec"])
+    assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" not in output
+    assert "| คุณสมบัติ |" not in output
+    assert "https://www.siamphone.com/smartwatch/xiaomi/watch-s3" in output
+    assert "## สมมติฐานเชิงกลยุทธ์ (ยังไม่ยืนยัน)" in output
+    assert "## ข้อจำกัด" in output
+
+
+def test_brief_renderer_demotes_unverified_recommendation_to_hypothesis():
+    """Unvalidated evidence_based_recommendation is not presented as verified fact in brief."""
+    fixture = _load_fixture()
+    data = json.loads(_good_research_response())
+    data["evidence_based_recommendations"] = [
+        {
+            "text": "เน้นหน้าจอใหญ่ของ K77",
+            "supporting_evidence_urls": ["https://untrusted.example.com/spec"],  # not in annotations
+        }
+    ]
+    research = ResearchResponse.from_dict(data)
+    renderer = CompetitorReportRenderer(
+        research,
+        relevant_annotations=fixture["relevant_annotations"],
+        quick_brief="สรุปแบบ bullet executive brief",
+    )
+    output = renderer.render(fixture["product_spec"])
+    assert "## ข้อเสนอแนะที่มีหลักฐานรองรับ" not in output
+    assert "## สมมติฐานเชิงกลยุทธ์ (ยังไม่ยืนยัน)" in output
+    assert "เน้นหน้าจอใหญ่ของ K77" in output
+
+
+def test_agent_run_respects_quick_brief_and_routes_to_brief():
+    """CompetitorAnalysisAgent passes quick_brief to renderer and returns bullet output."""
+    fixture = _load_fixture()
+    fake = FakeLLM(generate_output=_good_research_response(), annotations=fixture["relevant_annotations"])
+    agent = CompetitorAnalysisAgent(_evidence_config(), fake)
+    prompt = agent.build_prompt(fixture["product_spec"], fixture["competitor_data"])
+    result = agent.run(prompt, quick_brief="สรุปแบบ bullet executive brief ห้ามใช้ตาราง")
+    assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" not in result
+    assert "| คุณสมบัติ |" not in result
+    assert len(fake.calls) == 1
 
 
 def _evidence_template(**overrides):
