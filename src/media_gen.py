@@ -304,6 +304,7 @@ def build_visual_suffix(visual: dict[str, Any]) -> str:
     """สร้าง suffix string จาก visual.json dict แป๊ะต่อท้าย image/video prompt.
 
     รวม: keywords (ใช้), avoid (หลีกเลี่ยง), colors (hex), image_style.tone
+    รองรับ legacy visual_override ที่ image_style หรือ keywords เป็น string.
     ถ้า visual ว่าง → คืน string ว่าง (ไม่แป๊ะอะไร)
     """
     if not visual:
@@ -312,28 +313,47 @@ def build_visual_suffix(visual: dict[str, Any]) -> str:
     parts: list[str] = []
 
     # Keywords — คำที่ควรใช้ใน prompt
-    keywords = visual.get("keywords", [])
+    keywords_raw = visual.get("keywords", [])
+    if isinstance(keywords_raw, str):
+        keywords = [k.strip() for k in keywords_raw.split(",") if k.strip()]
+    elif isinstance(keywords_raw, list):
+        keywords = keywords_raw
+    else:
+        keywords = []
     if keywords:
         parts.append("Style keywords: " + ", ".join(keywords))
 
     # Colors — hex color hints
     colors = visual.get("colors", {})
-    if colors:
+    if isinstance(colors, dict):
         color_hints = [f"{k} {v}" for k, v in colors.items() if v]
         if color_hints:
             parts.append("Brand colors: " + ", ".join(color_hints))
 
     # Image style tone + product shot
     image_style = visual.get("image_style", {})
-    tone = image_style.get("tone", "")
+    if isinstance(image_style, str):
+        tone = image_style
+        product_shot = ""
+    elif isinstance(image_style, dict):
+        tone = image_style.get("tone", "")
+        product_shot = image_style.get("product_shot", "")
+    else:
+        tone = ""
+        product_shot = ""
     if tone:
         parts.append(f"Overall tone: {tone}")
-    product_shot = image_style.get("product_shot", "")
     if product_shot:
         parts.append(f"Product shot style: {product_shot}")
 
     # Avoid — คำที่หลีกเลี่ยง
-    avoid = visual.get("avoid", [])
+    avoid_raw = visual.get("avoid", [])
+    if isinstance(avoid_raw, str):
+        avoid = [a.strip() for a in avoid_raw.split(",") if a.strip()]
+    elif isinstance(avoid_raw, list):
+        avoid = avoid_raw
+    else:
+        avoid = []
     if avoid:
         parts.append("Avoid: " + ", ".join(avoid))
 

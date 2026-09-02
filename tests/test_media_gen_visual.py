@@ -13,7 +13,10 @@ Seam ที่ทดสอบ:
   - มี colors → suffix มี color hints
   - มี image_style.tone → suffix มี tone hint
 """
+import base64
+import httpx
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -125,6 +128,70 @@ def test_build_visual_suffix_no_keywords_no_colors():
     assert "cheap" in suffix
 
 
+def test_build_visual_suffix_lagenio_k2_legacy_string_visual():
+    """รองรับ visual_override ของ Lagenio K2 จริงที่ image_style และ keywords เป็น string.
+
+    Bug ต้นเหตุ: `image_style` จาก `product_profile.json` ส่งเป็น string
+    `build_visual_suffix` เดิมเรียก `.get()` จึงพังทันทีก่อน image API.
+    """
+    from src.media_gen import build_visual_suffix
+    from src.brand_loader import load_brand_visual
+
+    visual = load_brand_visual("brand", product_id="Lagenio K2")
+    assert visual.get("image_style")  # ต้องมี image_style จาก visual_override
+    assert isinstance(visual["image_style"], str)
+
+    suffix = build_visual_suffix(visual)
+
+    assert suffix
+    assert "สดใส" in suffix, f"image_style string missing: {suffix!r}"
+    assert "kids smartwatch" in suffix, f"keywords string not split: {suffix!r}"
+    assert "Brand colors:" in suffix, f"colors missing: {suffix!r}"
+
+
+def test_generate_image_reaches_api_with_lagenio_visual(monkeypatch):
+    """สร้างภาพด้วย visual ของ Lagenio K2 ไปถึง image API request โดยไม่เสียเงิน."""
+    from src import media_gen
+    from src.brand_loader import load_brand_visual
+
+    visual = load_brand_visual("brand", product_id="Lagenio K2")
+
+    monkeypatch.setattr(media_gen, "_get_api_key", lambda: "fake-api-key")
+    monkeypatch.setattr(media_gen, "_log_media_usage", lambda *a, **k: None)
+
+    calls = []
+    original_post = httpx.Client.post
+
+    fake_png = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+
+    def fake_post(client, url, **kwargs):
+        calls.append((url, kwargs))
+        class FakeResp:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"data": [{"b64_json": fake_png}]}
+        return FakeResp()
+
+    try:
+        httpx.Client.post = fake_post
+        with tempfile.TemporaryDirectory() as td:
+            output_path = Path(td) / "test_image.png"
+            result = media_gen.generate_image(
+                "a kids smartwatch on a wrist",
+                output_path,
+                visual=visual,
+            )
+
+            assert result.get("ok") is True, result
+            assert output_path.exists()
+
+        assert len(calls) == 1
+        assert calls[0][0] == "https://openrouter.ai/api/v1/images"
+        assert calls[0][1].get("json", {}).get("model")
+    finally:
+        httpx.Client.post = original_post
+
+
 if __name__ == "__main__":
     tests = [
         test_build_visual_suffix_with_keywords_and_avoid,
@@ -135,6 +202,7 @@ if __name__ == "__main__":
         test_build_visual_suffix_with_image_style_product_shot,
         test_build_visual_suffix_with_tone_and_product_shot,
         test_build_visual_suffix_no_keywords_no_colors,
+        test_build_visual_suffix_lagenio_k2_legacy_string_visual,
     ]
     passed = 0
     failed = 0
