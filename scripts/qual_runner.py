@@ -362,6 +362,7 @@ def run_case(
     context: dict | None = None,
     agent_settings_override: dict | None = None,
     output_dir: Path | None = None,
+    product_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run one UI-equivalent case and capture all evidence.
 
@@ -369,6 +370,8 @@ def run_case(
     - sets orch.product_id = folder
     - calls the same orch.run_* method
     - captures usage log entries + Hub receipts
+    - product_ids: optional list for multi-product runs; joined with " + " to
+      match production multi-product flow in orchestrator.py
     """
     # Pre-flight dry-run plan: no model calls, just expected calls + upper-bound cost
     plan = dry_run_cost_plan(
@@ -395,9 +398,19 @@ def run_case(
     if agent_settings_override:
         _apply_agent_settings(agent_key, agent_settings_override)
 
-    orch = make_orchestrator(product_id)
+    # Ensure session baseline is captured for this qualification run.
+    if _SESSION_BASELINE is None:
+        _init_session_baseline()
+
+    # Multi-product: join with " + " exactly like the production UI/orchestrator path.
+    # Only fall back to single product when product_ids is None; an empty list
+    # would be a programming error, not a silent single-product fallback.
+    folder_list = product_ids if product_ids is not None else [product_id]
+    effective_product_id = " + ".join(folder_list)
+
+    orch = make_orchestrator(effective_product_id)
     llm = make_llm(orch)
-    orch.product_id = product_id
+    orch.product_id = effective_product_id
 
     # Snapshot usage log before run
     log_offset = snapshot_usage_log_offset(USAGE_LOG_PATH)
@@ -405,6 +418,8 @@ def run_case(
     set_usage_reference(run_ref)
     set_usage_metadata({
         "product_id": product_id,
+        "product_ids": product_ids,
+        "effective_product_id": effective_product_id,
         "agent": agent_key,
         "run_ref": run_ref,
         "case_id": case_id,
@@ -424,7 +439,7 @@ def run_case(
                 image_paths = orch._get_product_image_paths()
 
                 if agent_key == "product_spec":
-                    raw_data = product_db.get_scoped_context_text([product_id])
+                    raw_data = product_db.get_scoped_context_text(folder_list)
                     if not raw_data.strip():
                         raw_data = ""
                     result_text = orch.run_product_spec(
@@ -454,7 +469,7 @@ def run_case(
                     try:
                         from src import content_history
                         _product_history_text = content_history.format_product_history_for_prompt(
-                            PROJECT_ROOT, product_id,
+                            PROJECT_ROOT, effective_product_id,
                         )
                     except Exception:
                         _product_history_text = ""
@@ -555,6 +570,8 @@ def run_case(
         "case_id": case_id,
         "agent_key": agent_key,
         "product_id": product_id,
+        "product_ids": product_ids,
+        "effective_product_id": effective_product_id,
         "quick_brief": quick_brief,
         "ui_options": {
             "content_count": content_count,

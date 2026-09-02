@@ -212,3 +212,103 @@ def test_paid_call_guard_uses_web_search_reserve_for_tool_calls(monkeypatch):
         {"url": "https://openrouter.ai/api/v1/chat/completions", "kind": "web_search", "allowed": True},
         {"url": "https://openrouter.ai/api/v1/chat/completions", "kind": "web_search", "allowed": True},
     ]
+
+
+def test_qual_runner_run_case_accepts_product_ids(monkeypatch, tmp_path):
+    """run_case accepts product_ids list and joins them like the production multi-product path."""
+    import qual_runner
+    from src.orchestrator import Orchestrator
+
+    captured = {}
+
+    def fake_run_product_spec(orch_self, raw_data, *args, **kwargs):
+        captured["raw_data"] = raw_data
+        return "ok"
+
+    def fake_make_llm(orch):
+        return MagicMock()
+
+    monkeypatch.setattr(Orchestrator, "run_product_spec", fake_run_product_spec)
+    monkeypatch.setattr(qual_runner, "make_llm", fake_make_llm)
+    monkeypatch.setattr(qual_runner, "_init_session_baseline", lambda: None)
+
+    evidence = qual_runner.run_case(
+        case_id="A1_multi_product_spec",
+        agent_key="product_spec",
+        product_id="Lagenio K2",
+        product_ids=["Lagenio K2", "Lagenio K3"],
+        quick_brief="เปรียบเทียบสเปคทั้งสองรุ่น",
+        output_dir=tmp_path,
+    )
+
+    assert evidence["product_ids"] == ["Lagenio K2", "Lagenio K3"]
+    assert evidence["effective_product_id"] == "Lagenio K2 + Lagenio K3"
+    assert "K2" in captured["raw_data"]
+    assert "K3" in captured["raw_data"]
+    assert captured["raw_data"].count("รหัสสินค้า:") == 2
+
+
+def test_qual_runner_run_case_single_product_no_product_ids(monkeypatch, tmp_path):
+    """product_ids=None keeps the single-product path and does not invent a multi-product ID."""
+    import qual_runner
+    from src.orchestrator import Orchestrator
+
+    captured = {}
+
+    def fake_run_product_spec(orch_self, raw_data, *args, **kwargs):
+        captured["raw_data"] = raw_data
+        return "ok"
+
+    def fake_make_llm(orch):
+        return MagicMock()
+
+    monkeypatch.setattr(Orchestrator, "run_product_spec", fake_run_product_spec)
+    monkeypatch.setattr(qual_runner, "make_llm", fake_make_llm)
+    monkeypatch.setattr(qual_runner, "_init_session_baseline", lambda: None)
+
+    evidence = qual_runner.run_case(
+        case_id="A1_single_product_spec",
+        agent_key="product_spec",
+        product_id="Lagenio K2",
+        quick_brief="",
+        output_dir=tmp_path,
+    )
+
+    assert evidence["product_ids"] is None
+    assert evidence["effective_product_id"] == "Lagenio K2"
+    assert " + " not in evidence["effective_product_id"]
+    assert "K2" in captured["raw_data"]
+    assert captured["raw_data"].count("รหัสสินค้า:") == 1
+
+
+def test_qual_runner_run_case_multi_product_no_cross_contamination(monkeypatch, tmp_path):
+    """multi-product raw_data keeps distinct scoped context blocks, not a merged single ID."""
+    import qual_runner
+    from src.orchestrator import Orchestrator
+
+    captured = {}
+
+    def fake_run_product_spec(orch_self, raw_data, *args, **kwargs):
+        captured["raw_data"] = raw_data
+        return "ok"
+
+    def fake_make_llm(orch):
+        return MagicMock()
+
+    monkeypatch.setattr(Orchestrator, "run_product_spec", fake_run_product_spec)
+    monkeypatch.setattr(qual_runner, "make_llm", fake_make_llm)
+    monkeypatch.setattr(qual_runner, "_init_session_baseline", lambda: None)
+
+    qual_runner.run_case(
+        case_id="A1_multi_product_spec",
+        agent_key="product_spec",
+        product_id="Lagenio K2",
+        product_ids=["Lagenio K2", "Lagenio K3"],
+        output_dir=tmp_path,
+    )
+
+    raw = captured["raw_data"]
+    assert raw.count("รหัสสินค้า:") == 2
+    assert "K2" in raw
+    assert "K3" in raw
+    assert "Lagenio K2 + Lagenio K3" not in raw  # must not appear as one bogus product id
