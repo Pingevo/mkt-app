@@ -363,6 +363,7 @@ def run_case(
     agent_settings_override: dict | None = None,
     output_dir: Path | None = None,
     product_ids: list[str] | None = None,
+    resource_context: str = "",
 ) -> dict[str, Any]:
     """Run one UI-equivalent case and capture all evidence.
 
@@ -444,10 +445,12 @@ def run_case(
                         raw_data = ""
                     result_text = orch.run_product_spec(
                         raw_data, image_paths, llm=llm, quick_brief=quick_brief,
+                        resource_context=resource_context,
                     )
                 elif agent_key == "competitor_analysis":
                     result_text = orch.run_competitor_analysis(
                         "", None, llm=llm, quick_brief=quick_brief,
+                        resource_context=resource_context,
                     )
                 elif agent_key == "campaign_strategy":
                     # Fix #3: pass competitor analysis text if provided in context
@@ -456,6 +459,7 @@ def run_case(
                         competitor_text = context.get("competitor_analysis", "")
                     result_text = orch.run_campaign_strategy(
                         "", competitor_text, llm=llm, quick_brief=quick_brief,
+                        resource_context=resource_context,
                     )
                 elif agent_key == "content_creator":
                     # UI path: loops per platform, count_per_platform posts each
@@ -519,6 +523,7 @@ def run_case(
                                 "", analysis_text, campaign_text,
                                 llm=llm, quick_brief=multi_brief,
                                 media_type=media_type,
+                                resource_context=resource_context,
                             )
                             try:
                                 parsed = json.loads(result)

@@ -30,6 +30,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from src import product_db
+from src.run_context import build_multimodal_content
 
 JUDGE_MODEL = "openai/gpt-5.6-sol"
 APPROVED_CAP = 0.15
@@ -37,6 +38,11 @@ ABSOLUTE_STOP_CAP = 0.20
 MAX_TOKENS = 4000
 PROMPT_PRICE = 0.000001
 COMPLETION_PRICE = 0.000005
+
+SOURCE_GROUNDED_RULE = (
+    "ห้ามอ้างคุณสมบัติหรือความสามารถใด (เช่น video call) หากไม่มีข้อมูลรองรับโดยตรงใน source pack; "
+    "หากไม่พบข้อมูลให้ระบุว่า 'ไม่มีข้อมูลระบุ' เท่านั้น"
+)
 
 RUBRIC = {
     "Usefulness": "1=no value, 5=highly useful",
@@ -55,7 +61,7 @@ SCENARIOS = [
         "id": "S1",
         "product_ids": ["Lagenio K2", "Lagenio K3"],
         "user_request": "กรุณาสร้างสเปคสินค้าแบบ one-page จากข้อมูลสินค้าและรูปภาพต่อไปนี้",
-        "quick_brief": "",
+        "quick_brief": "one-page",
         "resource_context": "",
         "include_images": True,
     },
@@ -183,19 +189,39 @@ class M6JudgeGuard:
         httpx.Client.post = self._original_post
 
 
+def _get_brand_guidelines() -> str:
+    brand_dir = PROJECT_ROOT / "brand"
+    parts: list[str] = []
+    for name in ["brand_profile.md", "tone_of_voice.md", "visual_guidelines.md", "terms.json"]:
+        p = brand_dir / name
+        if p.exists():
+            parts.append(f"--- {name} ---\n{p.read_text(encoding='utf-8')}")
+    return "\n\n".join(parts) if parts else ""
+
+
 def _get_source_pack(scenario: dict) -> str:
     product_text = product_db.get_scoped_context_text(scenario["product_ids"])
+    brand = _get_brand_guidelines()
     lines = [
         "=== Product / source pack ===",
         product_text,
         "",
-        f"=== User request ===\n{scenario['user_request']}",
+        f"=== Source-grounded rule ===\n{SOURCE_GROUNDED_RULE}",
     ]
+    if brand:
+        lines.extend(["", f"=== Brand guidelines ===\n{brand}"])
+    lines.extend(["", f"=== User request ===\n{scenario['user_request']}"])
     if scenario["quick_brief"]:
         lines.append(f"=== Quick brief ===\n{scenario['quick_brief']}")
     if scenario["resource_context"]:
         lines.append(f"=== Agent settings ===\n{scenario['resource_context']}")
     return "\n".join(lines)
+
+
+def _get_image_paths_for_judge(scenario: dict) -> tuple[str, ...]:
+    if not scenario.get("include_images"):
+        return ()
+    return tuple(_get_image_paths(scenario, scenario["product_ids"][0])[:2])
 
 
 def _get_image_paths(scenario: dict, product_id: str) -> list[str]:
@@ -205,15 +231,16 @@ def _get_image_paths(scenario: dict, product_id: str) -> list[str]:
     return list(_get_product_image_paths(product_id))[:2]
 
 
-def _build_messages(source_pack: str, output_x: str, output_y: str) -> list[dict[str, Any]]:
+def _build_messages(source_pack: str, output_x: str, output_y: str, image_paths: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     system = (
         "You are an impartial, independent judge evaluating two anonymous AI-generated outputs "
         "(X and Y) for a Thai marketing task. You must not guess which system produced which output. "
         "Score each output independently on a 1–5 scale for every dimension. "
         "Return ONLY a strict JSON object matching the requested schema. No markdown, no explanation outside JSON."
+        "\n\nSource-grounded rule: " + SOURCE_GROUNDED_RULE
     )
     rubric_lines = "\n".join(f"{k}: {v}" for k, v in RUBRIC.items())
-    user = (
+    user_text = (
         f"--- Source pack ---\n{source_pack}\n\n"
         f"--- Output X ---\n{output_x}\n\n"
         f"--- Output Y ---\n{output_y}\n\n"
@@ -229,9 +256,10 @@ def _build_messages(source_pack: str, output_x: str, output_y: str) -> list[dict
         "Factuality may have factual_errors array.\n"
         "overall must have: X_mean_score, Y_mean_score, winner, tie, decisive_reasons array, confidence (0-1), insufficient_evidence (boolean), insufficient_evidence_reasons array.\n"
     )
+    user_content = build_multimodal_content(user_text, image_paths)
     return [
         {"role": "system", "content": system},
-        {"role": "user", "content": user},
+        {"role": "user", "content": user_content},
     ]
 
 
@@ -296,7 +324,8 @@ def run_judge(scenario: dict, run_dir: Path, api_key: str) -> JudgeResult:
     try:
         source_pack = _get_source_pack(scenario)
         x, y = _read_blind_outputs(run_dir, scenario["id"])
-        messages = _build_messages(source_pack, x, y)
+        image_paths = _get_image_paths_for_judge(scenario)
+        messages = _build_messages(source_pack, x, y, image_paths)
         raw = _call_judge(messages, api_key)
         actual = getattr(httpx.Client, "_m6_last_actual", {}) or {}
         if not actual:
