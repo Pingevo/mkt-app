@@ -42,7 +42,7 @@ console = Console()
 # delivered to the user.
 # ---------------------------------------------------------------------------
 
-_SOFT_ACCEPT_CATEGORIES = frozenset({"one-page"})
+_SOFT_ACCEPT_CATEGORIES = frozenset({"one-page", "grounding"})
 
 
 def _error_category(error: str) -> str:
@@ -59,7 +59,7 @@ def _repair_budget(category: str, max_repair: int) -> int:
     brand-hard: 1 repair then raise (deterministic hard contract, no tolerance).
     format/other: max_repair then raise (existing behavior).
     """
-    if category in ("one-page", "brand-hard"):
+    if category in ("one-page", "brand-hard", "grounding"):
         return 1
     return max_repair
 
@@ -301,6 +301,14 @@ class BaseAgent:
         if instruction_block:
             sections.append(instruction_block)
 
+        # Grounding policy (Item 3) — shared three-category contract injected
+        # from config. The model uses this to distinguish supplied facts,
+        # researched facts with evidence, and inference/recommendation.
+        # Code enforces only mechanically-knowable citation provenance.
+        grounding_policy = self.config.get("grounding_policy")
+        if grounding_policy:
+            sections.append(self._render_grounding_policy(grounding_policy))
+
         # Reminder: brand context/guidelines are for internal tone only.
         # They must not be emitted, repeated, or verified in the final answer.
         if priority_text or self.brand_context or self.brand_reference:
@@ -314,6 +322,47 @@ class BaseAgent:
             )
 
         return "\n\n".join(sections)
+
+    @staticmethod
+    def _render_grounding_policy(policy: dict[str, Any]) -> str:
+        """Render the shared three-category grounding policy block.
+
+        The block tells the model to distinguish three categories of
+        information and to label inference/recommendation accordingly.
+        The code enforces only mechanically-knowable citation provenance
+        (URL membership in the allowed set); semantic grounding review
+        remains the model's responsibility.
+
+        Config shape (agents.yaml):
+            grounding_policy:
+              categories: [supplied_fact, researched_fact_with_evidence, inference_or_recommendation]
+
+        The categories list is the source of truth — the block is rendered
+        from it so no hardcoded category vocabulary lives in code.
+        """
+        categories = policy.get("categories") or []
+        if not categories:
+            return ""
+        lines = [
+            "--- นโยบายข้อมูลต้นทาง (Grounding Policy) ---",
+            "ข้อมูลที่ใช้ใน output แบ่งเป็นสามประเภท:",
+        ]
+        # Map config category names to descriptive Thai labels generically.
+        # No hardcoded vocabulary beyond the three accepted categories.
+        category_labels = {
+            "supplied_fact": "ข้อมูลที่ให้มา (supplied facts) — จาก user prompt หรือข้อมูลดิบ",
+            "researched_fact_with_evidence": "ข้อมูลที่ค้นคว้าพร้อมหลักฐาน (researched facts with evidence) — ต้องมี citation URL ที่ได้จาก web search",
+            "inference_or_recommendation": "การอนุมานหรือข้อเสนอแนะ (inference/recommendation) — ต้องติดป้ายชัดเจน ห้ามแสดงเป็นข้อเท็จจริง",
+        }
+        for cat in categories:
+            label = category_labels.get(cat, cat)
+            lines.append(f"- {label}")
+        lines.extend([
+            "ห้ามสร้างข้อเท็จจริงที่ไม่มีในข้อมูลที่ให้มาหรือไม่ได้ค้นคว้าพร้อมหลักฐาน",
+            "ถ้าไม่มีข้อมูล ให้ระบุว่า 'ไม่มีข้อมูลระบุ'",
+            "--- สิ้นสุดนโยบายข้อมูลต้นทาง ---",
+        ])
+        return "\n".join(lines)
 
     def _normalize_quick_brief(self, quick_brief: str) -> str:
         """Hook for agent-specific quick_brief normalization.
@@ -900,6 +949,28 @@ class BaseAgent:
         # M6: brand hard-rule (restricted/banned from runtime brand data)
         if self.brand_rules:
             ok, error = validate_brand_hard(output, self.brand_rules)
+            if not ok:
+                return ok, error
+
+        # M6: citation provenance (Item 3) — mechanically-knowable URL check.
+        # Only runs when web_search is active. The allowed URL set is
+        # constructed from ALL mechanically-known evidence paths:
+        # _last_annotations, _last_relevant_annotations, and
+        # _selected_evidence_urls. If a provenance path cannot be
+        # mechanically determined, no heuristic is invented for it.
+        if self.config.get("web_search"):
+            from ..output_validators import validate_citation_provenance
+            allowed_urls: set[str] = set()
+            for ann in getattr(self, "_last_annotations", []) or []:
+                url = ann.get("url") if isinstance(ann, dict) else None
+                if url:
+                    allowed_urls.add(url)
+            for ann in getattr(self, "_last_relevant_annotations", []) or []:
+                url = ann.get("url") if isinstance(ann, dict) else None
+                if url:
+                    allowed_urls.add(url)
+            allowed_urls |= getattr(self, "_selected_evidence_urls", set()) or set()
+            ok, error = validate_citation_provenance(output, allowed_urls)
             if not ok:
                 return ok, error
 

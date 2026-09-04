@@ -132,6 +132,10 @@ product_spec:
 
     ใช้ภาษาไทยเป็นหลัก กระชับ ชัดเจน ไม่ฟุ่มเฟือย
     '
+  grounding_policy:
+    categories:
+      - supplied_fact
+      - inference_or_recommendation
 competitor_analysis:
   model: google/gemini-3.5-flash
   temperature: 0.4
@@ -141,6 +145,11 @@ competitor_analysis:
   review_temperature: 0.2
   web_search: true
   evidence_mode: true
+  grounding_policy:
+    categories:
+      - supplied_fact
+      - researched_fact_with_evidence
+      - inference_or_recommendation
   response_format:
     type: json_schema
     json_schema:
@@ -287,6 +296,11 @@ campaign_strategy:
   web_search: true
   verify_urls: false
   use_brand_reference: true
+  grounding_policy:
+    categories:
+      - supplied_fact
+      - researched_fact_with_evidence
+      - inference_or_recommendation
   citation_policy:
     mode: inline_first
     fallback_annotations_when_no_inline: false
@@ -573,6 +587,10 @@ content_creator:
   output_format: json
   review_temperature: 0.2
   use_brand_reference: true
+  grounding_policy:
+    categories:
+      - supplied_fact
+      - inference_or_recommendation
   review_prompt: |
     คุณคือ "ผู้ตรวจงานคอนเทนต์" (Content QA Reviewer) ในทีมการตลาด
 

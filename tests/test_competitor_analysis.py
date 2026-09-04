@@ -416,13 +416,21 @@ def test_fabrication_repair_returns_limited_analysis():
 
 
 def test_homepage_citation_guard_triggers():
-    """citation ทีลิงก์ไป homepage ต้องถูก reject."""
+    """citation ทีลิงก์ไป homepage ต้องถูก reject.
+
+    Note: the base citation provenance check (Item 3) may fire first with a
+    "grounding:" error when the URL is not in the allowed evidence set.
+    The competitor_analysis-specific "homepage" check may also fire. Both
+    are valid rejection reasons for the same underlying issue (unverified
+    citation). This test accepts either error.
+    """
     agent, _ = _agent_with_fake_llm("", web_search=True)
     agent.build_prompt(PRODUCT_SPEC_K77, "Mibro Watch A2")
     output = "K77 เป็นสมาร์ทวอทช์ [Mibro](https://www.mi.com/th/)"
     ok, err = agent.validate_output(output)
     assert not ok
-    assert "homepage" in err
+    # Accept either the generic grounding check or the homepage-specific check
+    assert "homepage" in err or "grounding" in err
 
 
 def test_citation_repair_removes_homepage_and_falls_back_when_no_evidence():

@@ -269,3 +269,80 @@ def test_research_required_resets_annotations_between_runs():
     with pytest.raises(ValueError) as exc:
         agent.run("prompt", research_required=True)
     assert "research_required" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Citation provenance in validate_output (Item 3)
+# ---------------------------------------------------------------------------
+
+def test_validate_output_checks_citation_provenance_when_web_search_active():
+    """When web_search is active and output contains a URL not in the allowed
+    set, validate_output must return a grounding error."""
+    cfg = _config()
+    cfg["web_search"] = True
+    cfg["strict_output_sections"] = False  # don't enforce sections for this test
+    llm = FakeLLM(["dummy"])
+    agent = DummyAgent(cfg, llm)
+    # Simulate annotations captured during web search
+    agent._last_annotations = [{"url": "https://example.com/real", "title": "real"}]
+    agent._last_relevant_annotations = []
+    agent._selected_evidence_urls = set()
+    output = "See [fake](https://evil.com/fake) for data."
+    ok, err = agent.validate_output(output)
+    assert ok is False
+    assert err.startswith("grounding:")
+    assert "https://evil.com/fake" in err
+
+
+def test_validate_output_passes_citation_provenance_when_urls_in_allowed_set():
+    """When web_search is active and all URLs are in the allowed set, pass."""
+    cfg = _config()
+    cfg["web_search"] = True
+    cfg["strict_output_sections"] = False
+    llm = FakeLLM(["dummy"])
+    agent = DummyAgent(cfg, llm)
+    agent._last_annotations = [{"url": "https://example.com/real", "title": "real"}]
+    agent._last_relevant_annotations = []
+    agent._selected_evidence_urls = set()
+    output = "See [real](https://example.com/real) for data."
+    ok, err = agent.validate_output(output)
+    assert ok is True, err
+
+
+def test_validate_output_skips_citation_provenance_when_no_web_search():
+    """When web_search is not active, citation provenance check is skipped
+    (non-web agents have no allowed URL set)."""
+    cfg = _config()
+    cfg["web_search"] = False
+    cfg["strict_output_sections"] = False
+    llm = FakeLLM(["dummy"])
+    agent = DummyAgent(cfg, llm)
+    # Even with a URL in output, no check should run
+    output = "See [fake](https://evil.com/fake) for data."
+    ok, err = agent.validate_output(output)
+    # Should pass (no web_search → no citation provenance check)
+    assert ok is True, err
+
+
+def test_validate_output_allowed_set_includes_all_mechanically_known_sources():
+    """The allowed URL set must include URLs from _last_annotations,
+    _last_relevant_annotations, and _selected_evidence_urls — all
+    mechanically-known evidence paths."""
+    cfg = _config()
+    cfg["web_search"] = True
+    cfg["strict_output_sections"] = False
+    llm = FakeLLM(["dummy"])
+    agent = DummyAgent(cfg, llm)
+    agent._last_annotations = [{"url": "https://example.com/ann", "title": "ann"}]
+    agent._last_relevant_annotations = [{"url": "https://example.com/rel", "title": "rel"}]
+    agent._selected_evidence_urls = {"https://example.com/sel"}
+    output = "See [ann](https://example.com/ann) [rel](https://example.com/rel) [sel](https://example.com/sel)."
+    ok, err = agent.validate_output(output)
+    assert ok is True, f"allowed set did not include all sources: {err}"
+
+
+def test_citation_provenance_is_soft_accept():
+    """The grounding category must be in _SOFT_ACCEPT_CATEGORIES so a
+    remaining violation after 1 repair is soft-accepted, not raised."""
+    from src.agents.base_agent import _SOFT_ACCEPT_CATEGORIES
+    assert "grounding" in _SOFT_ACCEPT_CATEGORIES

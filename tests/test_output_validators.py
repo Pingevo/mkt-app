@@ -343,3 +343,87 @@ def test_content_missing_asset_ids_still_fails():
     ok, err = validate_output("content_creator", json.dumps(data, ensure_ascii=False))
     assert ok is False
     assert "asset_ids" in err
+
+
+# ---------------------------------------------------------------------------
+# Citation provenance validator (Item 3) — mechanically-knowable URL check
+# ---------------------------------------------------------------------------
+
+from src.output_validators import validate_citation_provenance
+
+
+def test_citation_provenance_passes_when_all_urls_in_allowed_set():
+    """All inline citation URLs are in the allowed set → pass."""
+    output = "See [research](https://example.com/a) and [more](https://example.com/b)."
+    allowed = {"https://example.com/a", "https://example.com/b"}
+    ok, err = validate_citation_provenance(output, allowed)
+    assert ok is True
+    assert err == ""
+
+
+def test_citation_provenance_fails_when_url_not_in_allowed_set():
+    """An inline citation URL not in the allowed set → fail with grounding error."""
+    output = "See [fabricated](https://evil.com/fake) and [real](https://example.com/a)."
+    allowed = {"https://example.com/a"}
+    ok, err = validate_citation_provenance(output, allowed)
+    assert ok is False
+    assert err.startswith("grounding:")
+    assert "https://evil.com/fake" in err
+
+
+def test_citation_provenance_normalizes_trailing_slash():
+    """URL normalization: trailing slash and case must not cause false positives."""
+    output = "See [source](https://Example.com/Page/)."
+    allowed = {"https://example.com/page"}  # no trailing slash, lowercase
+    ok, err = validate_citation_provenance(output, allowed)
+    assert ok is True, f"normalization failed: {err}"
+
+
+def test_citation_provenance_normalizes_case():
+    """URL case-insensitive comparison via normalization."""
+    output = "See [source](HTTPS://Example.COM/Path)."
+    allowed = {"https://example.com/Path"}  # different case in scheme/host
+    ok, err = validate_citation_provenance(output, allowed)
+    assert ok is True, f"case normalization failed: {err}"
+
+
+def test_citation_provenance_passes_when_no_citations():
+    """Output with no citations → pass (no URLs to verify)."""
+    output = "This is a plain text output with no links."
+    allowed = {"https://example.com/a"}
+    ok, err = validate_citation_provenance(output, allowed)
+    assert ok is True
+
+
+def test_citation_provenance_passes_when_allowed_set_empty_and_no_citations():
+    """Empty allowed set + no citations → pass (non-web agent with no URLs)."""
+    output = "Plain product spec with no web research."
+    ok, err = validate_citation_provenance(output, set())
+    assert ok is True
+
+
+def test_citation_provenance_fails_when_citations_but_allowed_set_empty():
+    """Empty allowed set + citations present → fail (URLs not in allowed set)."""
+    output = "See [fake](https://evil.com/x)."
+    ok, err = validate_citation_provenance(output, set())
+    assert ok is False
+    assert err.startswith("grounding:")
+
+
+def test_citation_provenance_catches_bare_urls():
+    """Bare URLs (not in markdown link syntax) are also checked."""
+    output = "Research from https://evil.com/fake shows data."
+    allowed = {"https://example.com/a"}
+    ok, err = validate_citation_provenance(output, allowed)
+    assert ok is False
+    assert err.startswith("grounding:")
+    assert "https://evil.com/fake" in err
+
+
+def test_citation_provenance_normalizes_allowed_set():
+    """The allowed set is normalized internally — caller can pass unnormalized URLs."""
+    output = "See [source](https://example.com/page)."
+    # Caller passes with trailing slash and mixed case
+    allowed = {"https://Example.com/Page/"}
+    ok, err = validate_citation_provenance(output, allowed)
+    assert ok is True, f"allowed set normalization failed: {err}"

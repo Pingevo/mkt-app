@@ -88,3 +88,65 @@ def test_quick_brief_respects_hard_rules():
     assert "ให้ทำตามคำสั่งผู้ใช้ข้างต้น" not in full_text
     # ต้องบอกว่า hard rules ชนะ หรือ อย่างน้อยไม่บอกว่า user ชนะ
     # (quick_brief เป็น soft override — ห้าม override hard rules)
+
+
+# ---------------------------------------------------------------------------
+# Grounding policy injection (Item 3) — shared three-category contract
+# ---------------------------------------------------------------------------
+
+def test_grounding_policy_injected_when_config_present():
+    """When config has grounding_policy, _build_system_prompt injects the
+    three-category grounding contract block."""
+    from src.agents.base_agent import BaseAgent
+    cfg = {
+        "system_prompt": "You are a test agent.",
+        "use_brand_context": False,
+        "use_brand_reference": False,
+        "grounding_policy": {
+            "categories": ["supplied_fact", "researched_fact_with_evidence", "inference_or_recommendation"],
+        },
+    }
+    llm = MagicMock()
+    agent = BaseAgent(cfg, llm)
+    prompt = agent._build_system_prompt()
+    # The grounding policy block must appear
+    assert "grounding" in prompt.lower() or "ข้อมูลต้นทาง" in prompt
+    # Must mention the three categories
+    assert "supplied" in prompt.lower() or "researched" in prompt.lower() or "inference" in prompt.lower()
+
+
+def test_grounding_policy_not_injected_when_config_absent():
+    """When config has no grounding_policy, _build_system_prompt does not
+    inject the grounding block (backward compat)."""
+    from src.agents.base_agent import BaseAgent
+    cfg = {
+        "system_prompt": "You are a test agent.",
+        "use_brand_context": False,
+        "use_brand_reference": False,
+    }
+    llm = MagicMock()
+    agent = BaseAgent(cfg, llm)
+    prompt = agent._build_system_prompt()
+    # The grounding policy block must NOT appear
+    assert "grounding policy" not in prompt.lower()
+
+
+def test_grounding_policy_block_mentions_three_categories():
+    """The injected grounding policy block must mention all three categories
+    so the model knows the distinction."""
+    from src.agents.base_agent import BaseAgent
+    cfg = {
+        "system_prompt": "You are a test agent.",
+        "use_brand_context": False,
+        "use_brand_reference": False,
+        "grounding_policy": {
+            "categories": ["supplied_fact", "researched_fact_with_evidence", "inference_or_recommendation"],
+        },
+    }
+    llm = MagicMock()
+    agent = BaseAgent(cfg, llm)
+    prompt = agent._build_system_prompt()
+    # All three categories must be referenced
+    assert "supplied" in prompt.lower() or "ข้อมูลที่ให้มา" in prompt
+    assert "researched" in prompt.lower() or "ค้นคว้า" in prompt or "web search" in prompt.lower()
+    assert "inference" in prompt.lower() or "อนุมาน" in prompt or "recommendation" in prompt.lower()

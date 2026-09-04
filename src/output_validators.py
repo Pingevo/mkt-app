@@ -402,3 +402,78 @@ def validate_brand_hard(output: str, brand_rules: BrandRules) -> tuple[bool, str
         )
     return True, ""
 
+
+# ---------------------------------------------------------------------------
+# Citation provenance validator (Item 3) — mechanically-knowable URL check
+#
+# This validator checks ONLY that inline citation URLs in the output are
+# present in the allowed URL set constructed from mechanically-known
+# evidence paths (web search annotations, selected evidence URLs, explicit
+# instruction URLs). It does NOT classify claims as factual or inferential,
+# does NOT use keyword lists, and does NOT guess whether a citation is
+# needed. Semantic grounding review remains the model's responsibility.
+# ---------------------------------------------------------------------------
+
+
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for provenance comparison: lowercase + strip trailing slash.
+
+    This is the single source of truth for URL normalization in citation
+    provenance checks. Both the output URLs and the allowed set are
+    normalized through this function so trailing slashes and case
+    differences do not cause false positives.
+    """
+    return url.lower().rstrip("/")
+
+
+def validate_citation_provenance(output: str, allowed_urls: set[str]) -> tuple[bool, str]:
+    """Verify that all inline citation URLs in ``output`` are in ``allowed_urls``.
+
+    Mechanically checks markdown link URLs ``[text](url)`` and bare URLs
+    ``https://...`` against the allowed set. Both sides are normalized
+    (lowercase, trailing slash stripped) before comparison.
+
+    Args:
+        output: The agent's generated output text.
+        allowed_urls: Set of URLs that are mechanically known to be legitimate
+            evidence sources for this run (web search annotations, selected
+            evidence URLs, explicit instruction URLs). May be empty.
+
+    Returns:
+        (True, "") if all citation URLs are in the allowed set (or no URLs
+        are present). (False, "grounding: ...") if any URL is not in the set.
+
+    This is a soft-accept category: a remaining violation after 1 repair
+    attempt is soft-accepted rather than raised, to avoid blocking delivery
+    on a false positive from an unnormalized edge case.
+    """
+    if not output:
+        return True, ""
+
+    # Normalize the allowed set once
+    normalized_allowed = {_normalize_url(u) for u in allowed_urls if u}
+
+    # Extract markdown link URLs first: [text](url)
+    md_urls = {m.group(2) for m in _MD_LINK_RE.finditer(output)}
+
+    # Extract bare URLs from text with markdown links removed, so bare URL
+    # regex does not match URLs inside markdown link parentheses.
+    text_without_md_links = _MD_LINK_RE.sub("", output)
+    bare_urls = {m.group(0) for m in _BARE_URL_RE.finditer(text_without_md_links)}
+
+    cited_urls = md_urls | bare_urls
+
+    # Check each cited URL against the allowed set
+    unverified: list[str] = []
+    for url in cited_urls:
+        if _normalize_url(url) not in normalized_allowed:
+            unverified.append(url)
+
+    if unverified:
+        return False, (
+            f"grounding: citation URL(s) not in known evidence set: "
+            f"{', '.join(unverified[:5])} — "
+            f"กรุณาอ้างอิงเฉพาะ URL ที่ได้จาก web search หรือ evidence ที่ระบุในรอบนี้"
+        )
+    return True, ""
+
