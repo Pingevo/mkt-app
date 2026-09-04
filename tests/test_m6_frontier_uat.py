@@ -2990,3 +2990,92 @@ class TestCostSourceSerialization:
             audit = acc["response_audit"][sid]
             assert "cost_source" in audit, f"{sid} missing cost_source in incomplete accounting"
             assert "pre_call_reserve" in audit, f"{sid} missing pre_call_reserve in incomplete accounting"
+
+
+# ---------------------------------------------------------------------------
+# Tests: truncation metadata in RunResult + guard audit (Item 1)
+# ---------------------------------------------------------------------------
+
+class TestRunResultTruncation:
+    def test_run_result_accepts_finish_reason_and_truncated(self):
+        """RunResult supports optional finish_reason + truncated fields."""
+        r = m6.RunResult(
+            scenario_id="S1", side="Frontier", output="partial",
+            actual_model="m", cost_usd=0.1, prompt_tokens=100, completion_tokens=50,
+            web_uses=0, error=None, stopped=False, evidence={},
+            finish_reason="length", truncated=True,
+        )
+        assert r.finish_reason == "length"
+        assert r.truncated is True
+
+    def test_run_result_defaults_finish_reason_none_truncated_false(self):
+        """RunResult without finish_reason/truncated defaults to None/False (backward compat)."""
+        r = m6.RunResult(
+            scenario_id="S1", side="Frontier", output="full",
+            actual_model="m", cost_usd=0.1, prompt_tokens=100, completion_tokens=50,
+            web_uses=0, error=None, stopped=False, evidence={},
+        )
+        assert r.finish_reason is None
+        assert r.truncated is False
+
+
+class TestGuardAuditFinishReason:
+    def test_guard_audit_captures_finish_reason_length(self):
+        """Guard audit dict includes finish_reason from the response."""
+        fake_response = {
+            "id": "test-trunc",
+            "model": m6.FRONTIER_MODEL,
+            "choices": [{"message": {"content": "truncated output"}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 100},
+            "cost": 0.30,
+        }
+
+        def fake_post(client: httpx.Client, url: str, **kwargs):
+            return httpx.Response(200, json=fake_response, request=httpx.Request("POST", url))
+
+        original = httpx.Client.post
+        httpx.Client.post = fake_post
+        try:
+            guard = m6.M6FrontierGuard(frontier_budget=2.0, per_scenario_estimates={"S2": 0.30})
+            guard.set_scenario("S2")
+            with guard:
+                client = httpx.Client()
+                client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    json={"model": m6.FRONTIER_MODEL, "max_tokens": 100,
+                          "messages": [{"role": "user", "content": "x"}]},
+                )
+            audit = guard.last_response_audit["S2"]
+            assert audit["finish_reason"] == "length"
+        finally:
+            httpx.Client.post = original
+
+    def test_guard_audit_finish_reason_stop(self):
+        """Guard audit captures finish_reason=stop for complete responses."""
+        fake_response = {
+            "id": "test-complete",
+            "model": m6.FRONTIER_MODEL,
+            "choices": [{"message": {"content": "complete output"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 100},
+            "cost": 0.30,
+        }
+
+        def fake_post(client: httpx.Client, url: str, **kwargs):
+            return httpx.Response(200, json=fake_response, request=httpx.Request("POST", url))
+
+        original = httpx.Client.post
+        httpx.Client.post = fake_post
+        try:
+            guard = m6.M6FrontierGuard(frontier_budget=2.0, per_scenario_estimates={"S2": 0.30})
+            guard.set_scenario("S2")
+            with guard:
+                client = httpx.Client()
+                client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    json={"model": m6.FRONTIER_MODEL, "max_tokens": 100,
+                          "messages": [{"role": "user", "content": "x"}]},
+                )
+            audit = guard.last_response_audit["S2"]
+            assert audit["finish_reason"] == "stop"
+        finally:
+            httpx.Client.post = original

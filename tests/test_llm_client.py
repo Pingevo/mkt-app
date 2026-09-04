@@ -617,3 +617,173 @@ def test_routing_failure_422_is_clear_and_not_repaired():
 
     # Only one attempt; no repair/output fabrication.
     assert client._client.post.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: truncation metadata — finish_reason surfacing (Item 1)
+# ---------------------------------------------------------------------------
+
+def test_nonstream_finish_reason_length_marks_truncated():
+    """Non-stream response with finish_reason=length → last_truncated=True, content unchanged."""
+    client = _make_client()
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json = MagicMock(return_value={
+        "id": "req-1",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
+        "choices": [{"message": {"content": "partial output"}, "finish_reason": "length"}],
+    })
+    client._client.post = MagicMock(side_effect=[resp])
+
+    result = client.chat(
+        [{"role": "user", "content": "hi"}],
+        max_retry_limit=1,
+        stream=False,
+    )
+
+    assert result == "partial output"
+    assert client.last_finish_reason == "length"
+    assert client.last_truncated is True
+
+
+def test_nonstream_finish_reason_stop_not_truncated():
+    """Non-stream response with finish_reason=stop → last_truncated=False."""
+    client = _make_client()
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json = MagicMock(return_value={
+        "id": "req-1",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
+        "choices": [{"message": {"content": "complete output"}, "finish_reason": "stop"}],
+    })
+    client._client.post = MagicMock(side_effect=[resp])
+
+    result = client.chat(
+        [{"role": "user", "content": "hi"}],
+        max_retry_limit=1,
+        stream=False,
+    )
+
+    assert result == "complete output"
+    assert client.last_finish_reason == "stop"
+    assert client.last_truncated is False
+
+
+def test_nonstream_no_finish_reason_means_none():
+    """Non-stream response without finish_reason field → last_finish_reason=None."""
+    client = _make_client()
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json = MagicMock(return_value={
+        "id": "req-1",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
+        "choices": [{"message": {"content": "output"}}],
+    })
+    client._client.post = MagicMock(side_effect=[resp])
+
+    client.chat(
+        [{"role": "user", "content": "hi"}],
+        max_retry_limit=1,
+        stream=False,
+    )
+
+    assert client.last_finish_reason is None
+    assert client.last_truncated is False
+
+
+def test_stream_finish_reason_length_marks_truncated():
+    """Stream response with finish_reason=length → last_truncated=True, content unchanged."""
+    client = _make_client()
+    lines = [
+        'data: ' + _json.dumps({"choices": [{"delta": {"content": "streamed partial"}}]}),
+        'data: ' + _json.dumps({"choices": [{"delta": {}, "finish_reason": "length"}]}),
+        'data: [DONE]',
+    ]
+    _patch_attempt_clients(client, [_AttemptClient(lines)])
+
+    with _patch_timeouts(client, 30, 10):
+        result = client.chat(
+            [{"role": "user", "content": "hi"}],
+            max_retry_limit=1,
+            stream=True,
+        )
+
+    assert result == "streamed partial"
+    assert client.last_finish_reason == "length"
+    assert client.last_truncated is True
+
+
+def test_stream_finish_reason_stop_not_truncated():
+    """Stream response with finish_reason=stop → last_truncated=False."""
+    client = _make_client()
+    lines = [
+        'data: ' + _json.dumps({"choices": [{"delta": {"content": "streamed complete"}}]}),
+        'data: ' + _json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+        'data: [DONE]',
+    ]
+    _patch_attempt_clients(client, [_AttemptClient(lines)])
+
+    with _patch_timeouts(client, 30, 10):
+        result = client.chat(
+            [{"role": "user", "content": "hi"}],
+            max_retry_limit=1,
+            stream=True,
+        )
+
+    assert result == "streamed complete"
+    assert client.last_finish_reason == "stop"
+    assert client.last_truncated is False
+
+
+def test_finish_reason_reset_between_calls():
+    """_last_finish_reason is reset to None at the start of each chat() call — no stale leak."""
+    client = _make_client()
+
+    # First call: finish_reason=length
+    truncated_resp = MagicMock()
+    truncated_resp.raise_for_status = MagicMock()
+    truncated_resp.json = MagicMock(return_value={
+        "id": "req-1",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
+        "choices": [{"message": {"content": "truncated"}, "finish_reason": "length"}],
+    })
+    # Second call: no finish_reason field at all
+    no_finish_resp = MagicMock()
+    no_finish_resp.raise_for_status = MagicMock()
+    no_finish_resp.json = MagicMock(return_value={
+        "id": "req-2",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
+        "choices": [{"message": {"content": "no finish reason"}}],
+    })
+    client._client.post = MagicMock(side_effect=[truncated_resp, no_finish_resp])
+
+    client.chat([{"role": "user", "content": "first"}], max_retry_limit=1, stream=False)
+    assert client.last_finish_reason == "length"
+
+    client.chat([{"role": "user", "content": "second"}], max_retry_limit=1, stream=False)
+    assert client.last_finish_reason is None, "stale finish_reason leaked from previous call"
+    assert client.last_truncated is False
+
+
+def test_annotations_path_preserves_finish_reason():
+    """return_annotations path also captures finish_reason."""
+    client = _make_client()
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json = MagicMock(return_value={
+        "id": "req-1",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
+        "choices": [{"message": {"content": "text", "annotations": []}, "finish_reason": "length"}],
+    })
+    client._client.post = MagicMock(side_effect=[resp])
+
+    text, annotations = client.chat(
+        [{"role": "user", "content": "hi"}],
+        max_retry_limit=1,
+        return_annotations=True,
+    )
+
+    assert text == "text"
+    assert annotations == []
+    assert client.last_finish_reason == "length"
+    assert client.last_truncated is True

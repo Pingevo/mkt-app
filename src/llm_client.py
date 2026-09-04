@@ -76,6 +76,29 @@ class LLMClient:
         self._aborted = False
         self._attempt_lock = threading.Lock()
         self._active_attempts: list[Any] = []
+        # Per-call metadata: finish_reason from the provider's last response.
+        # Reset to None at the start of every chat() / chat_stream_yield() /
+        # chat_with_tools() call so a failed or skipped call cannot leak stale data.
+        self._last_finish_reason: str | None = None
+
+    @property
+    def last_finish_reason(self) -> str | None:
+        """finish_reason from the provider's most recent successful response.
+
+        Returns ``None`` if no call has been made yet, or if the most recent
+        call did not include a finish_reason field. Common values: ``"stop"``,
+        ``"length"`` (truncated), ``"tool_calls"``.
+        """
+        return self._last_finish_reason
+
+    @property
+    def last_truncated(self) -> bool:
+        """True if the most recent response was truncated by the token budget.
+
+        Convenience property: ``self._last_finish_reason == "length"``.
+        Does not modify generated content — purely observational metadata.
+        """
+        return self._last_finish_reason == "length"
 
     def chat(
         self,
@@ -119,6 +142,7 @@ class LLMClient:
         used_model = model or self._default_model
         # Reset per-call metadata so a failed or skipped call cannot leak stale data.
         self._last_raw_response = {}
+        self._last_finish_reason = None
         # Structured Outputs ไม่รองรับ stream — บังคับ non-stream
         if response_format:
             stream = False
@@ -161,7 +185,9 @@ class LLMClient:
                     request_id = data.get("id")
                     usage = data.get("usage")
                     self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
-                    msg = data["choices"][0]["message"]
+                    choice0 = data["choices"][0]
+                    self._last_finish_reason = choice0.get("finish_reason")
+                    msg = choice0["message"]
                     text = msg.get("content", "")
                     self._last_raw_annotations_count = len(msg.get("annotations") or [])
                     if return_annotations:
@@ -454,6 +480,7 @@ class LLMClient:
         usage: dict[str, Any] | None = None
         request_id: str | None = None
         actual_model: str | None = None
+        finish_reason: str | None = None
 
         with Live(text, console=console, refresh_per_second=int(cfg.get("stream_refresh_rate", 15)), transient=False) as live:
             for event_type, value in self._stream_attempt(
@@ -469,6 +496,8 @@ class LLMClient:
                     request_id = value
                 elif event_type == "model":
                     actual_model = actual_model or value
+                elif event_type == "finish":
+                    finish_reason = value
 
         # Record the same per-call metadata shape as the non-stream path so
         # consumers of _last_raw_response (e.g. actual_model) work for streams.
@@ -477,6 +506,7 @@ class LLMClient:
             "model": actual_model,
             "usage": usage,
         }
+        self._last_finish_reason = finish_reason
 
         console.print()
         return "".join(collected), usage, request_id
@@ -500,6 +530,7 @@ class LLMClient:
         used_model = model or self._default_model
         # Reset per-call metadata so a failed or skipped call cannot leak stale data.
         self._last_raw_response = {}
+        self._last_finish_reason = None
         payload: dict[str, Any] = {
             "model": used_model,
             "messages": messages,
@@ -535,6 +566,8 @@ class LLMClient:
                         usage = value
                     elif event_type == "request_id":
                         request_id = value
+                    elif event_type == "finish":
+                        self._last_finish_reason = value
                 self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
                 # Empty content = failed attempt — retry like chat() does
                 # (can only retry if nothing was yielded yet)
@@ -615,6 +648,8 @@ class LLMClient:
             timeout=self._timeout,
         )
         used_model = model or self._default_model
+        # Reset per-call metadata so a failed or skipped call cannot leak stale data.
+        self._last_finish_reason = None
 
         # copy messages เพื่อไม่แก้ของเดิม
         convo = list(messages)
@@ -632,6 +667,7 @@ class LLMClient:
                 msg = response.choices[0].message
                 usage = response.usage
                 request_id = getattr(response, "id", None)
+                self._last_finish_reason = getattr(response.choices[0], "finish_reason", None)
                 self._log_usage(used_model, source, usage.model_dump() if usage else None,
                                 duration_ms=int((time.time() - t0) * 1000), attempt=iteration + 1, request_id=request_id)
 

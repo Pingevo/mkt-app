@@ -217,6 +217,10 @@ class RunResult:
     error: str | None
     stopped: bool
     evidence: dict
+    # Truncation metadata from the provider's finish_reason (Item 1).
+    # Defaults preserve backward compatibility with existing call sites.
+    finish_reason: str | None = None
+    truncated: bool = False
 
     @property
     def is_charged_but_invalid(self) -> bool:
@@ -357,6 +361,7 @@ class M6FrontierGuard:
             "completion_tokens": usage.get("completion_tokens", 0),
             "web_uses": web_uses,
             "request_id": data.get("id"),
+            "finish_reason": (data.get("choices") or [{}])[0].get("finish_reason") if (data.get("choices") or [{}]) else None,
             "data": data,
         }
 
@@ -396,6 +401,7 @@ class M6FrontierGuard:
                 "completion_tokens": actual.get("completion_tokens", 0),
                 "web_uses": actual.get("web_uses", 0),
                 "request_id": actual.get("request_id"),
+                "finish_reason": actual.get("finish_reason"),
                 "output": output_text,
             }
 
@@ -539,6 +545,7 @@ def _run_frontier_scenario(scenario: dict, guard: M6FrontierGuard, dry_run: bool
             cost = round(float(cost), 6)
         else:
             cost = round(float(cost), 6)
+        finish_reason = getattr(llm, "last_finish_reason", None)
         return RunResult(
             scenario_id=scenario["id"],
             side="Frontier",
@@ -551,12 +558,15 @@ def _run_frontier_scenario(scenario: dict, guard: M6FrontierGuard, dry_run: bool
             error=None,
             stopped=False,
             evidence=evidence,
+            finish_reason=finish_reason,
+            truncated=getattr(llm, "last_truncated", False),
         )
     except Exception as exc:
         # If the guard recorded audit data for this scenario, the response
         # was received and charged. Preserve it with the error.
         audit = guard.last_response_audit.get(scenario["id"])
         if audit:
+            audit_finish = audit.get("finish_reason")
             return RunResult(
                 scenario_id=scenario["id"],
                 side="Frontier",
@@ -575,6 +585,8 @@ def _run_frontier_scenario(scenario: dict, guard: M6FrontierGuard, dry_run: bool
                     "request_id": audit.get("request_id"),
                     "traceback": traceback.format_exc(),
                 },
+                finish_reason=audit_finish,
+                truncated=audit_finish == "length",
             )
         return RunResult(
             scenario_id=scenario["id"],
@@ -1488,6 +1500,8 @@ def _write_audit_evidence(
                 "reused": bool(f.evidence.get("reused_from")),
                 "original_cost": f.evidence.get("original_cost"),
                 "is_dry_run_placeholder": execution_mode == "dry_run" and not f.evidence.get("reused_from"),
+                "finish_reason": f.finish_reason,
+                "truncated": f.truncated,
             }
         if guard and sid in guard.last_response_audit:
             a = guard.last_response_audit[sid]
@@ -1498,6 +1512,8 @@ def _write_audit_evidence(
                 "prompt_tokens": a.get("prompt_tokens"),
                 "completion_tokens": a.get("completion_tokens"),
                 "web_uses": a.get("web_uses"),
+                "finish_reason": a.get("finish_reason"),
+                "truncated": a.get("finish_reason") == "length",
             }
         if reserve_decisions and sid in reserve_decisions:
             entry["reserve_decision"] = reserve_decisions[sid]
