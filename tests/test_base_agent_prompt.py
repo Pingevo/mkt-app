@@ -150,3 +150,112 @@ def test_grounding_policy_block_mentions_three_categories():
     assert "supplied" in prompt.lower() or "ข้อมูลที่ให้มา" in prompt
     assert "researched" in prompt.lower() or "ค้นคว้า" in prompt or "web search" in prompt.lower()
     assert "inference" in prompt.lower() or "อนุมาน" in prompt or "recommendation" in prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# Brand differentiator framing (Item 4) — reframe brand_reference as
+# task-decision context, not passive background
+# ---------------------------------------------------------------------------
+
+def test_brand_reference_default_is_passive_background():
+    """When use_brand_differentiator is not set, brand_reference block uses
+    passive 'context' framing (backward compat)."""
+    from src.agents.base_agent import BaseAgent
+    cfg = {
+        "system_prompt": "You are a test agent.",
+        "use_brand_context": False,
+        "use_brand_reference": True,
+    }
+    llm = MagicMock()
+    agent = BaseAgent(cfg, llm, brand_reference="audience: parents")
+    prompt = agent._build_system_prompt()
+    # The passive framing must still be present
+    assert "audience: parents" in prompt
+    # The block header uses passive 'context' language
+    assert "บริบท" in prompt or "context" in prompt.lower()
+
+
+def test_brand_differentiator_reframes_as_task_decision_context():
+    """When use_brand_differentiator is true, brand_reference block is
+    reframed as task-decision context — the model is told to USE the data
+    for decisions, not just have it as passive background."""
+    from src.agents.base_agent import BaseAgent
+    cfg = {
+        "system_prompt": "You are a test agent.",
+        "use_brand_context": False,
+        "use_brand_reference": True,
+        "use_brand_differentiator": True,
+    }
+    llm = MagicMock()
+    agent = BaseAgent(cfg, llm, brand_reference="audience: parents, positioning: premium")
+    prompt = agent._build_system_prompt()
+    # The data must still be present
+    assert "audience: parents" in prompt
+    assert "positioning: premium" in prompt
+    # The block must use active task-decision language, not passive 'context'
+    assert "ใช้" in prompt or "ตัดสินใจ" in prompt or "decision" in prompt.lower() or "apply" in prompt.lower()
+    # Must NOT use the old passive 'บริบทเพิ่ม' header
+    assert "บริบทเพิ่ม" not in prompt
+
+
+def test_brand_differentiator_requires_use_brand_reference():
+    """use_brand_differentiator alone (without use_brand_reference) must not
+    inject the block — the flag is a modifier on use_brand_reference."""
+    from src.agents.base_agent import BaseAgent
+    cfg = {
+        "system_prompt": "You are a test agent.",
+        "use_brand_context": False,
+        "use_brand_reference": False,
+        "use_brand_differentiator": True,
+    }
+    llm = MagicMock()
+    agent = BaseAgent(cfg, llm, brand_reference="audience: parents")
+    prompt = agent._build_system_prompt()
+    # The block must NOT be injected when use_brand_reference is false
+    assert "audience: parents" not in prompt
+
+
+def test_brand_differentiator_no_term_presence_requirement():
+    """The reframed block must NOT require the output to contain specific
+    brand terms — no soft-brand term-presence validator. The model uses
+    the data semantically, not as a mandatory vocabulary checklist."""
+    from src.agents.base_agent import BaseAgent
+    cfg = {
+        "system_prompt": "You are a test agent.",
+        "use_brand_context": False,
+        "use_brand_reference": True,
+        "use_brand_differentiator": True,
+    }
+    llm = MagicMock()
+    agent = BaseAgent(cfg, llm, brand_reference="audience: parents")
+    prompt = agent._build_system_prompt()
+    # Must NOT contain term-presence requirement language
+    assert "ต้องมี" not in prompt or "ต้องใช้คำ" not in prompt
+    assert "minimum" not in prompt.lower() or "minimum number of" not in prompt.lower()
+    # Must NOT require specific brand terms to appear in output
+    assert "required terms" not in prompt.lower()
+    assert "approved terms" not in prompt.lower() or "approved terms" not in prompt.lower()
+
+
+def test_brand_differentiator_does_not_merge_positioning_into_brand_rules():
+    """The reframed block must NOT merge positioning into BrandRules.
+    Hard restrictions/replacements stay deterministic via BrandRules.
+    The differentiator flag only changes the framing of brand_reference."""
+    from src.agents.base_agent import BrandRules
+    rules = _make_brand_rules(banned_phrases=["ถูกที่สุด"])
+    cfg = {
+        "system_prompt": "You are a test agent.",
+        "use_brand_context": True,
+        "use_brand_reference": True,
+        "use_brand_differentiator": True,
+    }
+    llm = MagicMock()
+    agent = _make_agent(brand_rules=rules, brand_reference="positioning: premium")
+    agent.config = cfg
+    prompt = agent._build_system_prompt()
+    # Hard rules must still be present (from BrandRules, not merged)
+    assert "ถูกที่สุด" in prompt
+    # brand_reference data must be present (separate block)
+    assert "positioning: premium" in prompt
+    # The two must be in separate sections — hard rules block and reference block
+    assert "กฎบังคับ" in prompt or "ชนะเสมอ" in prompt or "ห้าม override" in prompt.lower()

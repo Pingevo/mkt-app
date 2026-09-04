@@ -296,6 +296,7 @@ campaign_strategy:
   web_search: true
   verify_urls: false
   use_brand_reference: true
+  use_brand_differentiator: true
   grounding_policy:
     categories:
       - supplied_fact
@@ -587,6 +588,7 @@ content_creator:
   output_format: json
   review_temperature: 0.2
   use_brand_reference: true
+  use_brand_differentiator: true
   grounding_policy:
     categories:
       - supplied_fact

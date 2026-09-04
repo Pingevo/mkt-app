@@ -289,13 +289,33 @@ class BaseAgent:
                 )
 
         # brand_reference (profile + audience) — ใส่เฉพาะ agent ที่เปิด use_brand_reference
+        # use_brand_differentiator (Item 4): reframe as task-decision context
+        # (active) instead of passive background. The flag is a modifier on
+        # use_brand_reference — it only takes effect when use_brand_reference
+        # is also true. Hard restrictions/replacements stay deterministic via
+        # BrandRules; positioning is NOT merged into BrandRules.
         use_ref = self.config.get("use_brand_reference", False)
+        use_diff = self.config.get("use_brand_differentiator", False)
         if self.brand_reference and use_ref:
-            sections.append(
-                f"--- ข้อมูลแบรนด์อ้างอิง (บริบทเพิ่ม — ประวัติ + กลุ่มเป้าหมาย) ---\n"
-                f"{self.brand_reference}\n"
-                f"--- สิ้นสุดข้อมูลแบรนด์อ้างอิง ---"
-            )
+            if use_diff:
+                sections.append(
+                    f"--- ข้อมูลแบรนด์อ้างอิง (ใช้เป็นบริบทตัดสินใจ — audience + positioning) ---\n"
+                    f"{self.brand_reference}\n"
+                    f"--- สิ้นสุดข้อมูลแบรนด์อ้างอิง ---\n"
+                    f"ใช้ข้อมูลกลุ่มเป้าหมายและตำแหน่งข้างต้นเพื่อตัดสินใจเรื่อง "
+                    f"audience targeting, positioning, และ differentiators "
+                    f"อย่างมีนัยสำคัญ — ไม่ใช่แค่บริบทเบาๆ\n"
+                    f"ปรับ message tone, channel selection, และ strategic emphasis "
+                    f"ตามข้อมูลนี้ แต่ห้ามเดาหรือสร้างข้อเท็จจริงที่ไม่มีในข้อมูลดิบ\n"
+                    f"ห้ามนำคำศัพท์เฉพาะแบรนด์มาเป็น required vocabulary — "
+                    f"ใช้ข้อมูล semantically เพื่อตัดสินใจ ไม่ใช่เป็น checklist คำ"
+                )
+            else:
+                sections.append(
+                    f"--- ข้อมูลแบรนด์อ้างอิง (บริบทเพิ่ม — ประวัติ + กลุ่มเป้าหมาย) ---\n"
+                    f"{self.brand_reference}\n"
+                    f"--- สิ้นสุดข้อมูลแบรนด์อ้างอิง ---"
+                )
 
         instruction_block = self._format_instructions()
         if instruction_block:
