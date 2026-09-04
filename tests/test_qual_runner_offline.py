@@ -569,6 +569,10 @@ class _FakeLLM:
 
     def chat(self, messages, **kwargs):
         self.calls.append({"messages": messages, "kwargs": kwargs})
+        source = kwargs.get("source", "")
+        if ".semantic_review" in source:
+            import json as _json
+            return _json.dumps([{"index": i, "action": "keep"} for i in range(10)], ensure_ascii=False)
         if kwargs.get("return_annotations"):
             return self.generate_output, self.annotations
         return self.generate_output

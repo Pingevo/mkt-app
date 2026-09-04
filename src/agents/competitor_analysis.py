@@ -13,6 +13,7 @@ from .competitor_evidence import (
     EVIDENCE_SYSTEM_PROMPT,
     ResearchResponse,
     RESEARCH_RESPONSE_SCHEMA,
+    SemanticEvidenceReviewer,
 )
 
 
@@ -163,6 +164,47 @@ class CompetitorAnalysisAgent(BaseAgent):
         self._last_validated_research_json = final_json
 
         relevant = getattr(self, "_last_relevant_annotations", []) or []
+
+        # Stage 2.5: semantic evidence review (model-level, 1 pass, no retry)
+        # Provenance validation (above) checks URL + competitor identity.
+        # This step checks that the claim text is semantically entailed by
+        # the source content.  Bounded to exactly one LLM call, no web tools.
+        #
+        # Fail-closed contract: if semantic review fails (LLM error, invalid
+        # JSON), the reviewer returns None.  In that case, unchecked evidence
+        # claims must NOT reach the renderer.  We fall back to a deterministic
+        # limited analysis report that contains no unchecked model-generated
+        # factual claims — only competitor names, product spec, hypotheses
+        # (labeled as unverified), and uncertainty.
+        if research.evidence:
+            semantic_reviewer = SemanticEvidenceReviewer(
+                llm=self.llm,
+                config={
+                    "model": self.config.get("review_model") or self.config.get("model"),
+                },
+            )
+            reviewed = semantic_reviewer.review(research, relevant)
+            if reviewed is None:
+                # Fail-closed: render limited analysis without unchecked claims
+                limited_renderer = CompetitorReportRenderer(
+                    ResearchResponse(
+                        target_model=research.target_model,
+                        competitor_names=research.competitor_names,
+                        evidence=[],  # no unchecked evidence
+                        evidence_based_recommendations=[],
+                        strategic_hypotheses=research.strategic_hypotheses,
+                        uncertainty=research.uncertainty + [
+                            "semantic evidence review ล้มเหลว — evidence claims ไม่ถึงผู้ใช้",
+                        ],
+                    ),
+                    relevant_annotations=relevant,
+                    quick_brief=getattr(self, "_quick_brief", ""),
+                )
+                markdown = limited_renderer.render(self._product_spec)
+                self._last_draft_output = final_json
+                return markdown
+            research = reviewed
+
         renderer = CompetitorReportRenderer(
             research,
             relevant_annotations=relevant,

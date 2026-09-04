@@ -79,10 +79,15 @@ def _good_research_response():
 class FakeLLM:
     """Deterministic LLM double with distinct generate and revision outputs."""
 
-    def __init__(self, generate_output: str = "", annotations: list | None = None, revision_output: str = ""):
+    def __init__(self, generate_output: str = "", annotations: list | None = None, revision_output: str = "",
+                 semantic_review_output: str = ""):
         self.generate_output = generate_output
         self.annotations = annotations or []
         self.revision_output = revision_output
+        # Default: keep all evidence (no semantic changes)
+        self.semantic_review_output = semantic_review_output or json.dumps(
+            [{"index": i, "action": "keep"} for i in range(10)], ensure_ascii=False
+        )
         self.calls: list[dict] = []
         self._last_raw_response = {"usage": {"server_tool_use_details": {"web_search_requests": 1, "tool_calls_executed": 1}}}
         self._last_raw_annotations_count = 0
@@ -91,6 +96,8 @@ class FakeLLM:
         self.calls.append({"messages": messages, "kwargs": kwargs})
         self._last_raw_annotations_count = len(self.annotations)
         source = kwargs.get("source", "")
+        if ".semantic_review" in source:
+            return self.semantic_review_output
         if ".revise" in source:
             return self.revision_output
         if kwargs.get("return_annotations"):
@@ -109,7 +116,7 @@ def test_valid_research_response_renders_markdown():
     prompt = agent.build_prompt(fixture["product_spec"], fixture["competitor_data"])
     result = agent.run(prompt)
 
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2  # 1 generate + 1 semantic review
     assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" in result
     assert "**structural_output_failed**" not in result
     assert "**required_search_failed**" not in result
@@ -125,7 +132,7 @@ def test_fenced_json_with_valid_schema_renders():
     prompt = agent.build_prompt(fixture["product_spec"], fixture["competitor_data"])
     result = agent.run(prompt)
 
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2  # 1 generate + 1 semantic review
     assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" in result
     assert "**structural_output_failed**" not in result
 
@@ -142,7 +149,7 @@ def test_wrong_key_triggers_one_revision():
     prompt = agent.build_prompt(fixture["product_spec"], fixture["competitor_data"])
     result = agent.run(prompt)
 
-    assert len(fake.calls) == 2
+    assert len(fake.calls) == 3  # 1 generate + 1 revise + 1 semantic review
     assert fake.calls[1]["kwargs"].get("source") == "competitor_analysis.revise"
     assert fake.calls[1]["kwargs"].get("response_format") == RESEARCH_RESPONSE_SCHEMA
     assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" in result
@@ -182,7 +189,7 @@ def test_untrusted_url_triggers_one_revision():
     prompt = agent.build_prompt(fixture["product_spec"], fixture["competitor_data"])
     result = agent.run(prompt)
 
-    assert len(fake.calls) == 2
+    assert len(fake.calls) == 3  # 1 generate + 1 revise + 1 semantic review
     assert "**required_search_failed**" not in result
     assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" in result
 
@@ -291,7 +298,7 @@ def test_revise_receives_canonical_manifest():
     prompt = agent.build_prompt(fixture["product_spec"], fixture["competitor_data"])
     agent.run(prompt)
 
-    assert len(fake.calls) == 2
+    assert len(fake.calls) == 3  # 1 generate + 1 revise + 1 semantic review
     revise_message = fake.calls[1]["messages"][-1]["content"]
     # G2: manifest now separates verified vs unverified sources
     assert "รายการ URL ที่ยืนยันแล้ว" in revise_message
@@ -365,7 +372,7 @@ def test_evidence_revise_sends_provider_require_parameters():
     prompt = agent.build_prompt(fixture["product_spec"], fixture["competitor_data"])
     agent.run(prompt)
 
-    assert len(fake.calls) == 2
+    assert len(fake.calls) == 3  # 1 generate + 1 revise + 1 semantic review
     assert fake.calls[1]["kwargs"].get("provider") == {"require_parameters": True}
     assert fake.calls[1]["kwargs"].get("response_format") == RESEARCH_RESPONSE_SCHEMA
 
@@ -398,7 +405,7 @@ def test_free_field_accepted_in_open_schema():
     result = agent.run(prompt)
 
     # G2: open schema — free-form field is accepted on first try (no revision)
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2  # 1 generate + 1 semantic review
     assert "**structural_output_failed: true**" not in result
 
 
@@ -501,7 +508,7 @@ def test_agent_run_respects_quick_brief_and_routes_to_brief():
     result = agent.run(prompt, quick_brief="สรุปแบบ bullet executive brief ห้ามใช้ตาราง")
     assert "## ตารางเปรียบเทียบคุณสมบัติและสเปก" not in result
     assert "| คุณสมบัติ |" not in result
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2  # 1 generate + 1 semantic review
 
 
 def _evidence_template(**overrides):

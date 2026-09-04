@@ -106,6 +106,10 @@ class _FakeLLM:
         self.calls.append({"messages": messages, "kwargs": kwargs})
         self._last_raw_annotations_count = len(self.annotations)
         source = kwargs.get("source", "")
+        if ".semantic_review" in source:
+            # Semantic review: keep all evidence (no changes)
+            import json as _json
+            return _json.dumps([{"index": i, "action": "keep"} for i in range(10)], ensure_ascii=False)
         if ".revise" in source:
             return self.revision_output
         if ".repair" in source:

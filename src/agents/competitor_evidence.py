@@ -669,6 +669,194 @@ class CompetitorReportRenderer:
         return "\n".join(lines)
 
 
+class SemanticEvidenceReviewer:
+    """Model-level semantic entailment review for competitor evidence.
+
+    Sits between deterministic provenance validation (CompetitorReportRenderer.
+    _validate_evidence) and the renderer.  Provenance checks that the URL is
+    verified and the competitor identity matches.  This class checks that the
+    *claim text* is semantically entailed by the source content.
+
+    Architecture (one pass, no retry, no web calls):
+        ResearchResponse + relevant_annotations
+        → build review prompt (claim + source content per evidence)
+        → single LLM call (no tools, no web_search/web_fetch)
+        → parse JSON response (list of {index, action, claim?})
+        → apply rewrites/removes to a new ResearchResponse
+        → return
+
+    If the LLM call fails or returns invalid JSON, the original research is
+    returned unchanged (graceful degradation — provenance validation already
+    ran, so the output is not unsafe, just not semantically verified).
+
+    Cost: exactly one LLM call per competitor_analysis run (when evidence
+    is non-empty).  Zero calls when evidence is empty.
+    """
+
+    _REVIEW_SYSTEM_PROMPT = """คุณคือผู้ตรวจสอบ semantic entailment ของ evidence claims
+
+หน้าที่ของคุณคือตรวจแต่ละ evidence claim เทียบกับเนื้อหา source ที่ให้มา
+และตัดสินใจว่า claim นั้นถูกสนับสนุนโดยตรงหรือไม่
+
+กฎการตรวจ:
+1. อ่าน source content ของแต่ละ evidence อย่างละเอียด
+2. เทียบ claim กับ source — ถ้า source พูดเฉพาะ A ห้ามขยายเป็น A+B
+3. ตรวจสิ่งที่เกิน source:
+   - capability ที่ source ไม่ได้ระบุ (เช่น "video call" เมื่อ source บอกแค่ "ถ่ายภาพ")
+   - ranking/superlative ที่ source ไม่ได้ระบุ (เช่น "ถูกที่สุดในตลาด")
+   - performance/conclusion ที่ source ไม่ได้สรุป
+   - causality ที่ source ไม่ได้อ้าง
+4. ถ้า claim ถูกสนับสนุนโดยตรง → action: "keep"
+5. ถ้า claim เกิน source เล็กน้อย → action: "rewrite" พร้อม claim ใหม่ที่กระชับเป็นเฉพาะสิ่งที่ source ระบุ
+6. ถ้า claim ไม่มีอะไรใน source รองรับเลย → action: "remove"
+
+ห้าม:
+- ห้ามเพิ่มข้อมูลใหม่ที่ไม่มีใน source
+- ห้ามใช้คำตัดสินที่ source ไม่ได้พูด (เช่น "แม่นยำ", "เรียลไทม์", "อัจฉริยะ")
+- ห้ามเปลี่ยนแปลง strategic_hypotheses — ส่วนนั้นเป็น unverified by design
+
+ส่งกลับ JSON array เท่านั้น แต่ละ element มี:
+- index: ลำดับ evidence (เริ่มที่ 0)
+- action: "keep" | "rewrite" | "remove"
+- claim: (เฉพาะ action="rewrite") claim ใหม่ที่กระชับ
+
+ห้ามครอบ JSON ด้วย markdown code fence
+"""
+
+    def __init__(self, llm, config: dict | None = None):
+        self.llm = llm
+        self.config = config or {}
+
+    def review(
+        self,
+        research: ResearchResponse,
+        relevant_annotations: list[dict] | None = None,
+    ) -> ResearchResponse | None:
+        """Review evidence claims for semantic entailment.
+
+        Returns a new ResearchResponse with potentially rewritten or removed
+        evidence.  strategic_hypotheses, evidence_based_recommendations, and
+        uncertainty are passed through unchanged.
+
+        If evidence is empty, no LLM call is made and the original research
+        is returned (no claims to verify).
+
+        Fail-closed contract: if the LLM call fails or returns invalid JSON,
+        returns None — signaling the caller that unchecked evidence claims
+        must NOT reach the renderer.  The caller is responsible for using a
+        deterministic limited fallback that contains no unchecked
+        model-generated factual claims.
+        """
+        if not research.evidence:
+            return research
+
+        # Build source map: URL → content
+        source_map: dict[str, str] = {}
+        for a in relevant_annotations or []:
+            key = (a.get("url") or "").lower().rstrip("/")
+            if key:
+                source_map[key] = a.get("content", "")
+
+        # Build review prompt
+        evidence_lines: list[str] = []
+        for i, ev in enumerate(research.evidence):
+            key = (ev.url or "").lower().rstrip("/")
+            source_content = source_map.get(key, "(ไม่พบ source content สำหรับ URL นี้)")
+            evidence_lines.append(
+                f"--- Evidence [{i}] ---\n"
+                f"competitor: {ev.competitor}\n"
+                f"field: {ev.field}\n"
+                f"claim: {ev.claim}\n"
+                f"source URL: {ev.url}\n"
+                f"source content: {source_content}\n"
+                f"--- สิ้นสุด Evidence [{i}] ---\n"
+            )
+
+        user_msg = (
+            f"ตรวจสอบ {len(research.evidence)} evidence claims ต่อไปนี้ "
+            f"เทียบกับ source content ของแต่ละ claim:\n\n"
+            + "\n".join(evidence_lines)
+            + "\nส่งกลับ JSON array ของผลการตรวจ (index, action, claim ถ้า rewrite)"
+        )
+
+        messages = [
+            {"role": "system", "content": self._REVIEW_SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ]
+
+        try:
+            response = self.llm.chat(
+                messages,
+                model=self.config.get("model"),
+                temperature=0.1,
+                max_tokens=2048,
+                max_retry_limit=0,  # no retry — one pass only
+                stream=False,
+                tools=None,  # no web tools — no web calls
+                source="competitor_analysis.semantic_review",
+            )
+        except Exception:
+            # Fail-closed: signal that unchecked claims must not reach renderer
+            return None
+
+        if not response or not response.strip():
+            return None
+
+        # Parse JSON response
+        try:
+            clean = response.strip()
+            # Strip markdown fence if present
+            if clean.startswith("```"):
+                clean = re.sub(r"^```(?:json)?\s*\n?", "", clean)
+                clean = re.sub(r"\n?```\s*$", "", clean)
+            decisions = json.loads(clean)
+        except (json.JSONDecodeError, ValueError):
+            # Fail-closed: signal that unchecked claims must not reach renderer
+            return None
+
+        if not isinstance(decisions, list):
+            return None
+
+        # Build decision map: index → (action, claim)
+        decision_map: dict[int, tuple[str, str]] = {}
+        for d in decisions:
+            if not isinstance(d, dict):
+                continue
+            idx = d.get("index")
+            action = d.get("action", "keep")
+            if isinstance(idx, int) and action in ("keep", "rewrite", "remove"):
+                decision_map[idx] = (action, d.get("claim", ""))
+
+        # Apply decisions to a new evidence list
+        new_evidence: list[CompetitorEvidence] = []
+        for i, ev in enumerate(research.evidence):
+            action, new_claim = decision_map.get(i, ("keep", ""))
+            if action == "remove":
+                continue
+            if action == "rewrite" and new_claim:
+                new_ev = CompetitorEvidence(
+                    competitor=ev.competitor,
+                    field=ev.field,
+                    claim=new_claim,
+                    url=ev.url,
+                    geography=ev.geography,
+                    title=ev.title,
+                    snippet=ev.snippet,
+                )
+                new_evidence.append(new_ev)
+            else:
+                new_evidence.append(ev)
+
+        return ResearchResponse(
+            target_model=research.target_model,
+            competitor_names=research.competitor_names,
+            evidence=new_evidence,
+            evidence_based_recommendations=research.evidence_based_recommendations,
+            strategic_hypotheses=research.strategic_hypotheses,
+            uncertainty=research.uncertainty,
+        )
+
+
 def render_competitor_report(
     json_text: str,
     product_spec: str,

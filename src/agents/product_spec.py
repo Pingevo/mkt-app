@@ -5,12 +5,21 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..file_loader import load_file
+from ..output_validators import normalize_one_page_brief
 from .base_agent import BaseAgent
 
 
 class ProductSpecAgent(BaseAgent):
     agent_name = "product_spec"
     display_name = "นักวิเคราะห์สินค้า"
+
+    def _normalize_quick_brief(self, quick_brief: str) -> str:
+        """Translate 'one-page' intent into a concrete compactness target.
+
+        Only activates when the quick_brief explicitly contains one-page
+        intent. Normal product_spec requests are unchanged.
+        """
+        return normalize_one_page_brief(quick_brief)
 
     def build_prompt(self, raw_data: str, product_images: list[str] | None = None) -> str:
         prompt = (

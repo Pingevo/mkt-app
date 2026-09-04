@@ -15,11 +15,53 @@ from typing import Any
 from rich.console import Console
 
 from ..llm_client import LLMClient
-from ..output_validators import validate_output as _validate_output, _output_is_blank
+from ..output_validators import (
+    validate_output as _validate_output,
+    _output_is_blank,
+    apply_brand_replacements,
+)
 from ..brand_priority import BrandRules
 from ..run_context import StepRunContext, build_multimodal_content
 
 console = Console()
+
+
+# ---------------------------------------------------------------------------
+# M6 repair classification — single mechanism, not per-case flags.
+#
+# Error categories are extracted from the error prefix (e.g. "one-page:..."
+# → category "one-page"). Each category has a repair budget and a
+# soft-accept policy. When budget is exhausted:
+#   - soft-accept categories (one-page) → break the loop (accept output)
+#   - hard-rule categories (brand-hard) → raise ValueError (never soft-accept)
+#   - other categories → raise ValueError (existing behavior)
+#
+# one-page is an instruction-following/compactness condition with tolerance.
+# brand-hard is an explicit deterministic contract from terms.json/voice.json
+# — a remaining violation after the single repair attempt must NOT be
+# delivered to the user.
+# ---------------------------------------------------------------------------
+
+_SOFT_ACCEPT_CATEGORIES = frozenset({"one-page"})
+
+
+def _error_category(error: str) -> str:
+    """Extract category from error prefix (before ':')."""
+    if ":" in error:
+        return error.split(":", 1)[0].strip()
+    return "format"
+
+
+def _repair_budget(category: str, max_repair: int) -> int:
+    """Repair budget per error category.
+
+    one-page: 1 repair then soft-accept (instruction-following tolerance).
+    brand-hard: 1 repair then raise (deterministic hard contract, no tolerance).
+    format/other: max_repair then raise (existing behavior).
+    """
+    if category in ("one-page", "brand-hard"):
+        return 1
+    return max_repair
 
 
 def _web_search_cfg() -> dict:
@@ -273,6 +315,15 @@ class BaseAgent:
 
         return "\n\n".join(sections)
 
+    def _normalize_quick_brief(self, quick_brief: str) -> str:
+        """Hook for agent-specific quick_brief normalization.
+
+        Base implementation returns quick_brief unchanged.
+        Subclasses (e.g. ProductSpecAgent) can override to translate
+        format instructions like 'one-page' into concrete targets.
+        """
+        return quick_brief
+
     def run(self, user_prompt: str, quick_brief: str = "", image_paths: list[str] | None = None,
             extra_image_paths: list[str] | None = None,
             resource_context: str = "", response_format: dict | None = None,
@@ -330,6 +381,9 @@ class BaseAgent:
         # Append resource context as untrusted user-provided documents
         if resource_context:
             user_prompt = f"{user_prompt}\n\n{resource_context}"
+
+        # Normalize quick_brief (agent-specific, e.g. one-page → concrete target)
+        quick_brief = self._normalize_quick_brief(quick_brief)
 
         # Append quick brief (per-run instruction) to user prompt
         # ถือว่าเป็นคำสั่งบังคับจากผู้ใช้ ไม่ใช่แค่บริบทเสริม
@@ -458,17 +512,41 @@ class BaseAgent:
                 else:
                     output = reviewed
 
+        # --- M6: Brand hard-rule deterministic auto-replacement (zero LLM cost) ---
+        # Apply before validation so replacements don't trigger repair calls.
+        if self.brand_rules:
+            output = apply_brand_replacements(output, self.brand_rules)
+
+        # Store quick_brief for validate_output to access one-page compactness check
+        self._last_quick_brief = quick_brief
+
         # ตรวจ output ตามรูปแบบของ agent แล้วซ่อมถ้าไม่ผ่าน
+        # M6: error classification — soft-accept categories (one-page, brand-hard)
+        # get 1 repair then accept; format errors keep existing max_retry_limit.
         max_repair = self.config.get("max_retry_limit", 3)
         ok, error = self.validate_output(output)
         # บันทึก draft ก่อน repair เพื่อ acceptance diagnostics
         self._last_draft_output = output
         self._last_first_validation_error = error if not ok else ""
         self._last_repair_count = 0
+        repair_attempts: dict[str, int] = {}
         for _ in range(max_repair):
             if ok:
                 break
+            category = _error_category(error)
+            budget = _repair_budget(category, max_repair)
+            if repair_attempts.get(category, 0) >= budget:
+                if category in _SOFT_ACCEPT_CATEGORIES:
+                    # Soft-accept: instruction-following / brand issue exhausted.
+                    # Don't raise — accept output despite the soft error.
+                    console.print(f"[yellow]soft-accept: {category} ซ่อมครบ budget แล้ว — ยอมรับ output[/yellow]")
+                    ok = True
+                    break
+                raise ValueError(
+                    f"Agent {self.agent_name} ตรวจ output ไม่ผ่านหลังซ่อม {budget} รอบ: {error}"
+                )
             self._last_repair_count += 1
+            repair_attempts[category] = repair_attempts.get(category, 0) + 1
             console.print(f"[yellow]output ไม่ผ่าน validation: {error}[/yellow]")
             repair_error = error
             repaired = self._repair_output(output, error, messages, response_format)
@@ -797,6 +875,10 @@ class BaseAgent:
 
         required_output_sections ที่กำหนดใน config จะกลายเป็น "คำแนะนำ/โครงสร้าง default"
         เมื่อ user ไม่ระบุรูปแบบอื่น แต่จะถูกบังคับจริงก็ต่อเมื่อเปิด strict_output_sections เท่านั้น
+
+        M6 additions (source-driven, no hardcoded vocabulary):
+        - one-page compactness check (only when one-page intent is active)
+        - brand hard-rule check (restricted/banned from terms.json/voice.json)
         """
         if self.config.get("strict_output_sections"):
             required = self.config.get("required_output_sections")
@@ -804,7 +886,24 @@ class BaseAgent:
             # ปล่อยให้โมเดลยืดหยุ่นตาม quick_brief — ไม่ fallback ไปอ่าน config ส่วนกลาง
             required = []
         quality = self.config.get("output_quality")
-        return _validate_output(self.agent_name, output, required, output_quality=quality)
+        ok, error = _validate_output(self.agent_name, output, required, output_quality=quality)
+        if not ok:
+            return ok, error
+
+        # M6: one-page compactness (only when one-page intent is active)
+        from ..output_validators import validate_one_page_compactness, validate_brand_hard
+        quick_brief = getattr(self, "_last_quick_brief", "")
+        ok, error = validate_one_page_compactness(output, quick_brief)
+        if not ok:
+            return ok, error
+
+        # M6: brand hard-rule (restricted/banned from runtime brand data)
+        if self.brand_rules:
+            ok, error = validate_brand_hard(output, self.brand_rules)
+            if not ok:
+                return ok, error
+
+        return True, ""
 
     def _repair_output(
         self,

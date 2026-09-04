@@ -9,6 +9,8 @@ from typing import Any
 from .config_loader import load_config
 from .content_schema import CONTENT_ARTIFACT_SCHEMA, CONTENT_RESPONSE_SCHEMA
 
+from .brand_priority import BrandRules
+
 
 def _output_is_blank(output: str | None) -> bool:
     return not output or not output.strip()
@@ -271,4 +273,132 @@ def validate_content_output(output: str | dict) -> tuple[bool, str]:
     else:
         data = output
     return _validate_json_against_schema(data, CONTENT_ARTIFACT_SCHEMA["schema"])
+
+
+# ---------------------------------------------------------------------------
+# M6 Generic Remediation — source-driven validators (no hardcoded vocabulary)
+#
+# Design: these validators read from runtime source data (quick_brief, brand
+# rules from terms.json/voice.json) — never from hardcoded product/category
+# lists. Error prefixes encode repair policy for BaseAgent classification.
+# ---------------------------------------------------------------------------
+
+# One-page compactness target (lines). Chosen from the empirical Frontier
+# benchmark: the Frontier S1 output at 55 lines was accepted as "good one-page"
+# by the M6.1 judge. The upper bound 70 gives the model room while still being
+# meaningfully "one page". Over 70 triggers a single compression repair.
+_ONE_PAGE_TARGET_LINES = 70
+_ONE_PAGE_KEYWORDS = ("one-page", "one page", "หน้าเดียว")
+
+
+def _has_one_page_intent(quick_brief: str) -> bool:
+    """Detect explicit one-page intent in quick_brief."""
+    if not quick_brief:
+        return False
+    lowered = quick_brief.lower()
+    return any(kw in lowered for kw in _ONE_PAGE_KEYWORDS)
+
+
+def normalize_one_page_brief(quick_brief: str) -> str:
+    """Translate 'one-page' intent into a concrete compactness target.
+
+    If the quick_brief contains explicit one-page intent, append a concrete
+    line target so the model has a measurable instruction instead of a vague
+    "one-page". If no one-page intent, return unchanged.
+
+    This is a prompt-level steer — it does NOT enforce a hard line count.
+    The deterministic check is in validate_one_page_compactness.
+    """
+    if not _has_one_page_intent(quick_brief):
+        return quick_brief
+    target = _ONE_PAGE_TARGET_LINES
+    return (
+        f"{quick_brief}\n"
+        f"หมายเหตุ: 'one-page' หมายถึงสเปคหนึ่งหน้า A4 กระชับ "
+        f"ประมาณ {target} บรรทัด ไม่ใช่เอกสารหลายหน้า "
+        f"— ใช้เฉพาะข้อมูลที่สำคัญที่สุด"
+    )
+
+
+def validate_one_page_compactness(output: str, quick_brief: str) -> tuple[bool, str]:
+    """Check line count when one-page intent is active.
+
+    Returns (ok, error). If one-page intent is NOT active, always passes.
+    If one-page intent IS active and line count exceeds the target, returns
+    an error with 'one-page:' prefix for repair classification.
+
+    This is a REPAIRABLE instruction-following issue — not a hard rejection.
+    The repair loop in BaseAgent limits this to one targeted repair.
+    """
+    if not _has_one_page_intent(quick_brief):
+        return True, ""
+    if _output_is_blank(output):
+        return True, ""  # blank check is handled elsewhere
+    line_count = len(output.split("\n"))
+    if line_count > _ONE_PAGE_TARGET_LINES:
+        return False, (
+            f"one-page: output ยาว {line_count} บรรทัด เกินเป้าหมาย one-page "
+            f"({_ONE_PAGE_TARGET_LINES} บรรทัด) — กรุณาย่อให้กระชับ ใช้เฉพาะข้อมูลที่สำคัญที่สุด"
+        )
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
+# Brand hard-rule deterministic enforcement
+#
+# Reads from runtime brand data (terms.json restricted/replacements,
+# voice.json banned_phrases) — never from hardcoded vocabulary.
+# ---------------------------------------------------------------------------
+
+
+def apply_brand_replacements(output: str, brand_rules: BrandRules) -> str:
+    """Auto-apply brand term replacements (old → new) deterministically.
+
+    Zero LLM cost. Reads replacements from brand_rules.hard_dict['replacements'].
+    Uses a single-pass regex replacement to prevent cascade effects where
+    a replacement value contains a substring matching another replacement key.
+
+    Returns the output with replacements applied. If no brand rules or
+    no replacements, returns output unchanged.
+    """
+    if not brand_rules or not brand_rules.hard_dict:
+        return output
+    replacements = brand_rules.hard_dict.get("replacements")
+    if not replacements:
+        return output
+    # Single-pass: build a regex that matches any old key, replace with
+    # the corresponding new value. Each position in the string is matched
+    # at most once, so replacement values cannot be re-processed.
+    pattern = re.compile("|".join(re.escape(old) for old in replacements if old))
+    return pattern.sub(lambda m: replacements[m.group(0)], output)
+
+
+def validate_brand_hard(output: str, brand_rules: BrandRules) -> tuple[bool, str]:
+    """Check output for restricted/banned phrases from runtime brand data.
+
+    Returns (ok, error). If a restricted or banned phrase is found in the
+    output, returns an error with 'brand-hard:' prefix for repair
+    classification. Replacements are handled separately by
+    apply_brand_replacements (auto-applied before validation).
+
+    This is a REPAIRABLE issue — the repair loop in BaseAgent limits this
+    to one targeted repair. After that, the error is soft-accepted.
+    """
+    if not brand_rules or not brand_rules.hard_dict:
+        return True, ""
+    violations: list[str] = []
+    restricted = brand_rules.hard_dict.get("restricted", [])
+    for phrase in restricted:
+        if phrase and phrase in output:
+            violations.append(f"คำต้องห้าม '{phrase}'")
+    banned = brand_rules.hard_dict.get("banned_phrases", [])
+    for phrase in banned:
+        if phrase and phrase in output:
+            violations.append(f"วลีต้องห้าม '{phrase}'")
+    if violations:
+        return False, (
+            f"brand-hard: พบคำ/วลีต้องห้ามใน output — {'; '.join(violations)} — "
+            f"กรุณาลบหรือเปลี่ยนคำที่ต้องห้ามออกจาก output"
+        )
+    return True, ""
 
