@@ -140,7 +140,7 @@ def test_json_parse_fail_stops(tmp_run_dir: Any):
 def test_mapping_secret_not_in_prompt(tmp_run_dir: Any):
     source_pack = judge._get_source_pack(judge.SCENARIOS[0])
     x, y = judge._read_blind_outputs(tmp_run_dir, "S1")
-    messages = judge._build_messages(source_pack, x, y)
+    messages = judge._build_messages(source_pack, x, y, judge.SCENARIOS[0])
     prompt_text = json.dumps(messages)
     assert "m6_mapping_secret" not in prompt_text
     # Brand guidelines may legitimately contain the product/company name; the secret
@@ -171,7 +171,7 @@ def test_judge_messages_have_data_url_images_for_s1(tmp_run_dir: Any):
     source_pack = judge._get_source_pack(s1)
     x, y = judge._read_blind_outputs(tmp_run_dir, "S1")
     image_paths = judge._get_image_paths_for_judge(s1)
-    messages = judge._build_messages(source_pack, x, y, image_paths)
+    messages = judge._build_messages(source_pack, x, y, judge.SCENARIOS[0], image_paths)
     user_content = messages[1].get("content", "")
     if not isinstance(user_content, list) or not image_paths:
         # No images in this checkout; nothing to assert.
@@ -292,3 +292,113 @@ def test_brand_gate_count(tmp_path: Any):
     assert revealed["overall"]["brand_asset_gate_pass"] is True
     assert revealed["overall"]["brand_asset_passing_scenarios"] == 4
     assert revealed["overall"]["brand_asset_attempted_scenarios"] == 4
+
+
+# ---------------------------------------------------------------------------
+# M6.1 pre-run corrections: scenario-scoped judge prompt
+# ---------------------------------------------------------------------------
+
+def test_judge_prompt_contains_scenario_scoped_rule():
+    """Judge system prompt must contain the scenario-scoped evaluation rule
+    that prevents requirement leakage from other scenarios/agents."""
+    s4 = next(s for s in judge.SCENARIOS if s["id"] == "S4")
+    source_pack = judge._get_source_pack(s4)
+    messages = judge._build_messages(source_pack, "X output", "Y output", s4)
+    system_text = messages[0]["content"]
+    assert "Scenario-scoped evaluation rule" in system_text
+    assert "Instruction Following" in system_text
+    assert "Do NOT invent requirements" in system_text
+    assert "Do NOT penalize" in system_text
+
+
+def test_judge_prompt_s4_explicitly_excludes_budget_kpi():
+    """S4 judge prompt must explicitly state that campaign budget/KPI
+    are NOT requirements and their absence must not reduce any score."""
+    s4 = next(s for s in judge.SCENARIOS if s["id"] == "S4")
+    source_pack = judge._get_source_pack(s4)
+    messages = judge._build_messages(source_pack, "X output", "Y output", s4)
+    system_text = messages[0]["content"]
+    assert "budget" in system_text.lower()
+    assert "KPI" in system_text
+    assert "content_creator" in system_text
+    assert "must not reduce any score" in system_text
+
+
+def test_judge_prompt_s4_user_text_contains_scenario_scope():
+    """S4 user prompt must contain the scenario scope section with
+    agent_responsibility that defines what is and isn't required."""
+    s4 = next(s for s in judge.SCENARIOS if s["id"] == "S4")
+    source_pack = judge._get_source_pack(s4)
+    messages = judge._build_messages(source_pack, "X output", "Y output", s4)
+    user_text = messages[1]["content"]
+    if isinstance(user_text, list):
+        user_text = " ".join(
+            p.get("text", "") for p in user_text if p.get("type") == "text"
+        )
+    assert "Scenario scope" in user_text
+    assert "Agent responsibility" in user_text
+    assert "TikTok" in user_text
+    assert "งบประมาณแคมเปญ" in user_text or "campaign budget" in user_text.lower()
+
+
+def test_judge_prompt_s3_does_not_exclude_budget():
+    """S3 (campaign_strategy) must NOT have the budget/KPI exclusion —
+    budget IS a requirement for S3."""
+    s3 = next(s for s in judge.SCENARIOS if s["id"] == "S3")
+    source_pack = judge._get_source_pack(s3)
+    messages = judge._build_messages(source_pack, "X output", "Y output", s3)
+    system_text = messages[0]["content"]
+    # S3 system prompt has the generic scenario-scoped rule, but the S4-specific
+    # exclusion clause mentions "content_creator" — S3 should not trigger that.
+    # The generic rule is present, but the S4-specific clause is about S4 only.
+    assert "Scenario-scoped evaluation rule" in system_text
+    # S3's agent_responsibility should mention campaign planning
+    user_text = messages[1]["content"]
+    if isinstance(user_text, list):
+        user_text = " ".join(
+            p.get("text", "") for p in user_text if p.get("type") == "text"
+        )
+    assert "campaign" in user_text.lower() or "แคมเปญ" in user_text
+
+
+def test_judge_prompt_instruction_following_rule_in_user_text():
+    """The user prompt must explicitly tell the judge to score Instruction
+    Following only against the scenario scope."""
+    s1 = judge.SCENARIOS[0]
+    source_pack = judge._get_source_pack(s1)
+    messages = judge._build_messages(source_pack, "X output", "Y output", s1)
+    user_text = messages[1]["content"]
+    if isinstance(user_text, list):
+        user_text = " ".join(
+            p.get("text", "") for p in user_text if p.get("type") == "text"
+        )
+    assert "Instruction Following" in user_text
+    assert "scenario scope" in user_text.lower()
+    assert "Do NOT penalize" in user_text
+
+
+def test_all_scenarios_have_agent_responsibility():
+    """Every scenario must define agent_responsibility for scenario scoping."""
+    for s in judge.SCENARIOS:
+        assert "agent_responsibility" in s, f"{s['id']} missing agent_responsibility"
+        assert s["agent_responsibility"], f"{s['id']} has empty agent_responsibility"
+
+
+def test_judge_cap_is_0_18():
+    """Judge approved cap must be $0.18 (not $0.15)."""
+    assert judge.APPROVED_CAP == 0.18
+
+
+def test_judge_absolute_stop_is_0_20():
+    """Judge absolute stop cap must be $0.20."""
+    assert judge.ABSOLUTE_STOP_CAP == 0.20
+
+
+def test_s4_agent_responsibility_excludes_budget_kpi():
+    """S4 agent_responsibility must explicitly state budget/KPI are not
+    this agent's responsibility."""
+    s4 = next(s for s in judge.SCENARIOS if s["id"] == "S4")
+    resp = s4["agent_responsibility"]
+    assert "งบประมาณ" in resp or "budget" in resp.lower()
+    assert "KPI" in resp or "kpi" in resp.lower()
+    assert "ไม่ใช่หน้าที่" in resp or "not" in resp.lower()

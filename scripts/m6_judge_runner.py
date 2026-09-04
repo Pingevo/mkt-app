@@ -33,7 +33,7 @@ from src import product_db
 from src.run_context import build_multimodal_content
 
 JUDGE_MODEL = "openai/gpt-5.6-sol"
-APPROVED_CAP = 0.15
+APPROVED_CAP = 0.18
 ABSOLUTE_STOP_CAP = 0.20
 MAX_TOKENS = 4000
 PROMPT_PRICE = 0.000001
@@ -64,6 +64,7 @@ SCENARIOS = [
         "quick_brief": "one-page",
         "resource_context": "",
         "include_images": True,
+        "agent_responsibility": "สร้างสเปคสินค้าแบบ one-page จากข้อมูลและรูปภาพที่ให้เท่านั้น ไม่ใช่การวิเคราะห์คู่แข่งหรือวางแผนแคมเปญ",
     },
     {
         "id": "S2",
@@ -72,6 +73,7 @@ SCENARIOS = [
         "quick_brief": "สรุปแบบ bullet executive brief ห้ามใช้ตาราง",
         "resource_context": "Agent settings: competitor_types=[direct], analysis_depth=deep, importance=[positioning].",
         "include_images": False,
+        "agent_responsibility": "วิเคราะห์คู่แข่งโดยใช้หลักฐานจากเว็บ ไม่ใช่การสร้างสเปคสินค้าหรือวางแผนแคมเปญ",
     },
     {
         "id": "S3",
@@ -80,6 +82,7 @@ SCENARIOS = [
         "quick_brief": "executive brief",
         "resource_context": "Agent settings: budget_max=5000, discount_max=0, forbid_tactics=[heavy_discount,flash,bogo].",
         "include_images": False,
+        "agent_responsibility": "วางแผนแคมเปญตามงบและข้อจำกัดที่กำหนด ไม่ใช่การสร้างสเปคสินค้าหรือสร้างคอนเทนต์",
     },
     {
         "id": "S4",
@@ -88,6 +91,7 @@ SCENARIOS = [
         "quick_brief": "เด็กเดินทางคนเดียวปลอดภัย",
         "resource_context": "",
         "include_images": False,
+        "agent_responsibility": "สร้างคอนเทนต์ TikTok (caption, script, hashtags) ไม่ใช่การวางแผนแคมเปญ งบประมาณแคมเปญ/KPI ไม่ใช่หน้าที่ของ agent นี้",
     },
 ]
 
@@ -231,22 +235,42 @@ def _get_image_paths(scenario: dict, product_id: str) -> list[str]:
     return list(_get_product_image_paths(product_id))[:2]
 
 
-def _build_messages(source_pack: str, output_x: str, output_y: str, image_paths: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+def _build_messages(source_pack: str, output_x: str, output_y: str, scenario: dict, image_paths: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     system = (
         "You are an impartial, independent judge evaluating two anonymous AI-generated outputs "
         "(X and Y) for a Thai marketing task. You must not guess which system produced which output. "
         "Score each output independently on a 1–5 scale for every dimension. "
         "Return ONLY a strict JSON object matching the requested schema. No markdown, no explanation outside JSON."
         "\n\nSource-grounded rule: " + SOURCE_GROUNDED_RULE
+        + "\n\nScenario-scoped evaluation rule: "
+        "Score Instruction Following ONLY against the requirements of THIS scenario — "
+        "the user request, Quick Brief, UI selections, Agent Settings, source pack, and the agent's responsibility. "
+        "Do NOT invent requirements from other scenarios or other agents. "
+        "Do NOT penalize an output for omitting information the user did not request and the agent is not responsible for. "
+        "Do NOT reward either X or Y for irrelevant extra material that was not requested. "
+        "For S4 content_creator specifically: campaign budget, KPI, ROI, CPA, ROAS, and conversion targets "
+        "are NOT requirements of this scenario and their absence must not reduce any score."
     )
     rubric_lines = "\n".join(f"{k}: {v}" for k, v in RUBRIC.items())
+    scenario_scope = (
+        f"--- Scenario scope ---\n"
+        f"User request: {scenario['user_request']}\n"
+        f"Quick brief: {scenario['quick_brief']}\n"
+        f"Agent settings: {scenario.get('resource_context', '(none)')}\n"
+        f"Agent responsibility: {scenario.get('agent_responsibility', '(not specified)')}\n"
+        f"Important: Only the above define the requirements for this scenario. "
+        f"Do not add requirements from other scenarios or agents.\n"
+    )
     user_text = (
+        f"{scenario_scope}\n"
         f"--- Source pack ---\n{source_pack}\n\n"
         f"--- Output X ---\n{output_x}\n\n"
         f"--- Output Y ---\n{output_y}\n\n"
         f"--- Rubric (1–5) ---\n{rubric_lines}\n\n"
         "--- Rules ---\n"
         "- Do not identify or mention which output is from which source.\n"
+        "- Score Instruction Following ONLY against the scenario scope above. "
+        "Do NOT penalize for missing items that were not requested or are not this agent's responsibility.\n"
         "- Flag any factual claim that contradicts the source pack.\n"
         "- If the source pack does not contain enough evidence to score a dimension, set insufficient_evidence to true and explain why.\n"
         "- Return valid JSON only.\n\n"
@@ -325,7 +349,7 @@ def run_judge(scenario: dict, run_dir: Path, api_key: str) -> JudgeResult:
         source_pack = _get_source_pack(scenario)
         x, y = _read_blind_outputs(run_dir, scenario["id"])
         image_paths = _get_image_paths_for_judge(scenario)
-        messages = _build_messages(source_pack, x, y, image_paths)
+        messages = _build_messages(source_pack, x, y, scenario, image_paths)
         raw = _call_judge(messages, api_key)
         actual = getattr(httpx.Client, "_m6_last_actual", {}) or {}
         if not actual:

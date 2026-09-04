@@ -16,6 +16,7 @@ import json
 import os
 import random
 import re
+import subprocess
 import sys
 import traceback
 from dataclasses import dataclass
@@ -55,6 +56,25 @@ SOURCE_GROUNDED_RULE = (
 )
 
 AGENT_INSTRUCTIONS_PATH = PROJECT_ROOT / "config" / "agent_instructions.json"
+
+
+def _git_head() -> str:
+    """Return current git HEAD commit hash (short) for evidence recording."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(PROJECT_ROOT),
+        )
+        return result.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+# M6 production remediation baseline — the commit that contains the M6 fixes.
+# The actual execution HEAD may be newer (test-only commits), but this is the
+# production-code baseline that the M6.1 rerun is measuring.
+M6_REMEDIATION_BASELINE = "61b6d93bb0a4389eac1bb9ff936ce6a46004ce23"
 
 
 def _parse_list(value: str) -> list[str]:
@@ -644,6 +664,8 @@ def _write_evidence(
         "stopped": stopped,
         "stop_reason": stop_reason,
         "approval_cap": APPROVAL_CAP,
+        "execution_head": _git_head(),
+        "m6_remediation_baseline": M6_REMEDIATION_BASELINE,
         "scenarios": [],
     }
     for s in SCENARIOS:
