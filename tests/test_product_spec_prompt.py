@@ -105,3 +105,92 @@ def test_prompt_with_single_scope_does_not_need_multi_instruction():
     # อย่างน้อยต้องมีข้อมูลดิบ
     assert "ข้อมูลดิบ" in prompt
     assert "K73" in prompt
+
+
+# ------------------------------------------------------------------
+#  Unified precedence directive (Item 2) — isolation + presentation deference
+# ------------------------------------------------------------------
+
+def test_multi_product_directive_preserves_isolation():
+    """Multi-product directive must always enforce product identity isolation."""
+    agent = _make_agent()
+    raw_data = (
+        "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K69\n--- สิ้นสุดขอบเขตสินค้า ---\n"
+        "ข้อมูล K69\n"
+        "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K72\n--- สิ้นสุดขอบเขตสินค้า ---\n"
+        "ข้อมูล K72"
+    )
+    prompt = agent.build_prompt(raw_data)
+    # Isolation must always be stated — facts must not cross products
+    assert "ห้ามปน" in prompt or "ไม่ปน" in prompt or "แยกจากกัน" in prompt
+
+
+def test_multi_product_directive_defers_presentation_to_quick_brief():
+    """Multi-product directive must state that quick_brief presentation
+    instructions outrank the default separate-spec presentation.
+
+    The code must NOT branch on bool(quick_brief) or detect presentation
+    keywords — the directive is unconditional text that the model interprets.
+    """
+    agent = _make_agent()
+    raw_data = (
+        "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K69\n--- สิ้นสุดขอบเขตสินค้า ---\n"
+        "ข้อมูล K69\n"
+        "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K72\n--- สิ้นสุดขอบเขตสินค้า ---\n"
+        "ข้อมูล K72"
+    )
+    prompt = agent.build_prompt(raw_data)
+    # Must mention quick_brief as the presentation authority
+    assert "quick_brief" in prompt
+    # Must state that quick_brief presentation takes precedence
+    assert "presentation" in prompt or "รูปแบบ" in prompt or "deliverable" in prompt
+
+
+def test_multi_product_directive_states_default_fallback():
+    """Multi-product directive must state the fallback: if quick_brief does
+    not specify presentation, separate specs remain the default."""
+    agent = _make_agent()
+    raw_data = (
+        "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K69\n--- สิ้นสุดขอบเขตสินค้า ---\n"
+        "ข้อมูล K69\n"
+        "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K72\n--- สิ้นสุดขอบเขตสินค้า ---\n"
+        "ข้อมูล K72"
+    )
+    prompt = agent.build_prompt(raw_data)
+    # Must state the default fallback (separate specs when no quick_brief presentation)
+    assert "default" in prompt or "แยก" in prompt or "ค่าเริ่มต้น" in prompt
+
+
+def test_multi_product_directive_is_unconditional():
+    """The directive must be injected whenever scope_count > 1, regardless of
+    whether quick_brief is empty or not. The code must NOT branch on
+    bool(quick_brief) — one unified directive, always."""
+    agent = _make_agent()
+    raw_data = (
+        "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K69\n--- สิ้นสุดขอบเขตสินค้า ---\n"
+        "ข้อมูล K69\n"
+        "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K72\n--- สิ้นสุดขอบเขตสินค้า ---\n"
+        "ข้อมูล K72"
+    )
+    # No quick_brief passed to build_prompt — directive must still appear
+    prompt = agent.build_prompt(raw_data)
+    assert "quick_brief" in prompt
+    assert "ห้ามปน" in prompt or "ไม่ปน" in prompt or "แยกจากกัน" in prompt
+
+
+def test_multi_product_directive_no_benchmark_specific_phrases():
+    """The directive must NOT contain benchmark-specific presentation keywords
+    like 'one-page', 'comparison', 'ตารางเปรียบเทียบ', etc. The model interprets
+    quick_brief semantically; the code does not encode specific formats."""
+    agent = _make_agent()
+    raw_data = (
+        "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K69\n--- สิ้นสุดขอบเขตสินค้า ---\n"
+        "ข้อมูล K69\n"
+        "--- ขอบเขตสินค้า ---\nรหัสสินค้า: K72\n--- สิ้นสุดขอบเขตสินค้า ---\n"
+        "ข้อมูล K72"
+    )
+    prompt = agent.build_prompt(raw_data)
+    # Must not encode specific presentation formats in the directive
+    assert "one-page" not in prompt.lower()
+    assert "comparison" not in prompt.lower()
+    assert "ตารางเปรียบเทียบ" not in prompt

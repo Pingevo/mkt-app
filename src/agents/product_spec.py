@@ -48,14 +48,20 @@ class ProductSpecAgent(BaseAgent):
                 f"--- สิ้นสุดรูปภาพสินค้า ---\n\n"
             )
 
-        # ตรวจ multi-product scopes — ถ้ามีหลาย scope headers ให้สั่งแยกสเปค
+        # ตรวจ multi-product scopes — ถ้ามีหลาย scope headers ให้แทรก unified directive
+        # ที่ enforce product isolation เสมอ แต่ defer presentation format ให้ quick_brief
+        # ถ้า quick_brief กำหนด presentation/deliverable format ให้ทำตาม
+        # ถ้าไม่กำหนด ให้ default separate specs
+        # โมเดลเป็นผู้ตีความว่า quick_brief มี presentation instruction หรือไม่
+        # โค้ดไม่ตรวจ keyword หรือ bool(quick_brief) — directive เดียวเสมอ
         scope_count = raw_data.count("--- ขอบเขตสินค้า ---")
         if scope_count > 1:
             prompt += (
                 f"--- หมายเหตุ: หลายสินค้าในข้อมูลดิบ ---\n"
                 f"ข้อมูลดิบมี {scope_count} สินค้าแยกกันด้วย scope headers\n"
-                f"สร้างสเปคแยกตามแต่ละสินค้า ห้ามปนข้อมูลข้ามรุ่น\n"
-                f"แต่ละสเปคต้องใช้เฉพาะข้อมูลใน scope ของสินค้านั้นเท่านั้น\n"
+                f"ห้ามปนข้อมูลข้ามรุ่น — แต่ละส่วนต้องใช้เฉพาะข้อมูลใน scope ของสินค้านั้นเท่านั้น\n"
+                f"ถ้า quick_brief กำหนดรูปแบบ presentation หรือ deliverable format ให้ทำตาม quick_brief\n"
+                f"ถ้า quick_brief ไม่ได้กำหนด presentation format ให้ default คือสร้างสเปคแยกตามแต่ละสินค้า\n"
                 f"--- สิ้นสุดหมายเหตุ ---\n\n"
             )
 
