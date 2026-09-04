@@ -134,16 +134,14 @@ def test_record_ai_usage_dispatches_to_hub_when_token_present():
 
     try:
         ai_usage.USAGE_LOG_PATH = path
-        with mock.patch.dict(os.environ, {
-            "AI_USAGE_HUB_URL": "https://digital.in.th",
-            "AI_USAGE_HUB_TOKEN": "svc_testtoken",
-        }):
-            flow_context.clear_usage_context()
-            flow_context.set_flow_id("flow-abc")
-            flow_context.set_usage_actor("scheduler")
-            flow_context.set_usage_reference("K5")
-            flow_context.set_usage_metadata({"job_id": "job-1"})
+        flow_context.clear_usage_context()
+        flow_context.set_flow_id("flow-abc")
+        flow_context.set_usage_actor("scheduler")
+        flow_context.set_usage_reference("K5")
+        flow_context.set_usage_metadata({"job_id": "job-1"})
 
+        with mock.patch.object(ai_usage, "_read_hub_credentials",
+                               lambda: ("https://digital.in.th", "svc_testtoken")):
             with mock.patch.object(ai_usage, "_post", _capture_post):
                 with mock.patch.object(ai_usage.threading, "Thread", _FakeThread):
                     ai_usage.record_ai_usage(ai_usage.make_entry(source="test.hub"))
@@ -183,11 +181,9 @@ def test_record_ai_usage_swallows_hub_errors():
 
     try:
         ai_usage.USAGE_LOG_PATH = path
-        with mock.patch.dict(os.environ, {
-            "AI_USAGE_HUB_URL": "https://digital.in.th",
-            "AI_USAGE_HUB_TOKEN": "svc_testtoken",
-        }):
-            flow_context.clear_usage_context()
+        flow_context.clear_usage_context()
+        with mock.patch.object(ai_usage, "_read_hub_credentials",
+                               lambda: ("https://digital.in.th", "svc_testtoken")):
             with mock.patch.object(ai_usage, "_post", _boom):
                 with mock.patch.object(ai_usage.threading, "Thread", _FakeThread):
                     ai_usage.record_ai_usage(ai_usage.make_entry(source="test.hub_error"))
@@ -225,3 +221,26 @@ def test_context_merge_does_not_override_caller_fields():
         if path.exists():
             shutil.rmtree(path.parent)
         flow_context.clear_usage_context()
+
+
+def test_default_test_environment_resolves_no_real_hub_credentials():
+    """Regression: conftest autouse fixture must isolate every test from real Hub.
+
+    ก่อนหน้านี้ ``get_env()`` เรียก ``load_dotenv()`` ทุกครั้ง และโมดูลอื่น
+    (asset_library, content_history, web_viewer) เรียก ``load_dotenv()`` เองใน
+    import time — ทำให้ ``AI_USAGE_HUB_TOKEN`` จริงจาก .env หลุดเข้า env ของ test
+    แล้ว ``_read_hub_credentials()`` คืน token จริง → test ยิง POST ไป Hub จริง
+
+    ตอนนี้ ``tests/conftest.py`` patch ``_read_hub_credentials`` โดยตรง
+    ให้คืน ``(None, None)`` เสมอ — ไม่ว่า env จะถูกโหลดใหม่กี่ครั้งก็ตาม
+    """
+    url, token = ai_usage._read_hub_credentials()
+    assert url is None, (
+        f"conftest isolation broken: _read_hub_credentials returned url={url!r} — "
+        "test สามารถยิง Hub จริงได้ ตรวจสอบ tests/conftest.py"
+    )
+    assert token is None, (
+        f"conftest isolation broken: _read_hub_credentials returned a token "
+        f"(len={len(token) if token else 0}) — test สามารถยิง Hub จริงได้ "
+        "ตรวจสอบ tests/conftest.py"
+    )
