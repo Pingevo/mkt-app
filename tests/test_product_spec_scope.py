@@ -227,3 +227,115 @@ def test_run_single_agent_falls_back_to_raw_when_no_folders(_pdb, monkeypatch, t
 
     # ต้องใช้ raw_contents เพราะไม่มี folders
     assert "ข้อมูลดิบของสินค้า" in captured_raw_data["raw_data"]
+
+
+# ------------------------------------------------------------------
+#  Identity envelope — generic multi-product source identity
+#  (regression for get_scoped_context_text identity labels)
+# ------------------------------------------------------------------
+
+
+def _make_unscoped_product(product_db, product_id: str, raw_text: str):
+    """สร้าง product ที่ไม่มี scope (ไฟล์เดียว สินค้าเดียว)."""
+    record = product_db.load(product_id)
+    record["status"] = "ready"
+    record["raw_text"] = raw_text
+    product_db.save(product_id, record)
+
+
+def test_single_product_has_identity_envelope(_pdb):
+    """Single product context ต้องมี identity boundary ครอบ —
+    ระบุ product ID เสมอ ไม่เฉพาะ record ที่มี scope."""
+    product_db = _pdb
+    _make_unscoped_product(product_db, "SoloProd", "solo raw text content")
+
+    raw_data = product_db.get_scoped_context_text(["SoloProd"])
+
+    assert "เริ่มข้อมูลสินค้า: SoloProd" in raw_data
+    assert "สิ้นสุดข้อมูลสินค้า: SoloProd" in raw_data
+    # raw content ยังอยู่ภายใน envelope
+    assert "solo raw text content" in raw_data
+
+
+def test_multi_product_identity_boundaries_separate(_pdb):
+    """Multi-product A/B ต้องมี boundary แยกและข้อมูลแต่ละตัวอยู่
+    ภายใน boundary ของตัวเอง — ไม่ปนกัน."""
+    product_db = _pdb
+    _make_unscoped_product(product_db, "ProdA", "content alpha for A")
+    _make_unscoped_product(product_db, "ProdB", "content beta for B")
+
+    raw_data = product_db.get_scoped_context_text(["ProdA", "ProdB"])
+
+    a_start = raw_data.find("เริ่มข้อมูลสินค้า: ProdA")
+    a_end = raw_data.find("สิ้นสุดข้อมูลสินค้า: ProdA")
+    b_start = raw_data.find("เริ่มข้อมูลสินค้า: ProdB")
+    b_end = raw_data.find("สิ้นสุดข้อมูลสินค้า: ProdB")
+
+    # ทั้งสอง boundary ปรากฏ
+    assert a_start != -1 and a_end != -1
+    assert b_start != -1 and b_end != -1
+
+    # content alpha อยู่ใน boundary A เท่านั้น
+    alpha_pos = raw_data.find("content alpha for A")
+    assert a_start < alpha_pos < a_end, "alpha content outside A boundary"
+    assert not (b_start < alpha_pos < b_end), "alpha content leaked into B boundary"
+
+    # content beta อยู่ใน boundary B เท่านั้น
+    beta_pos = raw_data.find("content beta for B")
+    assert b_start < beta_pos < b_end, "beta content outside B boundary"
+    assert not (a_start < beta_pos < a_end), "beta content leaked into A boundary"
+
+
+def test_scoped_product_keeps_inner_scope_header_within_envelope(_pdb):
+    """Product ที่มี scope.product_key ยังเก็บ inner scope header ไว้
+    และไม่ทำข้อมูลหาย — envelope นอกเป็น identity จาก runtime arg,
+    inner scope header เป็น metadata ของ record."""
+    product_db = _pdb
+    _make_scoped_product(product_db, "CACGO K73", "K73",
+                         own_text="K73 CPU Realtek 8763", split_from="CACGO Catalog")
+
+    raw_data = product_db.get_scoped_context_text(["CACGO K73"])
+
+    # envelope นอก
+    assert "เริ่มข้อมูลสินค้า: CACGO K73" in raw_data
+    assert "สิ้นสุดข้อมูลสินค้า: CACGO K73" in raw_data
+    # inner scope header ยังอยู่
+    assert "รหัสสินค้า: K73" in raw_data
+    assert "แยกจาก: CACGO Catalog" in raw_data
+    # raw content ยังอยู่
+    assert "K73 CPU Realtek 8763" in raw_data
+
+
+def test_empty_or_missing_product_no_misleading_block(_pdb):
+    """Empty/missing product ต้องไม่สร้าง misleading block —
+    คืน "" ถ้าไม่มีสินค้าใดมีข้อมูล."""
+    product_db = _pdb
+
+    # product ที่ไม่มีใน DB
+    assert product_db.get_scoped_context_text(["ไม่มีจริง"]) == ""
+
+    # product ที่มี record แต่ raw_text ว่าง
+    rec = product_db.load("EmptyProd")
+    rec["status"] = "ready"
+    rec["raw_text"] = ""
+    product_db.save("EmptyProd", rec)
+    assert product_db.get_scoped_context_text(["EmptyProd"]) == ""
+
+    # mix: มี empty + มี content → มีเฉพาะ envelope ของตัวที่มี content
+    _make_unscoped_product(product_db, "HasContent", "real content")
+    raw_data = product_db.get_scoped_context_text(["EmptyProd", "HasContent"])
+    assert "เริ่มข้อมูลสินค้า: HasContent" in raw_data
+    assert "เริ่มข้อมูลสินค้า: EmptyProd" not in raw_data
+
+
+def test_raw_contents_not_modified_within_envelope(_pdb):
+    """raw source content ต้องไม่ถูกเปลี่ยน — envelope เพิ่มเฉพาะ
+    boundary นอก ไม่แตะเนื้อหาข้างใน."""
+    product_db = _pdb
+    original_text = "line1\nline2 with $pecial chars\nline3"
+    _make_unscoped_product(product_db, "RawCheck", original_text)
+
+    raw_data = product_db.get_scoped_context_text(["RawCheck"])
+
+    # raw text ต้องอยู่ครบเหมือนเดิม
+    assert original_text in raw_data

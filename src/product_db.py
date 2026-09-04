@@ -416,15 +416,32 @@ def get_scoped_context_text(folders: list[str]) -> str:
     ใช้ get_agent_context_text ของแต่ละสินค้า ซึ่งเคารพ scope
     (ตัดเฉพาะส่วนของรุ่นนั้นจาก catalog แทนที่จะส่งไฟล์ดิบทั้งไฟล์).
     รองรับหลายสินค้า (combined mode) — รวม scoped context ของแต่ละตัว
-    โดยแต่ละตัวมี header บอกรหัสสินค้า ไม่ปนกัน.
+    โดยแต่ละตัวมี identity envelope บอก product ID เสมอ ไม่ปนกัน.
+
+    Identity envelope (generic, source-driven):
+      --- เริ่มข้อมูลสินค้า: <product_id> ---
+      <existing inner context unchanged — incl. scope header if present>
+      --- สิ้นสุดข้อมูลสินค้า: <product_id> ---
+
+    ใช้ product ID จาก runtime argument (folder) เท่านั้น — ไม่ใช้ category,
+    keyword, stopword หรือ domain-specific logic.  รักษา inner scope markers
+    ของ get_agent_context_text ไว้ทั้งหมด เพื่อไม่ให้ข้อมูล record ที่มี
+    scope.product_key ทำซ้ำ/ขัดแย้งกับ envelope.
 
     คืน "" ถ้าไม่มีสินค้าใดมีข้อมูล (caller จัดการกรณีนี้เอง).
     """
     parts = []
     for folder in folders:
         ctx = get_agent_context_text(folder)
-        if ctx.strip():
-            parts.append(ctx)
+        if not ctx.strip():
+            continue
+        # Normalize label: strip และทำให้บรรทัดเดียว เพื่อไม่ให้ทำลาย boundary
+        label = (folder or "").strip().replace("\n", " ").replace("\r", " ")
+        parts.append(
+            f"--- เริ่มข้อมูลสินค้า: {label} ---\n"
+            f"{ctx}\n"
+            f"--- สิ้นสุดข้อมูลสินค้า: {label} ---"
+        )
     return "\n\n".join(parts)
 
 
