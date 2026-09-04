@@ -1,7 +1,7 @@
 # M6 Status
 
 **Canonical current-state document for M6.1 qualification and remediation.**
-Last updated: 2026-09-04 (Round 7 documentation checkpoint).
+Last updated: 2026-09-04 (Round 8 — truncation evidence correction + qualification-validity axes).
 
 ---
 
@@ -15,8 +15,28 @@ Last updated: 2026-09-04 (Round 7 documentation checkpoint).
 | M6 remediation baseline | `61b6d93bb0a4389eac1bb9ff936ce6a46004ce23` |
 | Source run (incomplete) | `data/m6_frontier_uat/20260904_070830/` |
 | Continuation run (completed) | `data/m6_frontier_uat/20260904_094021_resume_from_20260904_070830/` |
-| Execution/harness evidence | **VALID** — all 7 paid calls completed, all evidence preserved |
 | Production remediation during qualification | **None** — no production code was modified during the run |
+
+### Qualification validity — separated axes
+
+The earlier single `Execution/harness evidence = VALID` statement is
+replaced by three explicit axes, because the truncation evidence
+(Round 8) showed that evidence integrity and candidate completeness
+are different concerns:
+
+| Axis | Status | Detail |
+|------|--------|--------|
+| Execution / evidence integrity | **VALID** | All 7 paid calls completed; all evidence preserved; judge executed; hashes verified. |
+| Frontier candidate completeness | **COMPROMISED** | S1 complete. **S2/S3/S4 truncated/incomplete** (see §Truncation below). |
+| Clean Frontier-parity comparability | **COMPROMISED for S2–S4** | Because Frontier S2/S3/S4 were truncated, the MKTApp-vs-Frontier deltas for S2–S4 must **not** be interpreted as a clean measurement of full Frontier parity. S1 is a clean comparison. |
+
+**Important:** The M6.1 FAIL verdict stands and is driven by genuine
+MKTApp product defects (grounding, instruction precedence, brand
+utilization) observed in the evidence — **not** by the Frontier
+truncation. The Frontier truncation, if anything, weakened the
+Frontier candidate and may have made MKTApp appear relatively stronger
+in S2–S4. The truncation does **not** justify removing the observed
+MKTApp product defects, which remain actionable.
 
 ---
 
@@ -71,8 +91,8 @@ All three sub-gates failed. `m6_pass = non_inferior AND hard_gate AND brand_gate
 | Scenario | Agent | Delta | Hard gate | Brand advantage | Key finding |
 |----------|-------|-------|-----------|-----------------|-------------|
 | S1 | product_spec | −1.333 | FAIL | FAIL (−2.0) | MKTApp produced two separate specs, not a one-page comparison. Factual errors (Truly = mirror, added accessories). Technical tone, not brand voice. |
-| S2 | competitor_analysis | −0.167 | FAIL | FAIL (−1.0) | Near parity overall. Both had hallucinations. MKTApp output truncated. MKTApp won evidence quality (+1.0) and user effort (+1.0). |
-| S3 | campaign_strategy | +1.000 | PASS | FAIL (+0.0) | **MKTApp clearly outperformed Frontier.** Frontier output was severely truncated. MKTApp correctly avoided unsupported claims and discount tactics. Brand advantage not achieved (tie at 4/4). |
+| S2 | competitor_analysis | −0.167 | FAIL | FAIL (−1.0) | Near parity overall. Both had hallucinations. **Frontier output truncated** (harness token-budget; see §Truncation). MKTApp won evidence quality (+1.0) and user effort (+1.0). Delta not a clean Frontier-parity measurement. |
+| S3 | campaign_strategy | +1.000 | PASS | FAIL (+0.0) | MKTApp correctly avoided unsupported claims and discount tactics. **Frontier output truncated** (harness token-budget; see §Truncation) — the +1.0 delta is partly attributable to Frontier incompleteness and must not be read as a clean parity measurement. Brand advantage not achieved (tie at 4/4). |
 | S4 | content_creator | −0.167 | PASS | FAIL (+0.0) | Near parity. MKTApp's JSON format less readable than Frontier's markdown script. Both had hallucinations (voice messaging, product colors). MKTApp won user effort (+1.0). |
 
 ### Key insight
@@ -149,26 +169,83 @@ this administrative breach.** The paid outputs are valid evidence.
    - No agent currently injects brand context as a deliberate advantage
      instruction.
 
-4. **Output truncation observed in multiple candidates** (S2, S3 Frontier, S4 Frontier)
-   - Truncation was observed in both MKTApp and Frontier outputs.
-   - Root cause must be **verified offline** before changing token limits.
-   - Do not assume truncation is solely a token-budget problem.
+4. **Truncation — Frontier harness side, not MKTApp** (S2, S3, S4 Frontier)
+   - Recovered MKTApp S1–S4 outputs do **not** show confirmed token
+     truncation. (The source-run blind output `S2_Y.txt` was 11 bytes —
+     an empty/failed capture in the source run, not truncation; it was
+     recovered from the prior qualification run
+     `data/all_agents_beta_qualification/run_outputs/` and is complete
+     at 6082 bytes ending with a limitations section.)
+   - Frontier S2/S3/S4 are **confirmed truncated/incomplete**:
+     S2 ends mid-word ("นาฬิกาการโทรวิดีโ"), S3 ends on an empty heading
+     ("## "), S4 ends mid-table-row ("| คุณสมบัติที") with
+     `completion_tokens == max_tokens == 3500`.
+   - Evidence points to the **Frontier harness output-token budget** as
+     the observed cause: the harness sets
+     `max_tokens=scenario["frontier_output_tokens"]` (S2/S3: 4500,
+     S4: 3500) and web_search server-tool calls consume the same
+     completion budget, exhausting visible-text capacity.
+   - The harness did **not** persist or check `finish_reason`, so
+     `finish_reason="length"` was silent.
+   - Production `src/llm_client.py:chat()` also does not surface
+     `finish_reason` — this is a **latent production observability
+     risk**, but it was **NOT demonstrated as an MKTApp M6.1 failure**.
+   - Distinction preserved:
+     - **Observed MKTApp product defects** (grounding, instruction
+       precedence, brand) = real and remain actionable; they drive the
+       FAIL verdict.
+     - **Harness-side truncation** = `frontier_output_tokens` cap +
+       web_search completion-token consumption + no `finish_reason`
+       check; compromised Frontier candidate completeness for S2–S4.
+     - **Latent production risk** = `llm_client.chat()` ignores
+       `finish_reason`; if a future MKTApp generation hits `max_tokens`,
+       truncation would be silent. Not yet manifested.
+   - **Do not increase token limits.** The remediation is detection
+     (surface `finish_reason` as metadata, persist in harness evidence),
+     not expansion.
+   - **No rerun is required before remediation** — existing evidence is
+     sufficient to identify and fix the genuine MKTApp product defects.
+   - **Any future post-remediation Frontier qualification must fix and
+     verify Frontier candidate completeness first**, otherwise the
+     parity measurement is not clean.
 
 5. **Content Creator machine-readable JSON is an architectural requirement**
-   - The JSON schema is required for the system's pipeline.
-   - Do not remove it merely to improve benchmark readability.
-   - Human-readable preview may be added as an additional field if needed.
+   - The JSON schema is required for the system's pipeline
+     (`media_gen` consumes structured `posts`).
+   - The production UI already renders the JSON into human-readable
+     Markdown via `src/content_schema.py:render_posts_to_markdown`, so
+     the machine-readable + human-readable architecture is already
+     satisfied. No schema change is needed.
+   - Do not remove or alter the JSON schema merely to improve benchmark
+     readability. The M6.1 judge saw only raw JSON because the harness
+     writes the agent's raw output, not the rendered Markdown — that is
+     a harness presentation gap, not an architecture failure.
 
-### Proposed fixes (not yet implemented)
+### Proposed fixes (Remediation Design v2 — accepted, not yet implemented)
 
-These are hypotheses to be validated during remediation design, not
-committed solutions:
+These are the accepted design contracts from Remediation Design v2.
+Implementation is pending Product Owner approval:
 
-1. Generic source-grounding constraint for all agents
-2. Instruction precedence fix for Product Spec multi-product + one-page
-3. Generic brand-context injection as competitive differentiator
-4. Offline truncation root-cause verification
-5. Content Creator readability (only after the above)
+1. **Grounding** — shared three-category contract (supplied facts /
+   researched facts with evidence / inference) injected via
+   `BaseAgent._build_system_prompt`; code verifies only mechanically
+   knowable invariants (citation provenance against captured
+   annotations, schema, brand-hard). No generic factuality regex.
+2. **Instruction precedence** — one generic multi-product directive
+   that always preserves product isolation and defers presentation
+   format to quick_brief (model interprets semantically); no keyword
+   vocabulary, no `bool(quick_brief)` switch.
+3. **Brand utilization** — reframe existing `brand_reference` as
+   task-decision context (not passive background) via a
+   `use_brand_differentiator` flag; hard restrictions/replacements
+   stay deterministic; no soft-brand term-presence validator; no
+   merging of positioning into `BrandRules`.
+4. **Truncation** — surface `finish_reason` / `last_truncated` as
+   metadata on `LLMClient` (no return-type break, no content marker,
+   reset per call); persist in harness evidence; no token-limit
+   increase.
+5. **Content Creator** — no schema change; existing Markdown renderer
+   already satisfies machine-readable + human-readable.
 
 ---
 
@@ -201,15 +278,23 @@ These are **mandatory constraints** for the next phase:
 
 ## Next Phase
 
-**Phase:** `M6 Remediation Design`
+**Phase:** `M6 Remediation Implementation` (pending Product Owner approval)
 
-**Order of investigation/remediation:**
+**Remediation Design v2** is accepted. The implementation order is:
 
-1. Generic grounding/reliability design
-2. Instruction precedence / Product Spec multi-product conflict
-3. Generic brand-context utilization
-4. Offline truncation root-cause verification
-5. Content Creator readability (only after the above)
+1. Truncation metadata surfacing (`llm_client.py` + harness evidence)
+2. Product Spec instruction-precedence directive (`product_spec.py`)
+3. Shared grounding policy block + citation provenance check
+   (`base_agent.py`, `output_validators.py`, `agents.yaml`)
+4. Brand differentiator framing via `brand_reference`
+   (`base_agent.py`, `competitor_analysis.py`, `agents.yaml`)
+5. Content Creator — no change (existing renderer verified)
+
+**Pre-condition for any future Frontier qualification rerun:**
+Frontier candidate completeness must be fixed and verified first
+(harness `finish_reason` detection + adequate `frontier_output_tokens`
+budget). A rerun against truncated Frontier outputs must not be called
+a clean Frontier-parity measurement.
 
 **No paid rerun is authorized yet.**
 
@@ -242,7 +327,8 @@ and are **superseded** by this canonical status document:
 
 - `M6_1_JUDGE_REPORT.md` — references run `20260902_070643` (older run)
 - `M6_FINAL_FAILURE_ATTRIBUTION_REPORT.md` — references run `20260902_070643`
-- `M6_REMEDIATION_DESIGN.md` — preliminary design before generic rebase
+- `M6_REMEDIATION_DESIGN.md` — preliminary design before generic rebase;
+  superseded by Remediation Design v2 (accepted, documented in this file)
 - `M6_1_RERUN_REPORT.md` — documents the incomplete source run
   `20260904_070830`; valid as historical record of that run's stoppage
 - `M6_GENERIC_REMEDIATION_REBASE.md` — documents the harness hardening
