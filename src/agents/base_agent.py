@@ -58,6 +58,8 @@ class BaseAgent:
         self.brand_reference = brand_reference
         self.brand_rules = brand_rules
         self.instructions = instructions or {}
+        # Runtime multi-brand contract (brand_dir from StepRunContext in run()).
+        self.brand_dir = ""
 
     def _format_instructions(self) -> str:
         """Format user-set instructions into a text block for the system prompt."""
@@ -320,6 +322,8 @@ class BaseAgent:
             quick_brief = step_context.quick_brief
             resource_context = step_context.resource_text
             extra_image_paths = list(step_context.resource_image_paths)
+            # Runtime multi-brand contract
+            self.brand_dir = step_context.brand_dir
 
         all_image_paths = image_paths + extra_image_paths
 

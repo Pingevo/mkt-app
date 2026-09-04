@@ -94,10 +94,11 @@ class Orchestrator:
         product_id: str | None = None,
     ) -> None:
         self.config = load_config(config_path)
-        self.brand_context = load_brand_rules(brand_dir, product_id=product_id)
-        self.brand_reference = load_brand_reference(brand_dir, product_id=product_id)
-        self.brand_visual = load_brand_visual(brand_dir, product_id=product_id)
-        self.brand_rules = load_brand_priority(brand_dir)
+        self.brand_dir = brand_dir or "brand"
+        self.brand_context = load_brand_rules(self.brand_dir, product_id=product_id)
+        self.brand_reference = load_brand_reference(self.brand_dir, product_id=product_id)
+        self.brand_visual = load_brand_visual(self.brand_dir, product_id=product_id)
+        self.brand_rules = load_brand_priority(self.brand_dir)
         self.product_images = product_images or []
         self.product_id = product_id
         self.results: dict[str, str] = {}
@@ -122,9 +123,13 @@ class Orchestrator:
     def _make_agent(self, agent_name: str, agent_cls: type, llm: LLMClient):
         cfg = get_agent_config(self.config, agent_name)
         instructions = self._load_agent_instructions(agent_name)
-        return agent_cls(cfg, llm, brand_context=self.brand_context,
-                         brand_reference=self.brand_reference, instructions=instructions,
-                         brand_rules=self.brand_rules)
+        agent = agent_cls(cfg, llm, brand_context=self.brand_context,
+                          brand_reference=self.brand_reference, instructions=instructions,
+                          brand_rules=self.brand_rules)
+        # Runtime multi-brand contract.
+        # StepRunContext (when provided) overrides brand_dir in agent.run().
+        agent.brand_dir = getattr(self, "brand_dir", "brand")
+        return agent
 
     def _load_agent_instructions(self, agent_name: str) -> dict:
         """Load user-set instructions for an agent from config/agent_instructions.json."""

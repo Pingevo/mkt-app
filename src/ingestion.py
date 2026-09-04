@@ -36,6 +36,7 @@ from typing import Any
 import yaml
 
 from . import product_db
+from .brand_loader import load_product_profile
 from .config_loader import _project_root
 from .file_loader import load_file
 from .llm_client import LLMClient
@@ -876,6 +877,15 @@ def _generate_metadata_summary(product_id: str, llm: LLMClient | None = None) ->
         "has_images": image_count > 0,
         "image_count": image_count,
     }
+
+    # category จาก product_profile.json ที่ user/config ระบุชัดเจน (ไม่ใช่การเดา)
+    try:
+        profile = load_product_profile(product_id) or {}
+        profile_category = (profile.get("category") or "").strip()
+        if profile_category:
+            metadata["category"] = profile_category
+    except Exception:
+        pass
 
     # ถ้ามี LLM และมี raw_text → สรุปสั้นๆ
     if llm is not None and raw_text.strip():

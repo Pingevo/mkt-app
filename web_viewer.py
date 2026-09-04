@@ -160,11 +160,13 @@ AGENT_DEPENDENCIES = {
 AGENT_ORDER = ["product_spec", "competitor_analysis", "campaign_strategy", "content_creator"]
 
 
-def _get_orchestrator() -> Orchestrator:
-    global _orch
-    if _orch is None:
-        _orch = Orchestrator(brand_dir="brand")
-    return _orch
+def _get_orchestrator(brand_dir: str | Path | None = None) -> Orchestrator:
+    """Factory for a fresh Orchestrator bound to a specific brand_dir.
+
+    A single-agent run should not share mutable product/result state with
+    other runs, so we create a new instance per request.
+    """
+    return Orchestrator(brand_dir=brand_dir or "brand")
 
 
 def _sse(event_type: str, text: str, **extra) -> str:
@@ -1570,6 +1572,20 @@ async def api_product_profile_save(folder: str, request: Request) -> JSONRespons
     profile_dir.mkdir(parents=True, exist_ok=True)
     path = profile_dir / "product_profile.json"
     path.write_text(_json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Sync explicit category from product_profile into product_db metadata
+    # so runtime paths see it even before the next ingestion run.
+    profile_category = (body.get("category") or "").strip()
+    if profile_category:
+        try:
+            record = product_db.load(folder)
+            meta = record.get("metadata") or {}
+            meta["category"] = profile_category
+            record["metadata"] = meta
+            product_db.save(folder, record)
+        except Exception:
+            pass  # product may not exist in DB yet; profile still saved
+
     return JSONResponse({"ok": True, "saved": str(path.relative_to(PROJECT_ROOT))})
 
 
@@ -2319,6 +2335,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
     media_type = body.get("media_type", "")
     upload_session_id = body.get("upload_session_id", "")
     resource_refs = body.get("resource_refs", [])
+    brand_dir = body.get("brand_dir", "") or "brand"
 
     if not agent_key or not folder:
         return JSONResponse({"error": "missing agent or folder"})
@@ -2329,7 +2346,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
 
     async def event_stream():
         global _current_llm
-        orch = _get_orchestrator()
+        orch = _get_orchestrator(brand_dir)
         q: _queue.Queue[str | None] = _queue.Queue()
 
         def worker():
@@ -2365,6 +2382,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                         product_refs=product_refs,
                         resource_refs=resource_refs,
                         upload_session_id=upload_session_id,
+                        brand_dir=brand_dir,
                     )
                     if step_context.warnings:
                         raise ValueError("; ".join(step_context.warnings))
@@ -2938,6 +2956,9 @@ async def api_run_agents(request: Request) -> StreamingResponse:
     # media settings — สร้างอะไร + เมื่อไหร่
     media_type = body.get("media_type", "image")
     media_when = body.get("media_when", "ask")
+    brand_dir = body.get("brand_dir", "") or "brand"
+    upload_session_id = body.get("upload_session_id", "")
+    resource_refs = body.get("resource_refs", [])
 
     # Sort agents by order (no auto-add — user เลือกเองว่าจะรันอะไร)
     sorted_agents = [a for a in AGENT_ORDER if a in agents]
@@ -2950,7 +2971,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
     async def event_stream():
         # Fresh orchestrator per call — do NOT share across parallel runs
         # (product_id/results/product_images are mutable state)
-        orch = Orchestrator(brand_dir="brand")
+        orch = Orchestrator(brand_dir=brand_dir)
         q: _queue.Queue[str | None] = _queue.Queue()
 
         def worker():
@@ -2999,6 +3020,21 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                         try:
                             def _status_cb_combined(msg, _ak=agent_key):
                                 q.put_nowait(_sse("status", msg, agent=_ak))
+                            _combined_flow_id = f"agents_{uuid.uuid4().hex[:8]}"
+                            _combined_product_refs = [f"product:{f}" for f in folders]
+                            _combined_step_ctx = build_step_run_context(
+                                _resource_store,
+                                workflow_id=_combined_flow_id,
+                                step_id=f"{_combined_flow_id}_step_0",
+                                agent_key=agent_key,
+                                quick_brief=quick_brief,
+                                product_refs=_combined_product_refs,
+                                resource_refs=resource_refs,
+                                upload_session_id=upload_session_id,
+                                brand_dir=brand_dir,
+                            )
+                            if _combined_step_ctx.warnings:
+                                raise ValueError("; ".join(_combined_step_ctx.warnings))
                             results = _run_single_agent(
                                 agent_key, folder_label, all_raw, all_images,
                                 all_ready, orch, llm, output_dir,
@@ -3008,6 +3044,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                                 platforms=platforms, media_type=media_type,
                                 status_callback=_status_cb_combined,
                                 folders=folders,
+                                step_context=_combined_step_ctx,
                             )
                             for i, (result, filepath) in enumerate(results):
                                 set_num = i + 1 if len(results) > 1 else None
@@ -3034,6 +3071,20 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                             try:
                                 def _status_cb_sep(msg, _ak=agent_key):
                                     q.put_nowait(_sse("status", msg, agent=_ak))
+                                _sep_flow_id = f"agents_{uuid.uuid4().hex[:8]}"
+                                _sep_step_ctx = build_step_run_context(
+                                    _resource_store,
+                                    workflow_id=_sep_flow_id,
+                                    step_id=f"{_sep_flow_id}_step_0",
+                                    agent_key=agent_key,
+                                    quick_brief=quick_brief,
+                                    product_refs=[f"product:{folder}"],
+                                    resource_refs=resource_refs,
+                                    upload_session_id=upload_session_id,
+                                    brand_dir=brand_dir,
+                                )
+                                if _sep_step_ctx.warnings:
+                                    raise ValueError("; ".join(_sep_step_ctx.warnings))
                                 results = _run_single_agent(
                                     agent_key, folder, raw_contents, image_paths,
                                     ready_contents, orch, llm, output_dir,
@@ -3043,6 +3094,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                                     platforms=platforms, media_type=media_type,
                                     status_callback=_status_cb_sep,
                                     folders=[folder],
+                                    step_context=_sep_step_ctx,
                                 )
                                 for i, (result, filepath) in enumerate(results):
                                     set_num = i + 1 if len(results) > 1 else None
@@ -3117,6 +3169,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
     body = await request.json()
     flows = body.get("flows", [])
     global_quick_brief = body.get("quick_brief", "")
+    global_brand_dir = body.get("brand_dir", "") or "brand"
 
     if not flows:
         return JSONResponse({"error": "missing flows"})
@@ -3143,6 +3196,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
             from src.flow_runner import run_flow_steps, build_context_for_agent
             plan_idx = flow.get("index", flow_idx)
             flow_quick_brief = flow.get("quick_brief", global_quick_brief)
+            flow_brand_dir = flow.get("brand_dir", global_brand_dir) or global_brand_dir
 
             # ผูก LLM call ทั้งหมดใน thread นี้เข้ากับ flow_id
             flow_id = f"flow_{uuid.uuid4().hex[:8]}"
@@ -3153,7 +3207,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
 
             llm = None
             try:
-                orch = Orchestrator(brand_dir="brand")
+                orch = Orchestrator(brand_dir=flow_brand_dir)
                 llm = orch.make_client()
                 try:
                     _active_llms.append(llm)
@@ -3208,6 +3262,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                     product_refs=product_refs,
                     resource_refs=resource_refs,
                     upload_session_id=upload_session_id,
+                    brand_dir=flow_brand_dir,
                 )
                 if step_context.warnings:
                     raise ValueError("; ".join(step_context.warnings))
@@ -3542,6 +3597,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
     agents = [a for a in AGENT_ORDER if a in agents]
     # TEMP LOCK: auto flow รัน agent เดียวก่อน จนกว่าจะแก้ให้ agent ทำงานร่วมกันได้
     agents = agents[:1]
+    brand_dir = body.get("brand_dir", "") or "brand"
 
     global _cancel_requested
     _cancel_requested = False
@@ -3549,7 +3605,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
     session_ts = _session_ts_label([]).replace(' - ', ' - AUTO - ')
 
     async def event_stream():
-        orch = Orchestrator(brand_dir="brand")
+        orch = Orchestrator(brand_dir=brand_dir)
         q: _queue.Queue[str | None] = _queue.Queue()
 
         def worker():
@@ -3584,6 +3640,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     product_refs=[],
                     resource_refs=resource_refs,
                     upload_session_id=upload_session_id,
+                    brand_dir=brand_dir,
                 )
                 if step_context.warnings:
                     raise ValueError("; ".join(step_context.warnings))

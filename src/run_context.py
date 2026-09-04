@@ -138,6 +138,7 @@ class StepRunContext:
     warnings: tuple[str, ...]
     phase_traces: tuple[PhaseTrace, ...] = ()
     upstream_artifacts: tuple[Any, ...] = ()
+    brand_dir: str = "brand"
 
     def for_phase(self, phase: str) -> PhaseContext:
         """Return a phase view of this context.
@@ -220,11 +221,15 @@ def build_step_run_context(
     product_refs: list[str],
     resource_refs: list[str],
     upload_session_id: str,
+    brand_dir: str | None = None,
 ) -> StepRunContext:
     """Build a single StepRunContext for one step.
 
     Resolves typed refs once, applies context budget, and collects warnings.
     No resource is resolved more than once per step.
+
+    Runtime multi-brand contract:
+      - brand_dir: the brand directory selected for this run (default "brand").
     """
     warnings: list[str] = []
     records: list[dict[str, Any]] = []
@@ -269,6 +274,8 @@ def build_step_run_context(
     )
 
     input_refs = tuple(product_refs) + tuple(resource_refs)
+    product_refs_tuple = tuple(product_refs)
+    resolved_brand_dir = (brand_dir or "brand").strip()
 
     return StepRunContext(
         workflow_id=workflow_id,
@@ -276,10 +283,11 @@ def build_step_run_context(
         agent_key=agent_key,
         quick_brief=quick_brief,
         input_refs=input_refs,
-        product_refs=tuple(product_refs),
+        product_refs=product_refs_tuple,
         resource_refs=tuple(resource_refs),
         resource_text=resource_text,
         resource_image_paths=image_paths,
         resource_trace=resource_trace,
         warnings=tuple(warnings),
+        brand_dir=resolved_brand_dir,
     )
