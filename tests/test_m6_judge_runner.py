@@ -99,18 +99,27 @@ def test_model_lock_allows_gpt_5_6_sol():
         httpx.Client.post = original
 
 
-def test_model_lock_blocks_wrong_model():
+def test_model_lock_records_audit_error_not_exception():
+    """Guard must NOT raise on model mismatch. It records the error in audit
+    and returns the response. Model-lock validation happens in run_judge()
+    after the audit is persisted."""
     original = httpx.Client.post
     httpx.Client.post = lambda *a, **k: _fake_response("{}", model="openai/gpt-5.5")
     try:
         guard = judge.M6JudgeGuard(approved_cap=1.0, absolute_cap=2.0)
+        guard.set_scenario("S1")
         with guard:
             client = httpx.Client()
-            with pytest.raises(RuntimeError, match="model lock breach"):
-                client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    json={"model": judge.JUDGE_MODEL, "messages": [{"role": "user", "content": "x"}]},
-                )
+            # Must NOT raise — guard always returns the response
+            result = client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                json={"model": judge.JUDGE_MODEL, "messages": [{"role": "user", "content": "x"}]},
+            )
+            # Guard recorded the model mismatch as an audit error
+            assert guard.calls == 1
+            audit = guard.last_response_audit.get("S1")
+            assert audit is not None
+            assert any("model_lock_mismatch" in e for e in audit["extraction_errors"])
     finally:
         httpx.Client.post = original
 
