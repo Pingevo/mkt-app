@@ -1,6 +1,10 @@
 """TDD tests for CompetitorAnalysisAgent source relevance hook.
 
 Offline — no OpenRouter calls.
+
+G2 contract: relevance is based on product/competitor identity match and
+structural URL checks — NOT on category keyword lists. Category mismatch
+and market keyword branches were removed in G2.
 """
 
 from __future__ import annotations
@@ -11,28 +15,7 @@ from src.agents.competitor_analysis import CompetitorAnalysisAgent
 
 
 def _make_agent() -> CompetitorAnalysisAgent:
-    config = {
-        "relevance_policy": {
-            "target_category_keywords": ["smartwatch", "smart watch"],
-            "mismatch_keywords": [
-                "keyboard",
-                "mechanical keyboard",
-                "gaming keyboard",
-                "keycaps",
-                "mouse",
-                "gaming mouse",
-                "headphones",
-                "earbuds",
-            ],
-            "subcategory_mismatch_keywords": ["kids", "children", "elderly"],
-            "market_keywords": [
-                "smart watch",
-                "smartwatch",
-                "smartband",
-            ],
-        }
-    }
-    return CompetitorAnalysisAgent(agent_config=config, llm_client=None)
+    return CompetitorAnalysisAgent(agent_config={}, llm_client=None)
 
 
 def _build_context(agent: CompetitorAnalysisAgent) -> None:
@@ -62,19 +45,6 @@ def agent() -> CompetitorAnalysisAgent:
 @pytest.mark.parametrize(
     "url,title,expected_relevant,expected_type",
     [
-        # obvious category mismatch
-        (
-            "https://www.amazon.com/Redragon-Wireless-Mechanical-Keyboard/dp/B0GZYT25QJ",
-            "Redragon Wireless Mechanical Gaming Keyboard",
-            False,
-            "category_mismatch",
-        ),
-        (
-            "https://teamplush.by/th/product/e-3lue-k771-keyboard/",
-            "E-3LUE K771 Mechanical Keyboard",
-            False,
-            "category_mismatch",
-        ),
         # target
         (
             "https://shopee.co.th/CACGO-K77-Smart-Watch-p-123456789",
@@ -101,23 +71,26 @@ def agent() -> CompetitorAnalysisAgent:
             True,
             "competitor",
         ),
-        # market / category (generic market article — not product-specific, needs verify)
-        (
-            "https://www.techradar.com/best-cheap-smartwatches",
-            "Best cheap smartwatches 2024",
-            None,
-            "market_unverified",
-        ),
-        # ambiguous
+        # ambiguous — no target/competitor match → unknown (model decides)
         (
             "https://www.casio.com/g-shock",
             "Casio G-Shock",
             None,
             "unknown",
         ),
+        # G2: category mismatch is no longer a hard block — sources without
+        # target/competitor identity match fall through to "unknown" and the
+        # model decides whether to cite them.
         (
-            "https://www.alibaba.com/product-detail/Kids-Smart-Watch-4G",
-            "Kids Smart Watch 4G GPS",
+            "https://www.amazon.com/Redragon-Wireless-Mechanical-Keyboard/dp/B0GZYT25QJ",
+            "Redragon Wireless Mechanical Gaming Keyboard",
+            None,
+            "unknown",
+        ),
+        # G2: market article without product-specific identity → unknown
+        (
+            "https://www.techradar.com/best-cheap-smartwatches",
+            "Best cheap smartwatches 2024",
             None,
             "unknown",
         ),
@@ -269,12 +242,13 @@ def thai_agent() -> CompetitorAnalysisAgent:
             "homepage",
             "thailand",
         ),
+        # G2: generic smartwatch listing without named competitor → unknown
         (
             "https://www.alibaba.co.th/product-detail/AK87-Sport-Smart-Watch-FitcloudPro-BT5_1601856346889.html",
             "นาฬิกาอัจฉริยะ AK87 Sport Smart Watch",
             "",
             None,
-            "market_unverified",
+            "unknown",
             "thailand",
         ),
     ],

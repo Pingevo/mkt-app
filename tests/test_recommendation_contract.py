@@ -25,13 +25,13 @@ def _make_validated_evidence_and_annotations():
             "url": "https://store.example.com/product-a-display",
             "title": "Product A Display",
             "content": "Product A has 1.5 inch AMOLED",
-            "_relevance": {"relevance_type": "competitor", "geography": "global"},
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "global", "matched_competitor": "Competitor Y2"},
         },
         {
             "url": "https://store.example.com/product-a-price",
             "title": "Product A Price",
             "content": "Product A costs 3,990 baht",
-            "_relevance": {"relevance_type": "competitor", "geography": "thailand"},
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "thailand", "matched_competitor": "Competitor Y2"},
         },
     ]
     research = ResearchResponse(
@@ -227,13 +227,13 @@ class TestReplayArtifactScenario:
                 "url": "https://www.homepro.co.th/p/888201600001",
                 "title": "imoo Z1 GPS",
                 "content": "imoo Z1 with GPS",
-                "_relevance": {"relevance_type": "competitor", "geography": "thailand"},
+                "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "thailand", "matched_competitor": "imoo Watch Phone Z1"},
             },
             {
                 "url": "https://www.central.co.th/th/imoo-kid-watch-phone-z1",
                 "title": "imoo Z1 Price",
                 "content": "imoo Z1 3,999 baht",
-                "_relevance": {"relevance_type": "competitor", "geography": "thailand"},
+                "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "thailand", "matched_competitor": "imoo Watch Phone Z1"},
             },
         ]
         research = ResearchResponse(

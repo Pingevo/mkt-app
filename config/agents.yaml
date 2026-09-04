@@ -170,9 +170,7 @@ competitor_analysis:
                   type: string
                 geography:
                   type: string
-                  enum:
-                    - thailand
-                    - global
+                  maxLength: 120
               required:
                 - competitor
                 - field
@@ -224,31 +222,6 @@ competitor_analysis:
         additionalProperties: false
   use_brand_context: false
   use_brand_reference: true
-  relevance_policy:
-    target_category_keywords:
-      - smartwatch
-      - smart watch
-      - สมาร์ทวอทช์
-      - นาฬิกาอัจฉริยะ
-    mismatch_keywords:
-      - keyboard
-      - mechanical keyboard
-      - gaming keyboard
-      - keycaps
-      - mouse
-      - gaming mouse
-      - headphones
-      - earbuds
-    subcategory_mismatch_keywords:
-      - kids
-      - children
-      - elderly
-    market_keywords:
-      - smart watch
-      - smartwatch
-      - สมาร์ทวอทช์
-      - นาฬิกาอัจฉริยะ
-      - smartband
   citation_policy:
     mode: inline_first
     fallback_annotations_when_no_inline: false
@@ -300,7 +273,7 @@ competitor_analysis:
     - คืนคำตอบเป็น JSON ตาม schema "competitor_research" เท่านั้น
     - ห้ามเขียน Markdown, ห้ามเขียนหัวข้อ #, ห้ามเขียนข้อความอธิบายนอก JSON
     - `url` ต้องตรงกับ URL จาก web search ทีค้นพบเท่านั้น ห้าม invent URL
-    - `geography` ระบุ "thailand" เมื่อ source เป็น official Thailand/authorized retailer ในประเทศไทย
+    - `geography` ระบุตลาด/ภูมิภาคตามที่ source ระบุ (ต้องเป็นข้อความไม่ว่าง)
     - `recommendations` คือข้อเสนอแนะเท่านั้น ห้ามใส่ facts หรือ URL
     - `uncertainty` บอกสิ่งที่ยังไม่พบหลักฐาน ไม่ใช่คาดการณ์
 

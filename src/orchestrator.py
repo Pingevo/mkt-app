@@ -880,7 +880,7 @@ class Orchestrator:
                             "properties": {
                                 "category": {
                                     "type": "string",
-                                    "description": "กรองตามหมวดหมู่ (optional) — เช่น 'สมาร์ทวอทช์', 'เครื่องดื่ม'",
+                                    "description": "กรองตามหมวดหมู่ (optional) — เช่น 'สมาร์ทวอทช์', 'ร้านอาหาร', 'เสื้อผ้า'",
                                 },
                             },
                             "required": [],

@@ -9,7 +9,6 @@ from typing import Any
 from ..output_validators import _strip_citations_and_urls
 from .base_agent import BaseAgent
 from .competitor_evidence import (
-    ALLOWED_FIELD_IDS,
     CompetitorReportRenderer,
     EVIDENCE_SYSTEM_PROMPT,
     ResearchResponse,
@@ -21,10 +20,8 @@ class CompetitorAnalysisAgent(BaseAgent):
     agent_name = "competitor_analysis"
     display_name = "นักวิเคราะห์คู่แข่ง"
 
-    _FABRICATABLE_SPEC_RE = re.compile(r"\b(mah|ghz|mhz|mp|gb|mb|mm|cm|w|v|ip\d+|amoled|tft|ips|gps|nfc|ecg|spo2|cpu|gpu|ram|rom|bluetooth|wifi|camera|heart rate|blood oxygen)\b", re.I)
     _CURRENCY_RE = re.compile(r"(฿|\$|usd|baht|บาท|euro|€)", re.I)
     _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
-    _DISTRIBUTION_RE = re.compile(r"\b(ขาย|จำหน่าย|วางจำหน่าย|ช่องทาง|ตัวแทน|ทั่วไป|shopee|lazada)\b", re.I)
 
     # ------------------------------------------------------------------
     # System prompt split: legacy report vs evidence-mode Stage A
@@ -77,8 +74,8 @@ class CompetitorAnalysisAgent(BaseAgent):
                 "evidence ต้องไม่ว่าง — ใส่อย่างน้อย 1 evidence record ต่อคู่แข่ง "
                 "โดยอ้างอิง URL จริงจาก search results\n"
                 "แต่ละ evidence record ต้องมี: competitor (ชื่อตรงกับ competitor_names), "
-                "field (เช่น price_availability, display, battery, gps_tracking), "
-                "claim (ข้อเท็จจริงที่พบ), url (URL จริงจาก search), geography (thailand หรือ global)\n"
+                "field (คุณสมบัติที่เกี่ยวข้องจากข้อมูลจริง), "
+                "claim (ข้อเท็จจริงที่พบ), url (URL จริงจาก search), geography (ตลาด/ภูมิภาคตามที่ source ระบุ; ต้องเป็นข้อความไม่ว่าง)\n"
                 "ถ้าค้นไม่พบข้อมูลเฉพาะรุ่น ให้ใส่ evidence ที่พบใกล้เคียงที่สุดและอธิบายใน uncertainty"
             )
 
@@ -216,28 +213,31 @@ class CompetitorAnalysisAgent(BaseAgent):
 
     def _reassess_all_annotations(self) -> None:
         """Re-run _assess_source_relevance on all stored annotations and split
-        them into _last_relevant_annotations (available for citation) and
-        _last_rejected_annotations (blocked).
+        them into three buckets:
 
-        Design: _assess_source_relevance is diagnostic only — its substring
-        matching cannot reliably match competitor names to URL slugs (e.g.
-        "imoo watch phone z1" vs "imoo-kid-watch-phone-z1").  Only
-        structurally-blocked sources (relevant=False: homepage,
-        category_mismatch) are excluded.  Everything else (relevant=True,
-        None) is available for the model to cite, with the diagnostic
-        _relevance metadata attached for warnings.
+        - _last_relevant_annotations: relevant=True (verified identity match).
+          These are the ONLY annotations passed to the renderer as provenance
+          candidates and the ONLY ones shown in user-facing fallback citations.
+        - _last_candidate_annotations: relevant=None (unverified — no identity
+          match but not structurally blocked). Shown in the evidence manifest
+          as "unverified" so the model can see them, but NOT used as evidence
+          or fallback citations.
+        - _last_rejected_annotations: relevant=False (structurally blocked:
+          homepage, marketplace root). Excluded entirely.
         """
         all_annotations = getattr(self, "_last_annotations", []) or []
         self._last_relevant_annotations = []
+        self._last_candidate_annotations = []
         self._last_rejected_annotations = []
         for a in all_annotations:
             r = self._assess_source_relevance(a)
-            if r.get("relevant") is False:
-                # Structurally blocked: homepage, category mismatch
+            rel = r.get("relevant")
+            if rel is False:
                 self._last_rejected_annotations.append({**a, "_relevance": r})
-            else:
-                # Available for citation (relevant=True or None)
+            elif rel is True:
                 self._last_relevant_annotations.append({**a, "_relevance": r})
+            else:
+                self._last_candidate_annotations.append({**a, "_relevance": r})
 
     def _strip_json_fence(self, text: str) -> str:
         text = text.strip()
@@ -271,10 +271,11 @@ class CompetitorAnalysisAgent(BaseAgent):
             for k in ("competitor", "field", "claim", "url", "geography"):
                 if k not in ev:
                     return False, f"structural_output_failed: evidence[{i}] missing {k}", None
-            if ev.get("field") not in ALLOWED_FIELD_IDS:
-                return False, f"structural_output_failed: evidence[{i}] field {ev.get('field')!r} not allowed", None
-            if ev.get("geography") not in ("thailand", "global"):
-                return False, f"structural_output_failed: evidence[{i}] geography invalid", None
+            if not ev.get("field") or not str(ev.get("field", "")).strip():
+                return False, f"structural_output_failed: evidence[{i}] field is empty", None
+            geo = ev.get("geography", "")
+            if not isinstance(geo, str) or len(geo) > 120:
+                return False, f"structural_output_failed: evidence[{i}] geography must be a string (max 120 chars)", None
             if len(ev.get("competitor", "")) > 120:
                 return False, f"structural_output_failed: evidence[{i}] competitor too long", None
             if len(ev.get("claim", "")) > 400:
@@ -339,6 +340,9 @@ class CompetitorAnalysisAgent(BaseAgent):
         if expected_target and actual_target and expected_target not in actual_target and actual_target not in expected_target:
             return False, f"structural_output_failed: target_model changed from {expected_target!r} to {actual_target!r}", None
 
+        # Only verified annotations (relevant=True) are passed to the renderer
+        # as provenance candidates. Candidate annotations (relevant=None) are
+        # NOT valid provenance — evidence citing them is rejected.
         relevant = getattr(self, "_last_relevant_annotations", []) or []
         errors = CompetitorReportRenderer(research, relevant_annotations=relevant).validate()
         if errors:
@@ -347,13 +351,16 @@ class CompetitorAnalysisAgent(BaseAgent):
         return True, "", research
 
     def _build_evidence_manifest(self) -> str:
-        """Canonical manifest of all non-rejected annotations for revise call.
+        """Canonical manifest of search results for the model.
 
-        Market parity: include ALL non-rejected search results (relevant=True
-        and relevant=None) with relevance labels, so the model can decide
-        which sources to cite — like Claude/ChatGPT do.
+        Shows verified sources (relevant=True — identity match confirmed)
+        and unverified candidates (relevant=None — no identity match, not
+        blocked). The model can see all search results but only verified
+        sources can be used as evidence provenance. Unverified sources are
+        labeled clearly so the model knows they cannot be cited as evidence.
         """
-        relevant = getattr(self, "_last_relevant_annotations", []) or []
+        verified = getattr(self, "_last_relevant_annotations", []) or []
+        candidates = getattr(self, "_last_candidate_annotations", []) or []
         target = getattr(self, "_target_model", "") or ""
         competitors = getattr(self, "_competitor_names", []) or []
         lines = [
@@ -361,24 +368,42 @@ class CompetitorAnalysisAgent(BaseAgent):
             f"คู่แข่งใน scope: {', '.join(competitors) if competitors else '(ไม่ระบุ)'}",
             f"หมายเหตุ: competitor_names ต้องมาจากรายชื่อคู่แข่งข้างต้นเสมอ แม้จะไม่มี evidence",
         ]
-        if not relevant:
+        if not verified and not candidates:
             lines.append("ไม่พบ URL จากการค้นหา")
         else:
-            lines.append("--- รายการ URL จากการค้นหา (เลือกใช้ตามความเกี่ยวข้อง) ---")
-            for i, a in enumerate(relevant, 1):
-                rel = a.get("_relevance", {})
-                title = a.get("title", "").strip()
-                url = a.get("url", "").strip()
-                geo = rel.get("geography", "global")
-                rel_type = rel.get("relevance_type", "unknown")
-                rel_label = "verified" if rel.get("relevant") is True else "unverified"
-                lines.append(f"\n[{i}] URL: {url}")
-                lines.append(f"    title: {title}")
-                lines.append(f"    geography: {geo}")
-                lines.append(f"    relevance: {rel_label} ({rel_type})")
-                content = (a.get("content") or "").strip()
-                if content:
-                    lines.append(f"    snippet: {content[:400]}")
+            idx = 1
+            if verified:
+                lines.append("--- รายการ URL ที่ยืนยันแล้ว (verified — ใช้เป็น evidence ได้) ---")
+                for a in verified:
+                    rel = a.get("_relevance", {})
+                    title = a.get("title", "").strip()
+                    url = a.get("url", "").strip()
+                    geo = rel.get("geography", "")
+                    rel_type = rel.get("relevance_type", "unknown")
+                    lines.append(f"\n[{idx}] URL: {url}")
+                    lines.append(f"    title: {title}")
+                    lines.append(f"    geography: {geo}")
+                    lines.append(f"    relevance: verified ({rel_type})")
+                    content = (a.get("content") or "").strip()
+                    if content:
+                        lines.append(f"    snippet: {content[:400]}")
+                    idx += 1
+            if candidates:
+                lines.append("\n--- รายการ URL ที่ยังไม่ยืนยัน (unverified — ห้ามใช้เป็น evidence) ---")
+                for a in candidates:
+                    rel = a.get("_relevance", {})
+                    title = a.get("title", "").strip()
+                    url = a.get("url", "").strip()
+                    geo = rel.get("geography", "")
+                    rel_type = rel.get("relevance_type", "unknown")
+                    lines.append(f"\n[{idx}] URL: {url}")
+                    lines.append(f"    title: {title}")
+                    lines.append(f"    geography: {geo}")
+                    lines.append(f"    relevance: unverified ({rel_type}) — ห้าม cite เป็น evidence")
+                    content = (a.get("content") or "").strip()
+                    if content:
+                        lines.append(f"    snippet: {content[:400]}")
+                    idx += 1
         lines.append(
             "\nคุณสามารถใช้ URL จากรายการข้างต้นเท่านั้น "
             "ห้ามค้นหาเว็บเพิ่ม ห้าม fetch ห้ามสร้าง factual claim ใหม่ "
@@ -432,12 +457,10 @@ class CompetitorAnalysisAgent(BaseAgent):
         ctx_text = (spec + "\n" + comp).lower()
 
         target_model = self._extract_target_model(spec)
-        target_category = self._derive_target_category(ctx_text)
         competitor_names = [line.strip() for line in comp.splitlines() if line.strip()]
 
         return {
             "target_model": target_model,
-            "target_category": target_category,
             "competitor_names": competitor_names,
             "target_text": ctx_text,
         }
@@ -446,63 +469,51 @@ class CompetitorAnalysisAgent(BaseAgent):
         m = re.search(r"รหัสสินค้า[:=]\s*([^\s]+)", product_spec, re.IGNORECASE)
         if m:
             return m.group(1).strip()
-        # fallback: รุ่นทั่วไป เช่น K77, Lagenio K5
+        # fallback: รหัสสินค้าทั่วไปที่มีตัวอักษรตามด้วยตัวเลข
         m = re.search(r"\b([A-Za-z]+\d[\w]{0,4})\b", product_spec)
         return m.group(1) if m else ""
 
-    def _derive_target_category(self, ctx_text: str) -> str:
-        policy = self.config.get("relevance_policy", {})
-        keywords = policy.get("target_category_keywords", [])
-        ctx = ctx_text.lower()
-        for kw in keywords:
-            if kw.lower() in ctx:
-                return "smartwatch"
-        return "unknown"
+    @staticmethod
+    def _canonical_identity(name: str) -> str:
+        """Normalize a product/competitor identity for matching: casefold,
+        trim, NFKC normalize, collapse punctuation/URL slug separators/
+        whitespace to single spaces. This lets 'imoo watch phone z1'
+        match 'imoo-watch-phone-z1' and 'Imoo Watch Phone Z1'.
+        """
+        import unicodedata
+        s = (name or "").strip().casefold()
+        s = unicodedata.normalize("NFKC", s)
+        s = re.sub(r"[\s\-_+/\\|.,;:!?\"'`()\[\]{}<>@#$%^&*=~]+", " ", s).strip()
+        s = re.sub(r"\s+", " ", s)
+        return s
 
     def _assess_source_relevance(self, annotation: dict[str, Any]) -> dict[str, Any]:
         """ตัดสิน offline วว่า source นี้เกี่ยวข้องกับงาน competitor analysis หรือไม่.
 
         คืน dict:
             relevant: True | False | None
-            relevance_type: "target" | "competitor" | "market" | "category_mismatch" | "unknown"
+            relevance_type: "target" | "competitor" | "homepage" | "unknown"
+            matched_target: str (canonical) — only when relevance_type == "target"
+            matched_competitor: str (exact declared name) — only when relevance_type == "competitor"
             reason: str
-            geography: "thailand" | "global" | "unknown"
+            geography: str
+
+        Identity matching uses Unicode casefold + trim + punctuation/slug
+        separator normalization only. No stopwords, fuzzy matching, stemming,
+        synonym lists, token scoring, or category keywords.
         """
         ctx = getattr(self, "_relevance_context", None) or {}
         target_model = ctx.get("target_model", "")
-        target_category = ctx.get("target_category", "unknown")
-        target_text = ctx.get("target_text", "")
         competitor_names = ctx.get("competitor_names", [])
-        policy = self.config.get("relevance_policy", {})
 
         url = (annotation.get("url") or "").lower()
         title = (annotation.get("title") or "").lower()
         content = (annotation.get("content") or "").lower()
         source_text = f"{url} {title} {content}"
+        source_canon = self._canonical_identity(source_text)
         geography = self._detect_geography(source_text, url)
 
-        # 1) obvious category mismatch
-        if target_category != "unknown":
-            for kw in policy.get("mismatch_keywords", []):
-                if re.search(re.escape(kw.lower()), source_text):
-                    return {
-                        "relevant": False,
-                        "relevance_type": "category_mismatch",
-                        "reason": f"source mentions '{kw}' which conflicts with target category {target_category}",
-                        "geography": geography,
-                    }
-
-        # 2) subcategory mismatch (kids, children, elderly) ถ้า target ไม่มี
-        for kw in policy.get("subcategory_mismatch_keywords", []):
-            if kw in source_text and kw not in target_text:
-                return {
-                    "relevant": None,
-                    "relevance_type": "unknown",
-                    "reason": f"source mentions '{kw}' which is absent from target context",
-                    "geography": geography,
-                }
-
-        # 2.5) homepage / marketplace root ทีไม่ระบุรุ่นเฉพาะ
+        # 1) homepage / marketplace root ทีไม่ระบุรุ่นเฉพาะ
         if self._is_homepage_or_marketplace_root(url) and not self._source_mentions_product(source_text):
             return {
                 "relevant": False,
@@ -511,49 +522,39 @@ class CompetitorAnalysisAgent(BaseAgent):
                 "geography": geography,
             }
 
-        # 3) target product match
-        # ใช้ word boundary เพื่อกัน false positive จากรุ่นใกล้เคียง เช่น K77 vs K771/K77A
-        if target_model and re.search(
-            r"\b" + re.escape(target_model.lower()) + r"\b", source_text
-        ):
-            return {
-                "relevant": True,
-                "relevance_type": "target",
-                "reason": f"source matches target model {target_model}",
-                "geography": geography,
-            }
+        # 2) target product match
+        # Full normalized target identity must appear as a word-boundary
+        # match in normalized source text (prevents K77 matching K771).
+        if target_model:
+            target_canon = self._canonical_identity(target_model)
+            if target_canon and re.search(r"\b" + re.escape(target_canon) + r"\b", source_canon):
+                return {
+                    "relevant": True,
+                    "relevance_type": "target",
+                    "matched_target": target_canon,
+                    "reason": f"source matches target model {target_model}",
+                    "geography": geography,
+                }
 
-        # 4) competitor match — diagnostic only, not a hard gate.
-        # Substring matching cannot reliably match competitor names to URL
-        # slugs (e.g. "imoo watch phone z1" vs "imoo-kid-watch-phone-z1").
-        # This assessment is stored as _relevance metadata for diagnostics,
-        # but _reassess_all_annotations no longer excludes annotations that
-        # don't match — the model decides which sources to cite.
+        # 3) competitor match — full normalized identity must appear as a
+        # word-boundary match in normalized source text. Records the exact
+        # declared name so the renderer can verify the evidence record
+        # attributes to the same competitor (prevents cross-competitor
+        # attribution).
         for name in competitor_names:
             if not name:
                 continue
-            pattern = re.escape(name.lower())
-            if re.search(pattern, source_text):
+            name_canon = self._canonical_identity(name)
+            if name_canon and re.search(r"\b" + re.escape(name_canon) + r"\b", source_canon):
                 return {
                     "relevant": True,
                     "relevance_type": "competitor",
+                    "matched_competitor": name,
                     "reason": f"source matches competitor {name}",
                     "geography": geography,
                 }
 
-        # 5) market / category match: แค่บ่งบอกว่าเป็นหมวดเดียวกัน แต่ยังไม่ specific พอ
-        # ให้ relevant=None เพื่อรอ verify ด้วย web_fetch หรือ model จะตัดสินเอง
-        # ไม่ให้ relevant=True ทันทีเพราะอาจเป็น homepage หรือรายงานทั่วไป
-        for kw in policy.get("market_keywords", []):
-            if re.search(re.escape(kw.lower()), source_text):
-                return {
-                    "relevant": None,
-                    "relevance_type": "market_unverified",
-                    "reason": f"source is about {target_category} market/category but not product-specific",
-                    "geography": geography,
-                }
-
-        # 6) unknown
+        # 4) unknown — let the model decide
         return {
             "relevant": None,
             "relevance_type": "unknown",
@@ -572,11 +573,9 @@ class CompetitorAnalysisAgent(BaseAgent):
         text = competitor_data.strip()
         if self._CURRENCY_RE.search(text):
             return False
-        if self._FABRICATABLE_SPEC_RE.search(text):
-            return False
         if re.search(r"https?://", text):
             return False
-        # ถ้ามีตัวเลข 3 หลักขึ้นไปพร้อม unit หรือคำบรรยายเทคนิค จึงจะนับว่ามี spec
+        # ถ้ามีตัวเลข 3 หลักขึ้นไป น่าจะมี spec/price จริง
         numbers = self._NUMBER_RE.findall(text)
         for n in numbers:
             if len(n) >= 3:
@@ -615,10 +614,6 @@ class CompetitorAnalysisAgent(BaseAgent):
                 # หาสัญลักษณ์สกุลเงิน
                 if self._CURRENCY_RE.search(rest) and not self._CURRENCY_RE.search(comp_lower):
                     return f"line mentions '{name}' with currency not in source data"
-                # หา unit/spec token ทั่วไปถ้าไม่มีในข้อมูลต้นทาง
-                for spec in self._FABRICATABLE_SPEC_RE.findall(rest):
-                    if spec.lower() not in comp_lower:
-                        return f"line mentions '{name}' with spec token '{spec}' not in source data"
         return ""
 
     def _has_homepage_citations(self, output: str) -> str:
@@ -650,14 +645,12 @@ class CompetitorAnalysisAgent(BaseAgent):
         return ""
 
     def _has_factual_signal(self, line: str) -> bool:
-        """บรรทัดมี factual signal (ราคา, ตัวเลข, สเปค, ช่องทางจำหน่าย) หรือไม่."""
+        """บรรทัดมี factual signal (ราคา, ตัวเลข) หรือไม่."""
         # ตัวเลขต้องมีอย่างน้อย 3 หลัก เพื่อกัน false positive จากชื่อรุ่น เช่น S3, K77
         has_number = any(len(n) >= 3 for n in self._NUMBER_RE.findall(line))
         return bool(
             self._CURRENCY_RE.search(line)
             or has_number
-            or self._FABRICATABLE_SPEC_RE.search(line)
-            or self._DISTRIBUTION_RE.search(line)
         )
 
     def _is_scope_or_recommendation(self, line: str) -> bool:
@@ -1216,7 +1209,7 @@ class CompetitorAnalysisAgent(BaseAgent):
             "",
             "## สิ่งที่ต้องขอเพิ่มเพื่อทำวิเคราะห์เต็มรูปแบบ",
             "",
-            "- สเปคเฉพาะของแต่ละคู่แข่ง (หน้าจอ, CPU, เซนเซอร, แบต, กันน้ำ)",
+            "- สเปค/คุณสมบัติเฉพาะของแต่ละคู่แข่งที่มีหลักฐานยืนยัน",
             "- ราคาขายปลีก/ต้นทุนที่มีหลักฐาน",
             "- ช่องทางจำหน่ายในประเทศเป้าหมาย",
             "- รีวิวหรือข้อมูลผู้ใช้งานจริง",
@@ -1394,7 +1387,14 @@ class CompetitorAnalysisAgent(BaseAgent):
         return "\n".join(lines)
 
     def _detect_geography(self, source_text: str, url: str) -> str:
-        """ตรวจภูมิศาสตร์ของ source จาก URL และเนื้อหา."""
+        """Best-effort geography diagnostic from URL and content.
+
+        Returns 'thailand' or 'global' as a diagnostic label stored in
+        _relevance.geography metadata. This is NOT a taxonomy or validation
+        gate — the evidence schema accepts any non-empty geography string
+        the model declares. The diagnostic only helps with warnings
+        (e.g. Thai claim with non-Thai source).
+        """
         from urllib.parse import urlparse
         parsed = urlparse(url)
         netloc = (parsed.netloc or "").lower()

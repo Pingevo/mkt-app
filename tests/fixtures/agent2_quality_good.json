@@ -9,7 +9,8 @@
       "_relevance": {
         "relevant": true,
         "relevance_type": "competitor",
-        "geography": "thailand"
+        "geography": "thailand",
+        "matched_competitor": "Xiaomi Watch S3"
       }
     },
     {
@@ -19,7 +20,8 @@
       "_relevance": {
         "relevant": true,
         "relevance_type": "competitor",
-        "geography": "thailand"
+        "geography": "thailand",
+        "matched_competitor": "Kieslect"
       }
     }
   ],

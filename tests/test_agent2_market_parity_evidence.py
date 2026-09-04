@@ -36,12 +36,6 @@ def _make_agent(product_spec: str, competitor_data: str) -> CompetitorAnalysisAg
         "web_search": True,
         "evidence_mode": True,
         "max_retry_limit": 0,
-        "relevance_policy": {
-            "target_category_keywords": ["smartwatch", "สมาร์ทวอทช์"],
-            "mismatch_keywords": ["keyboard", "mouse", "headphones"],
-            "subcategory_mismatch_keywords": ["kids", "children"],
-            "market_keywords": ["smartwatch", "สมาร์ทวอทช์", "smartband"],
-        },
     }
     agent = CompetitorAnalysisAgent(cfg, FakeLLM())
     agent.build_prompt(product_spec, competitor_data)
@@ -58,10 +52,9 @@ def test_manifest_not_empty_when_only_generic_smartwatch_results():
 
     สถานการณ์จริง: user สั่งวิเคราะห์ LAGENIO K2 vs imoo Z1
     web search คืน smartwatch ทั่วไป ไม่ mention รุ่นใดเลย
-    ปัจจุบัน: _append_citations_and_verify กรอง relevant=None ออก →
-             _last_relevant_annotations ว่าง → manifest ว่าง → model แก้ไม่ได้
-    หลังแก้: _last_relevant_annotations รวม relevant=None ด้วย →
-            manifest มีลิงก์ทั้งหมดพร้อม label ให้ model ตัดสินใจ
+    G2 contract: unmatched sources go to _last_candidate_annotations
+    (not _last_relevant_annotations), but manifest still shows them
+    as "unverified" so the model can see and decide.
     """
     product_spec = "รหัสสินค้า: K2\nLAGENIO K2 kids smartwatch with GPS and Heart Rate"
     competitor_data = "imoo Z1\nHuawei Watch Kids"
@@ -84,11 +77,10 @@ def test_manifest_not_empty_when_only_generic_smartwatch_results():
     # Process through _append_citations_and_verify like the real code path
     agent._append_citations_and_verify("some output text", generic_annotations)
 
-    # _last_relevant_annotations must include ALL non-rejected annotations
-    # (relevant=True + relevant=None), not just relevant=True
-    assert len(agent._last_relevant_annotations) >= 2, (
-        f"_last_relevant_annotations ต้องมี relevant=None ด้วย ไม่ใช่เฉพาะ relevant=True. "
-        f"ได้ {len(agent._last_relevant_annotations)} จาก 2"
+    # G2: unmatched sources go to _last_candidate_annotations (not rejected)
+    assert len(agent._last_candidate_annotations) >= 2, (
+        f"_last_candidate_annotations ต้องมี unmatched sources ให้ model เห็น. "
+        f"ได้ {len(agent._last_candidate_annotations)} จาก 2"
     )
 
     manifest = agent._build_evidence_manifest()
@@ -226,6 +218,7 @@ def test_competitor_specific_evidence_still_validates():
             "_relevance": {
                 "relevant": True,
                 "relevance_type": "competitor",
+                "matched_competitor": "imoo Z1",
                 "reason": "source matches competitor imoo Z1",
                 "geography": "thailand",
             },

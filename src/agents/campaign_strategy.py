@@ -95,39 +95,29 @@ class CampaignStrategyAgent(BaseAgent):
         }
 
         target_text = (product + "\n" + competitors + "\n" + market + "\n" + customers).lower()
-        target_category = self._derive_target_category(target_text)
 
         self._relevance_context = {
             "target_model": canonical,
             "product_aliases": product_aliases,
             "competitor_names": [m for m in competitor_models if m],
             "target_text": target_text,
-            "target_category": target_category,
         }
         self._selected_evidence_urls = context_urls | explicit_urls
-
-    def _derive_target_category(self, ctx_text: str) -> str:
-        for kw in ["smartwatch", "นาฬิกา", "watch", "smart watch"]:
-            if kw in ctx_text:
-                return "smartwatch"
-        for kw in ["kids", "เด็ก", "children"]:
-            if kw in ctx_text:
-                return "kids"
-        return "unknown"
 
     def _assess_source_relevance(self, annotation: dict[str, Any]) -> dict[str, Any]:
         """Offline relevance gate for web-search annotations.
 
         Mirrors the Agent 2 evidence contract in spirit: a URL/title/content
         must clearly relate to the product, a named competitor, or the
-        product/category before it can be used as a selected citation.
+        provided context before it can be used as a selected citation.
+
+        Relevance is based on product/competitor identity match and
+        structural URL checks — NOT on category keyword lists.
         """
         ctx = self._relevance_context or {}
         target_model = ctx.get("target_model", "")
         product_aliases = {a.lower() for a in (ctx.get("product_aliases") or [])}
         competitor_names = [n.lower() for n in (ctx.get("competitor_names") or [])]
-        target_text = ctx.get("target_text", "")
-        target_category = ctx.get("target_category", "unknown")
 
         url = (annotation.get("url") or "").lower()
         title = (annotation.get("title") or "").lower()
@@ -166,36 +156,14 @@ class CampaignStrategyAgent(BaseAgent):
                     "reason": f"source matches competitor {name}",
                 }
 
-        # 4) category / market match
-        if target_category == "smartwatch":
-            for kw in ["smartwatch", "smart watch", "นาฬิกา", "watch"]:
-                if kw in source_text:
-                    return {
-                        "relevant": True,
-                        "relevance_type": "market",
-                        "reason": f"source is about {target_category}",
-                    }
-        if target_category == "kids":
-            for kw in ["kids", "children", "เด็ก"]:
-                if kw in source_text:
-                    return {
-                        "relevant": True,
-                        "relevance_type": "market",
-                        "reason": f"source is about {target_category}",
-                    }
-
-        # 5) fallback: if the source text just repeats the user context, consider it relevant
-        if target_text and target_text != "unknown" and any(tok in source_text for tok in target_text.split() if len(tok) > 2):
-            return {
-                "relevant": True,
-                "relevance_type": "context_match",
-                "reason": "source text matches provided context",
-            }
-
+        # 4) no explicit identity match — let the model decide.
+        # Code does NOT build a semantic relevance classifier (no tokenizers,
+        # stopword lists, or fuzzy matching). The model sees all non-blocked
+        # search results and decides which to cite.
         return {
-            "relevant": False,
+            "relevant": None,
             "relevance_type": "unknown",
-            "reason": "cannot determine relevance from title/URL",
+            "reason": "no explicit identity match — model decides",
         }
 
     def _is_homepage_or_marketplace_root(self, url: str) -> bool:

@@ -15,21 +15,6 @@ from src.agents.base_agent import BaseAgent
 
 def _competitor_agent() -> CompetitorAnalysisAgent:
     config = {
-        "relevance_policy": {
-            "target_category_keywords": ["smartwatch", "smart watch"],
-            "mismatch_keywords": [
-                "keyboard",
-                "mechanical keyboard",
-                "gaming keyboard",
-                "keycaps",
-                "mouse",
-                "gaming mouse",
-                "headphones",
-                "earbuds",
-            ],
-            "subcategory_mismatch_keywords": ["kids", "children", "elderly"],
-            "market_keywords": ["smart watch", "smartwatch", "smartband"],
-        },
         "citation_policy": {
             "mode": "inline_first",
             "fallback_annotations_when_no_inline": True,
@@ -112,8 +97,10 @@ def test_no_inline_citation_with_relevant_annotations_adds_fallback() -> None:
     assert result.startswith(output)
 
 
-def test_no_inline_with_irrelevant_annotations_no_fallback() -> None:
-    """ไม่มี inline + source ทีไม่ relevant → ไม่แสดงอะไรทั้งนั้น."""
+def test_no_inline_with_unmatched_annotations_no_fallback() -> None:
+    """ไม่มี inline + source ทีไม่ match target/competitor → ไม่แสดง fallback
+    (G2 P0: unmatched sources are relevant=None, go to _last_candidate_annotations,
+    NOT _last_relevant_annotations. Fallback citations show only relevant=True)."""
     agent = _competitor_agent()
     _build_context(agent)
 
@@ -123,26 +110,30 @@ def test_no_inline_with_irrelevant_annotations_no_fallback() -> None:
 
     result = agent._append_citations_and_verify(output, annotations)
 
+    # P0 regression: unmatched source must NOT appear in fallback citations
+    assert url not in result
     assert result == output
 
 
-def test_mixed_relevant_and_irrelevant_fallback_only_relevant() -> None:
-    """ผสม relevant/irrelevant แต่ไม่มี inline → fallback แค่ relevant."""
+def test_mixed_relevant_and_unmatched_fallback_only_relevant() -> None:
+    """ผสม relevant/unmatched แต่ไม่มี inline → fallback แสดงเฉพาะ relevant
+    (G2 P0: unmatched sources are not hard-blocked but do not enter fallback)."""
     agent = _competitor_agent()
     _build_context(agent)
 
     relevant_url = "https://shopee.co.th/CACGO-K77"
-    irrelevant_url = "https://amazon.com/redragon-keyboard"
+    unmatched_url = "https://amazon.com/redragon-keyboard"
     annotations = [
         {"url": relevant_url, "title": "CACGO K77 Smart Watch"},
-        {"url": irrelevant_url, "title": "Redragon Mechanical Keyboard"},
+        {"url": unmatched_url, "title": "Redragon Mechanical Keyboard"},
     ]
     output = "สินค้าเป็น smartwatch"
 
     result = agent._append_citations_and_verify(output, annotations)
 
     assert relevant_url in result
-    assert irrelevant_url not in result
+    # P0 regression: unmatched URL must NOT appear in fallback
+    assert unmatched_url not in result
 
 
 def test_other_agent_keeps_old_dump_behavior() -> None:

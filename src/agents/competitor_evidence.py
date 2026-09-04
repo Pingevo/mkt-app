@@ -2,6 +2,11 @@
 
 Stage A: the LLM returns a ResearchResponse (JSON) of selected evidence.
 Stage B: CompetitorReportRenderer turns that into deterministic Markdown.
+
+The evidence schema is open: the model returns field labels it actually found
+in the source data. There is no fixed field catalog — the engine works for
+any product domain (smartwatch, restaurant, apparel, SaaS, etc.) without
+category-specific configuration.
 """
 from __future__ import annotations
 
@@ -11,53 +16,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-FIELD_CATALOG = {
-    "display": {
-        "label": "หน้าจอ",
-        "keywords": ["หน้าจอ", "display", "screen"],
-    },
-    "chipset_os": {
-        "label": "ชิปเซ็ต / OS",
-        "keywords": ["CPU", "chipset", "processor", "ชิป", "หน่วยประมวลผล"],
-    },
-    "battery": {
-        "label": "แบตเตอรี่",
-        "keywords": ["แบตเตอรี่", "battery", "batt"],
-    },
-    "connectivity": {
-        "label": "การเชื่อมต่อ",
-        "keywords": ["Bluetooth", "connectivity", "wifi", "เชื่อมต่อ", "การเชื่อมต่อ"],
-    },
-    "water_resistance": {
-        "label": "กันน้ำ",
-        "keywords": ["กันน้ำ", "water resistance", "IP68", "5ATM"],
-    },
-    "gps": {
-        "label": "GPS",
-        "keywords": ["GPS", "GLONASS", "จีพีเอส"],
-    },
-    "sensors": {
-        "label": "เซนเซอร",
-        "keywords": ["เซนเซอร", "sensor", "Heart Rate", "SpO2"],
-    },
-    "sports_modes": {
-        "label": "โหมดกีฬา",
-        "keywords": ["โหมดกีฬา", "sports modes", "โหมดกีฬา"],
-    },
-    "features": {
-        "label": "ฟังก์ชัน",
-        "keywords": ["ฟังก์ชัน", "features", "Flashlight", "calling", "music"],
-    },
-    "price_availability": {
-        "label": "ราคา / ช่องทางจำหน่ายในประเทศไทย",
-        "keywords": ["ราคา", "price", "จำหน่าย", "availability", "ช่องทาง"],
-    },
-}
-
-ALLOWED_FIELD_IDS: tuple[str, ...] = tuple(FIELD_CATALOG.keys())
-
-
 # Schema for OpenRouter /response_format
+# The "field" property is an open string — the model returns whatever
+# property label is relevant to the product being analyzed.
 RESEARCH_RESPONSE_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
@@ -81,14 +42,15 @@ RESEARCH_RESPONSE_SCHEMA = {
                             "competitor": {"type": "string", "maxLength": 120},
                             "field": {
                                 "type": "string",
-                                "enum": list(ALLOWED_FIELD_IDS),
-                                "description": f"canonical field ID; valid values: {', '.join(ALLOWED_FIELD_IDS)}",
+                                "maxLength": 120,
+                                "description": "property/feature label relevant to this product (e.g. price, display, menu, material, plan tier — whatever the source data mentions)",
                             },
                             "claim": {"type": "string", "maxLength": 400},
                             "url": {"type": "string", "maxLength": 500},
                             "geography": {
                                 "type": "string",
-                                "enum": ["thailand", "global"],
+                                "maxLength": 120,
+                                "description": "market/region from source (e.g. thailand, japan, eu, global — open string)",
                             },
                         },
                         "required": ["competitor", "field", "claim", "url", "geography"],
@@ -235,9 +197,35 @@ class CompetitorReportRenderer:
     `relevant_annotations` map, not from the model-provided `evidence` object.
     """
 
-    DEFAULT_FIELDS = ALLOWED_FIELD_IDS
-
     _NO_EVIDENCE = "*ไม่มีหลักฐานยืนยัน*"
+    _NO_MATCH = "*ไม่พบค่าที่จับคู่ได้จากข้อมูลต้นทาง*"
+
+    @staticmethod
+    def _canonical_field(field: str) -> str:
+        """Normalize a field label for grouping: casefold, trim, collapse
+        whitespace and punctuation. This prevents duplicate rows from
+        casing/spacing variants (e.g. 'Price', 'price', ' price ').
+        """
+        import unicodedata
+        s = field.strip().casefold()
+        s = unicodedata.normalize("NFKC", s)
+        s = re.sub(r"[\s\-_:：]+", " ", s).strip()
+        return s
+
+    @staticmethod
+    def _canonical_identity(name: str) -> str:
+        """Normalize a product/competitor identity for matching: casefold,
+        trim, NFKC normalize, collapse punctuation/URL slug separators/
+        whitespace to single spaces. Mirrors CompetitorAnalysisAgent.
+        _canonical_identity so the renderer's identity check is consistent
+        with the agent's assessment.
+        """
+        import unicodedata
+        s = (name or "").strip().casefold()
+        s = unicodedata.normalize("NFKC", s)
+        s = re.sub(r"[\s\-_+/\\|.,;:!?\"'`()\[\]{}<>@#$%^&*=~]+", " ", s).strip()
+        s = re.sub(r"\s+", " ", s)
+        return s
 
     def __init__(
         self,
@@ -265,61 +253,100 @@ class CompetitorReportRenderer:
         """Return (ok, reason, selected_annotation) for an evidence record.
 
         Checks only deterministic facts:
-        - field must be in allowed catalog
+        - field must be a non-empty string (open schema — any property label)
         - competitor must be in declared competitor_names
-        - URL must come from real search results (provenance via rel_map)
-        - URL must not be structurally blocked (homepage, category_mismatch)
-        - geography must be in enum (thailand/global)
+        - URL must come from verified annotations (relevant=True) only
+        - annotation must be a competitor match (relevance_type == "competitor")
+        - annotation's matched_competitor must match ev.competitor after
+          canonical normalization (prevents cross-competitor attribution)
+        - URL must not be structurally blocked (homepage)
+        - geography must be a non-empty string (open — no enum)
 
-        Does NOT check whether the source text mentions the competitor name
-        via substring — that check is unreliable because URL slugs and
-        product names use different formatting (hyphens, extra words,
-        different casing).  The model saw the search results and chose
-        which URLs to cite; code verifies provenance, not semantics.
-
-        Geography is model-decided: the model reads the source content and
-        declares geography in the evidence record.  Code does NOT override
-        the model's geography judgment with its own TLD/substring detection
-        — that detection is unreliable for .com domains that are actually
-        Thai stores (e.g. vteccomputer.com).  The model's geography is
-        accepted as-is; _detect_geography remains as a diagnostic signal
-        stored in _relevance metadata, not as a hard gate.
+        Provenance: the URL must be in the verified annotation set
+        (relevant=True).  Candidate annotations (relevant=None) are NOT
+        accepted as validated evidence.  Target-matched annotations
+        (relevance_type == "target") are NOT accepted as competitor
+        evidence — a source about the target product cannot validate a
+        claim about a competitor.
         """
-        if ev.field not in ALLOWED_FIELD_IDS:
-            return False, f"invalid field {ev.field!r}; allowed: {', '.join(ALLOWED_FIELD_IDS)}", None
+        if not ev.field or not ev.field.strip():
+            return False, "evidence field is empty", None
 
         comp_lower = self._competitor_names_lower()
         if ev.competitor.lower() not in comp_lower:
             return False, f"competitor {ev.competitor!r} not in scope", None
 
+        if not ev.geography or not str(ev.geography).strip():
+            return False, "evidence geography is empty", None
+
         key = ev.url.lower().rstrip("/")
         a = self.rel_map.get(key)
         if not a:
-            return False, f"URL not in selected evidence: {ev.url}", None
+            return False, f"URL not in verified evidence: {ev.url}", None
 
         rel = a.get("_relevance", {})
 
-        # Structurally blocked sources (homepage, category_mismatch) are
-        # hard-blocked — they cannot serve as evidence.
+        # Structurally blocked sources (homepage) are hard-blocked.
         rel_type = rel.get("relevance_type", "")
         if rel_type in ("homepage", "category_mismatch"):
             return False, f"source is structurally not evidence ({rel_type}): {ev.url}", None
 
-        # Geography: model-decided.  Accept the model's geography declaration.
-        # _detect_geography is stored as diagnostic in _relevance but does
-        # NOT override the model's judgment.  Mismatch between model-declared
-        # and code-detected geography is a warning, not a hard block.
-        # (Hard block for geography is removed — see test_geography_* cases.)
+        # Only verified sources (relevant=True) can be validated evidence.
+        if rel.get("relevant") is not True:
+            return False, f"source is not verified (relevant={rel.get('relevant')}): {ev.url}", None
+
+        # Source must be a competitor match — target-matched sources cannot
+        # validate competitor evidence (prevents target→competitor attribution).
+        if rel_type != "competitor":
+            return False, f"source is not a competitor match (relevance_type={rel_type}): {ev.url}", None
+
+        # The annotation's matched_competitor must match ev.competitor after
+        # canonical normalization — prevents cross-competitor attribution
+        # (e.g. source about Competitor B validating a claim about Competitor A).
+        # For backward compatibility with annotations created before this
+        # metadata existed, infer the match from the source text using the
+        # same canonical identity + word-boundary matching as
+        # _assess_source_relevance (no new heuristics).
+        matched_comp = rel.get("matched_competitor", "")
+        ev_canon = self._canonical_identity(ev.competitor)
+        if matched_comp:
+            matched_canon = self._canonical_identity(matched_comp)
+            if matched_canon != ev_canon:
+                return False, (
+                    f"cross-competitor attribution: source matches {matched_comp!r} "
+                    f"but evidence claims {ev.competitor!r}: {ev.url}"
+                ), None
+        else:
+            # Backward compat: infer from source text. ev.competitor's
+            # canonical identity must appear as a word-boundary match in
+            # the normalized URL/title/content.
+            source_text = " ".join([
+                a.get("url", ""), a.get("title", ""), a.get("content", ""),
+            ])
+            source_canon = self._canonical_identity(source_text)
+            if not (ev_canon and re.search(r"\b" + re.escape(ev_canon) + r"\b", source_canon)):
+                return False, (
+                    f"source does not match competitor {ev.competitor!r} "
+                    f"(no matched_competitor metadata and no identity match in source): {ev.url}"
+                ), None
 
         return True, "", a
 
     def _index_validated(self) -> dict[str, dict[str, tuple[CompetitorEvidence, dict]]]:
+        """Index validated evidence by canonical field, then by competitor.
+        Fields with different casing/spacing but same canonical form are
+        grouped together (e.g. 'Price' and 'price' → same row).
+        """
         index: dict[str, dict[str, tuple[CompetitorEvidence, dict]]] = {}
         for ev in self.research.evidence:
             ok, reason, a = self._validate_evidence(ev)
             if not ok:
                 continue
-            index.setdefault(ev.field, {})[ev.competitor] = (ev, a)
+            canon = self._canonical_field(ev.field)
+            # Use the first-seen field label as display name for this canonical group
+            if canon not in index:
+                index[canon] = {"_display": ev.field}
+            index[canon][ev.competitor] = (ev, a)
         return index
 
     def validate(self) -> list[str]:
@@ -331,27 +358,45 @@ class CompetitorReportRenderer:
                 errors.append(f"evidence[{i}]: {reason}")
         return errors
 
-    def _product_cells(self, product_spec: str, fields: tuple[str, ...]) -> dict[str, str]:
-        """Parse product spec lines using canonical field keywords."""
-        cells: dict[str, str] = {f: "-" for f in fields}
-        for raw_line in product_spec.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            low = line.lower()
-            for f in fields:
-                for kw in sorted(FIELD_CATALOG[f]["keywords"], key=len, reverse=True):
-                    klow = kw.lower()
-                    if low.startswith(klow):
-                        cells[f] = line[len(kw):].strip()
-                        break
+    def _product_cells(self, product_spec: str, fields: tuple[tuple[str, str], ...]) -> dict[str, str]:
+        """Parse product spec lines using field labels from validated evidence.
+
+        For each field, check if any product spec line starts with
+        that label (case-insensitive, canonicalized). This is a best-effort
+        match — if no line matches, the cell shows a clear message indicating
+        no match was found, NOT '-' (which could be misread as "product has
+        no data").
+        """
+        cells: dict[str, str] = {}
+        for canon, display in fields:
+            cells[canon] = self._NO_MATCH
+            for raw_line in product_spec.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                line_canon = self._canonical_field(line.split(":")[0] if ":" in line else line.split("：")[0] if "：" in line else line)
+                if line_canon == canon or line_canon.startswith(canon):
+                    # Extract the value after the label
+                    for sep in ("：", ":"):
+                        if sep in line:
+                            cells[canon] = line.split(sep, 1)[1].strip()
+                            break
+                    else:
+                        cells[canon] = line
+                    break
         return cells
 
-    def _fields_to_render(self, product_spec: str) -> tuple[str, ...]:
+    def _fields_to_render(self, product_spec: str) -> tuple[tuple[str, str], ...]:
+        """Return ((canonical_field, display_label), ...) for fields with
+        at least one validated competitor evidence. Preserve insertion order.
+        """
         by_field = self._index_validated()
-        # render only fields that have at least one validated competitor evidence
-        selected = [f for f in self.DEFAULT_FIELDS if f in by_field]
-        return tuple(selected)
+        seen: list[tuple[str, str]] = []
+        for ev in self.research.evidence:
+            canon = self._canonical_field(ev.field)
+            if canon in by_field and canon not in [c for c, _ in seen]:
+                seen.append((canon, ev.field))
+        return tuple(seen)
 
     def _classify_recommendations(
         self,
@@ -407,7 +452,7 @@ class CompetitorReportRenderer:
         competitors = [
             comp
             for comp in self.research.competitor_names
-            if any(comp in by_field.get(f, {}) for f in fields)
+            if any(comp in by_field.get(canon, {}) for canon, _ in fields)
         ]
 
         if not fields or not competitors:
@@ -424,25 +469,23 @@ class CompetitorReportRenderer:
 
         # product spec summary
         lines.extend(["", "## สินค้าของเรา", ""])
-        for f in fields:
-            label = FIELD_CATALOG[f]["label"]
-            value = product_cells.get(f, "-")
-            lines.append(f"- **{label}:** {value}")
+        for canon, display in fields:
+            value = product_cells.get(canon, self._NO_MATCH)
+            lines.append(f"- **{display}:** {value}")
 
         for comp in competitors:
             lines.extend(["", f"## {comp}", ""])
-            for f in fields:
-                label = FIELD_CATALOG[f]["label"]
-                entry = by_field.get(f, {}).get(comp)
+            for canon, display in fields:
+                entry = by_field.get(canon, {}).get(comp)
                 if entry:
                     ev, a = entry
                     title = (a.get("title") or ev.title or "แหล่งอ้างอิง").strip()
                     lines.append(
-                        f"- **{label}:** {ev.claim} "
+                        f"- **{display}:** {ev.claim} "
                         f"[{title}]({a.get('url', ev.url)})"
                     )
                 else:
-                    lines.append(f"- **{label}:** {self._NO_EVIDENCE}")
+                    lines.append(f"- **{display}:** {self._NO_EVIDENCE}")
 
         # Evidence-based recommendations: same classification as table view
         evidence_based, all_hypotheses = self._classify_recommendations()
@@ -493,7 +536,7 @@ class CompetitorReportRenderer:
         competitors = [
             comp
             for comp in self.research.competitor_names
-            if any(comp in by_field.get(f, {}) for f in fields)
+            if any(comp in by_field.get(canon, {}) for canon, _ in fields)
         ]
 
         if not fields or not competitors:
@@ -511,10 +554,10 @@ class CompetitorReportRenderer:
             "| :--- | " + " | ".join([":---"] * (len(competitors) + 1)) + " |",
         ])
 
-        for f in fields:
-            row = [f"**{FIELD_CATALOG[f]['label']}**", self._esc_cell(product_cells.get(f, "-"))]
+        for canon, display in fields:
+            row = [f"**{display}**", self._esc_cell(product_cells.get(canon, self._NO_MATCH))]
             for comp in competitors:
-                entry = by_field.get(f, {}).get(comp)
+                entry = by_field.get(canon, {}).get(comp)
                 if entry:
                     ev, a = entry
                     title = self._esc_cell((a.get("title") or ev.title or "แหล่งอ้างอิง").strip())
@@ -658,21 +701,16 @@ JSON ต้องมี key เหล่านี้เท่านั้น:
 - ถ้าไม่มีหลักฐานสำหรับ field ใด field หนึ่ง ให้ข้าม field นั้น (ไม่ใส่ evidence) และบอกไว้ใน uncertainty
 - ถ้าไม่พบหลักฐานใด ๆ ให้คืน evidence: [] และอธิบายสาเหตุใน uncertainty
 
-field catalog (ใช้ field ID เหล่านี้เท่านั้น ห้ามตั้งชื่อใหม่):
-- "display" → หน้าจอ
-- "chipset_os" → ชิปเซ็ต / OS
-- "battery" → แบตเตอรี่
-- "connectivity" → การเชื่อมต่อ
-- "water_resistance" → กันน้ำ
-- "gps" → GPS
-- "sensors" → เซนเซอร
-- "sports_modes" → โหมดกีฬา
-- "features" → ฟังก์ชัน
-- "price_availability" → ราคา / ช่องทางจำหน่ายในประเทศไทย
+field (เลือกจากข้อมูลจริงทีพบ):
+- field คือชื่อคุณสมบัติทีเกี่ยวข้องกับสินค้าทีกำลังวิเคราะห์
+- เลือกจากข้อมูลสินค้าและคำขอของผู้ใช้ — ไม่มีรายการ fixed
+- ตัวอย่างเช่น price, menu, material, plan tier, display, battery — ขึ้นกับสินค้าจริง
+- ห้ามตั้งชื่อ field ทีไม่มีในข้อมูลจริง
+- ใช้ field label เดียวกันสำหรับคุณสมบัติเดียวกันข้าม competitors (เช่น ใช้ "price" ทั้งคู่ ไม่ใช่ "price" กับ "Price")
 
 กฎการเลือก evidence:
 - สูงสุด 6 evidence เท่านั้น
-- เลือกอันทีมีประโยชน์ต่อการตัดสินใจมากที่สุด โดยเฉพาะ display, battery, price_availability, features, connectivity
+- เลือกอันทีมีประโยชน์ต่อการตัดสินใจมากที่สุด
 - ให้ความสำคัญกับ evidence ทีมี geography: thailand
 - ไม่ต้องสร้าง evidence ครบทุก field หรือทุก competitor
 - แต่ละ claim ต้องกระชับ ไม่เกิน 400 ตัวอักษร

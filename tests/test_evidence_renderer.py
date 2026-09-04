@@ -98,7 +98,7 @@ class TestStageAEvidenceContract:
             "url": "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
             "title": "Siamphone",
             "content": "Xiaomi Watch S3",
-            "_relevance": {"relevance_type": "competitor", "geography": "thailand"},
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "thailand", "matched_competitor": "Xiaomi Watch S3"},
         }])
         output = renderer.render("---\nรหัสสินค้า: K77")
         # out-of-scope competitor's claim must not appear
@@ -126,7 +126,7 @@ class TestStageAEvidenceContract:
             "url": "https://www.gsmarena.com/xiaomi-watch-s3",
             "title": "GSMarena",
             "content": "Xiaomi Watch S3 global",
-            "_relevance": {"relevance_type": "competitor", "geography": "global"},
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "global", "matched_competitor": "Xiaomi Watch S3"},
         }])
         output = renderer.render("---\nรหัสสินค้า: K77")
         # Geography is model-decided — evidence is rendered despite mismatch
@@ -379,7 +379,7 @@ def test_pipe_in_source_title_does_not_break_table():
         "url": "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
         "title": "Xiaomi Watch S3 | Siamphone",
         "content": "Xiaomi Watch S3",
-        "_relevance": {"relevance_type": "competitor", "geography": "global"},
+        "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "global", "matched_competitor": "Xiaomi Watch S3"},
     }])
     output = renderer.render("---\nรหัสสินค้า: K77")
 
@@ -412,7 +412,7 @@ def test_pipe_and_newline_in_claim_are_escaped():
         "url": "https://www.siamphone.com/smartwatch/xiaomi/watch-s3",
         "title": "Siamphone",
         "content": "Xiaomi Watch S3",
-        "_relevance": {"relevance_type": "competitor", "geography": "global"},
+        "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "global", "matched_competitor": "Xiaomi Watch S3"},
     }])
     output = renderer.render("---\nรหัสสินค้า: K77")
 
@@ -526,7 +526,7 @@ def test_six_evidence_bounded_response_renders_usable_report():
             "url": ev.url,
             "title": f"{ev.competitor} - {ev.field}",
             "content": ev.competitor,
-            "_relevance": {"relevance_type": "competitor", "geography": ev.geography},
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": ev.geography, "matched_competitor": ev.competitor},
         }
         for ev in evidence
     ]

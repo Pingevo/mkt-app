@@ -55,7 +55,12 @@ class TestProvenanceGate:
 
     def test_url_slug_differs_from_competitor_name_still_passes(self):
         """URL slug can differ from competitor name — model's choice passes
-        as long as the URL came from real search results (provenance)."""
+        as long as the URL came from real search results (provenance).
+
+        G2 contract: unmatched sources (no identity match) go to
+        _last_candidate_annotations, NOT _last_relevant_annotations.
+        Only verified sources (relevant=True) enter _last_relevant_annotations.
+        """
         # Competitor name has spaces; URL slug has hyphens and extra words
         annotations = [{
             "url": "https://store.example.com/brand-kid-watch-model-x1",
@@ -64,19 +69,23 @@ class TestProvenanceGate:
         }]
         agent = _make_agent_with_annotations(annotations, competitor_names=["Brand Watch X1"])
 
-        # All non-blocked annotations should be available
-        assert len(agent._last_relevant_annotations) == 1
-        assert agent._last_rejected_annotations == []
+        # Unmatched source goes to candidates (not rejected, not verified)
+        assert len(agent._last_rejected_annotations) == 0
+        assert len(agent._last_candidate_annotations) == 1
+        # _last_relevant_annotations only has verified (relevant=True) sources
+        assert len(agent._last_relevant_annotations) == 0
 
-    def test_url_model_selected_from_annotations_passes_renderer(self):
-        """Renderer accepts evidence when URL is in the annotation set
-        (provenance check), regardless of whether the competitor name
-        appears as a substring in the source text."""
+    def test_url_model_selected_from_candidate_annotations_is_rejected(self):
+        """Renderer REJECTS evidence when URL is only in candidate annotations
+        (relevant=None). The model's choice of a candidate URL does NOT
+        constitute identity verification — candidate sources cannot be
+        validated evidence.
+        """
         annotations = [{
             "url": "https://store.example.com/product-page-with-different-slug",
             "title": "Competitor Product Page",
             "content": "Some product info here",
-            "_relevance": {"relevance_type": "unknown", "geography": "global"},
+            "_relevance": {"relevant": None, "relevance_type": "unknown", "geography": "global"},
         }]
         research = ResearchResponse(
             target_model="TestProduct X1",
@@ -93,9 +102,39 @@ class TestProvenanceGate:
             ],
         )
         renderer = CompetitorReportRenderer(research, relevant_annotations=annotations)
+        errors = renderer.validate()
+
+        # P0-2: candidate URL must NOT pass evidence validation
+        assert len(errors) == 1
+        assert "not verified" in errors[0]
+
+    def test_url_model_selected_from_verified_annotations_passes_renderer(self):
+        """Renderer accepts evidence when URL is in verified annotations
+        (relevant=True) — explicit identity match confirmed the source."""
+        annotations = [{
+            "url": "https://store.example.com/competitor-y2-product",
+            "title": "Competitor Y2 Product Page",
+            "content": "Competitor Y2 product info here",
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "global", "matched_competitor": "Competitor Y2"},
+        }]
+        research = ResearchResponse(
+            target_model="TestProduct X1",
+            competitor_names=["Competitor Y2"],
+            evidence=[
+                CompetitorEvidence(
+                    competitor="Competitor Y2",
+                    field="display",
+                    claim="1.5 inch AMOLED",
+                    url="https://store.example.com/competitor-y2-product",
+                    title="Competitor Y2 Product Page",
+                    geography="global",
+                ),
+            ],
+        )
+        renderer = CompetitorReportRenderer(research, relevant_annotations=annotations)
         output = renderer.render("---\nรหัสสินค้า: X1\nTestProduct X1")
 
-        # Evidence should be rendered (URL provenance passed)
+        # Evidence should be rendered (verified provenance passed)
         assert "1.5 inch AMOLED" in output
         assert "## ตารางเปรียบเทียบ" in output
 
@@ -106,7 +145,7 @@ class TestProvenanceGate:
             "url": "https://store.example.com/real-product-page",
             "title": "Real Product",
             "content": "Real info",
-            "_relevance": {"relevance_type": "competitor", "geography": "global"},
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "global", "matched_competitor": "Competitor Y2"},
         }]
         research = ResearchResponse(
             target_model="TestProduct X1",
@@ -251,13 +290,20 @@ class TestLimitedAnalysisFallback:
 
 
 class TestReassessAllAnnotations:
-    """Principle: _reassess_all_annotations includes all non-blocked
-    annotations, not just relevant=True."""
+    """Principle: _reassess_all_annotations splits into three buckets:
+    verified (relevant=True) → _last_relevant_annotations
+    unverified (relevant=None) → _last_candidate_annotations
+    rejected (relevant=False) → _last_rejected_annotations
 
-    def test_market_unverified_annotations_are_available(self):
-        """Annotations with relevant=None (market_unverified, unknown) are
-        available for citation, not rejected. Only relevant=False
-        (homepage, category_mismatch) are rejected."""
+    Both verified and unverified are available to the model via the
+    evidence manifest, but only verified sources appear in user-facing
+    fallback citations (legacy mode).
+    """
+
+    def test_market_unverified_annotations_go_to_candidates(self):
+        """Annotations with relevant=None (unverified) go to
+        _last_candidate_annotations, NOT _last_relevant_annotations.
+        Only relevant=False (homepage) are rejected."""
         annotations = [
             {
                 "url": "https://store.example.com/product-a",
@@ -272,17 +318,18 @@ class TestReassessAllAnnotations:
         ]
         agent = _make_agent_with_annotations(annotations, competitor_names=["Competitor Y2"])
 
-        # First annotation (market_unverified) should be available
-        # Second annotation (homepage — empty path) should be rejected
-        assert len(agent._last_relevant_annotations) == 1
+        # First annotation (unverified) → candidates
+        # Second annotation (homepage — empty path) → rejected
+        assert len(agent._last_relevant_annotations) == 0
+        assert len(agent._last_candidate_annotations) == 1
         assert len(agent._last_rejected_annotations) == 1
-        assert agent._last_relevant_annotations[0]["url"] == "https://store.example.com/product-a"
+        assert agent._last_candidate_annotations[0]["url"] == "https://store.example.com/product-a"
         assert agent._last_rejected_annotations[0]["url"] == "https://store.example.com/"
 
     def test_all_non_blocked_annotations_available_without_competitor_match(self):
         """Even when no competitor name matches (default discovery before
-        model returns names), annotations are still available — the model
-        will decide which to cite."""
+        model returns names), annotations are still available as candidates
+        — the model will decide which to cite."""
         annotations = [
             {
                 "url": "https://store.example.com/some-product",
@@ -298,8 +345,9 @@ class TestReassessAllAnnotations:
         # No competitor names — default discovery mode
         agent = _make_agent_with_annotations(annotations, competitor_names=[])
 
-        # Both annotations should be available (not blocked)
-        assert len(agent._last_relevant_annotations) == 2
+        # Both annotations should be candidates (not blocked, not verified)
+        assert len(agent._last_relevant_annotations) == 0
+        assert len(agent._last_candidate_annotations) == 2
         assert len(agent._last_rejected_annotations) == 0
 
 
@@ -357,7 +405,7 @@ class TestGeographyGate:
             "url": "https://www.vteccomputer.com/product/27105/imoo-watch-phone-z7",
             "title": "imoo Watch Phone Z7 - Vtec Computer",
             "content": "ราคา 7,999 บาท รับประกันศูนย์ไทย",
-            "_relevance": {"relevance_type": "competitor", "geography": "global"},  # code detects global
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "global", "matched_competitor": "Competitor Y2"},  # code detects global
         }]
         research = ResearchResponse(
             target_model="TestProduct X1",
@@ -386,7 +434,7 @@ class TestGeographyGate:
             "url": "https://www.central.co.th/th/product-y2",
             "title": "Product Y2 - Central",
             "content": "Product info",
-            "_relevance": {"relevance_type": "competitor", "geography": "thailand"},
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "thailand", "matched_competitor": "Competitor Y2"},
         }]
         research = ResearchResponse(
             target_model="TestProduct X1",
@@ -414,7 +462,7 @@ class TestGeographyGate:
             "url": "https://www.gsmarena.com/product-y2",
             "title": "Product Y2 - GSMarena",
             "content": "Global product info",
-            "_relevance": {"relevance_type": "competitor", "geography": "global"},
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "global", "matched_competitor": "Competitor Y2"},
         }]
         research = ResearchResponse(
             target_model="TestProduct X1",
@@ -443,7 +491,7 @@ class TestGeographyGate:
             "url": "https://store.example.com/product-y2",
             "title": "Product Y2",
             "content": "Some product info",
-            "_relevance": {"relevance_type": "competitor", "geography": "global"},
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "global", "matched_competitor": "Competitor Y2"},
         }]
         research = ResearchResponse(
             target_model="TestProduct X1",
@@ -473,7 +521,7 @@ class TestGeographyGate:
             "url": "https://store.example.com/real-product",
             "title": "Real Product",
             "content": "Real info",
-            "_relevance": {"relevance_type": "competitor", "geography": "thailand"},
+            "_relevance": {"relevant": True, "relevance_type": "competitor", "geography": "thailand", "matched_competitor": "Competitor Y2"},
         }]
         research = ResearchResponse(
             target_model="TestProduct X1",

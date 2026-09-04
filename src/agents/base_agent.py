@@ -579,6 +579,7 @@ class BaseAgent:
                 unique_urls.append(a)
 
         relevant_annotations: list[dict[str, Any]] = []
+        candidate_annotations: list[dict[str, Any]] = []
         to_verify: list[dict[str, Any]] = []
 
         assess = getattr(self, "_assess_source_relevance", None)
@@ -588,18 +589,22 @@ class BaseAgent:
                 rel = result.get("relevant")
                 if rel is False:
                     continue
-                # Market parity: include both relevant=True AND relevant=None
-                # in _last_relevant_annotations so the model sees all non-rejected
-                # search results and can decide what to cite — like Claude/ChatGPT.
-                # The _relevance label lets the model distinguish verified vs
-                # unverified sources.
-                relevant_annotations.append({**a, "_relevance": result})
-                if rel is None:  # None / unknown — also send to web_fetch verify
+                if rel is True:
+                    # Verified identity match — can be used as fallback citation
+                    relevant_annotations.append({**a, "_relevance": result})
+                else:
+                    # Unverified (relevant=None) — diagnostic only, NOT fallback.
+                    # Still send to web_fetch for verification.
+                    candidate_annotations.append({**a, "_relevance": result})
                     to_verify.append(a)
         else:
             to_verify = unique_urls
 
+        # _last_relevant_annotations = verified only (for renderer provenance + fallback)
         self._last_relevant_annotations = relevant_annotations
+        # _last_candidate_annotations = unverified (for manifest/diagnostic only)
+        if hasattr(self, "_last_candidate_annotations"):
+            self._last_candidate_annotations = candidate_annotations
         # Let subclasses update derived state (selected evidence, competitor models, etc.)
         # before the first validation/repair.
         on_ready = getattr(self, "_on_annotations_ready", None)
@@ -625,8 +630,8 @@ class BaseAgent:
                 )
             return output
 
-        # Default: แสดง source ทีไม่ถูก reject ใน section หลัก (relevant=True กับ unknown)
-        # relevant_annotations รวม relevant=None แล้ว ไม่ต้อง append to_verify ซ้ำ
+        # Default: แสดงเฉพาะ verified sources (relevant=True) ใน section หลัก
+        # unverified candidates (relevant=None) ไม่แสดงเป็น citation
         # ถ้าไม่มี assess function (else branch) relevant_annotations ว่าง ใช้ to_verify แทน
         citation_annotations = relevant_annotations if relevant_annotations else to_verify
 

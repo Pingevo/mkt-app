@@ -293,7 +293,8 @@ def test_revise_receives_canonical_manifest():
 
     assert len(fake.calls) == 2
     revise_message = fake.calls[1]["messages"][-1]["content"]
-    assert "URL จากการค้นหา" in revise_message
+    # G2: manifest now separates verified vs unverified sources
+    assert "รายการ URL ที่ยืนยันแล้ว" in revise_message
     assert "https://www.siamphone.com/smartwatch/xiaomi/watch-s3" in revise_message
     assert "https://www.kieslectthailand.com" in revise_message
     assert "ห้ามใช้ URL นอก manifest" in revise_message
@@ -369,10 +370,11 @@ def test_evidence_revise_sends_provider_require_parameters():
     assert fake.calls[1]["kwargs"].get("response_format") == RESEARCH_RESPONSE_SCHEMA
 
 
-def test_invalid_free_field_rejected_after_revision():
-    """Free-form field like 'design_and_features' must fail deterministic validation."""
+def test_free_field_accepted_in_open_schema():
+    """G2: free-form field like 'design_and_features' is accepted — the
+    evidence schema is open and accepts any field label the model returns."""
     fixture = _load_fixture()
-    bad = json.dumps(
+    good = json.dumps(
         {
             "target_model": "CACGO K77",
             "competitor_names": ["Xiaomi Watch S3"],
@@ -390,13 +392,14 @@ def test_invalid_free_field_rejected_after_revision():
         },
         ensure_ascii=False,
     )
-    fake = FakeLLM(generate_output=bad, revision_output=bad, annotations=fixture["relevant_annotations"])
+    fake = FakeLLM(generate_output=good, annotations=fixture["relevant_annotations"])
     agent = CompetitorAnalysisAgent(_evidence_config(), fake)
     prompt = agent.build_prompt(fixture["product_spec"], fixture["competitor_data"])
     result = agent.run(prompt)
 
-    assert len(fake.calls) == 2
-    assert "**structural_output_failed: true**" in result
+    # G2: open schema — free-form field is accepted on first try (no revision)
+    assert len(fake.calls) == 1
+    assert "**structural_output_failed: true**" not in result
 
 
 def test_canonical_fields_render_two_competitor_facts_and_one_thai():
