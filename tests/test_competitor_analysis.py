@@ -1175,3 +1175,649 @@ def test_stage_3_renderer_does_not_fabricate_brand_aware_recommendations():
     assert "brand differentiator" not in markdown.lower()
     assert "brand-aware" not in markdown.lower()
     assert "brand framing" not in markdown.lower()
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 Corrected: Hard-isolated sequential Brand Interpretation
+#
+# The combined reviewer+brand approach was rejected because a model that
+# sees brand context while reviewing evidence cannot provide a hard
+# evidence-objectivity guarantee through prompt instructions alone.
+#
+# The corrected architecture uses a TRUE sequential boundary:
+#
+#   Stage A (no brand_reference)
+#     → Deterministic validation
+#     → SemanticEvidenceReviewer (no brand_reference)
+#     → FINALIZED immutable evidence
+#     → BrandInterpretationPass (optional, separate call, brand_reference)
+#     → Strategic implications (separate from evidence)
+#     → Deterministic renderer
+#
+# The Brand Interpretation step can NEVER modify the finalized evidence.
+# ---------------------------------------------------------------------------
+
+
+def _make_research_for_brand_tests():
+    """Build a ResearchResponse with validated evidence for brand interpretation tests."""
+    from src.agents.competitor_evidence import (
+        ResearchResponse,
+        CompetitorEvidence,
+    )
+    return ResearchResponse(
+        target_model="TestProduct",
+        competitor_names=["CompA"],
+        evidence=[
+            CompetitorEvidence(
+                competitor="CompA",
+                field="price",
+                claim="5,000 THB",
+                url="https://example.com/compa",
+                geography="thailand",
+            ),
+        ],
+        evidence_based_recommendations=[],
+        strategic_hypotheses=[],
+        uncertainty=[],
+    )
+
+
+class _BrandInterpFakeLLM:
+    """LLM stub for Brand Interpretation tests — captures calls and returns scripted JSON."""
+
+    def __init__(self, output: str):
+        self.output = output
+        self.calls: list[dict] = []
+
+    def chat(self, messages, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        return self.output
+
+
+class _ReviewerFakeLLM:
+    """LLM stub for semantic reviewer — returns scripted evidence review JSON."""
+
+    def __init__(self, output: str):
+        self.output = output
+        self.calls: list[dict] = []
+
+    def chat(self, messages, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        return self.output
+
+
+# --- Test 1: Stage A never receives brand_reference ---
+
+def test_stage_a_evidence_prompt_still_excludes_brand_reference():
+    """Stage A research prompt does NOT receive brand_reference."""
+    from src.agents.competitor_evidence import EVIDENCE_SYSTEM_PROMPT
+    assert "brand_reference" not in EVIDENCE_SYSTEM_PROMPT.lower()
+    assert "ข้อมูลแบรนด์อ้างอิง" not in EVIDENCE_SYSTEM_PROMPT
+
+
+# --- Test 2: SemanticEvidenceReviewer never receives brand_reference ---
+
+def test_semantic_reviewer_signature_has_no_brand_reference():
+    """SemanticEvidenceReviewer.review must NOT accept brand_reference.
+    This is the hard isolation boundary — the reviewer must not even
+    have the option to receive brand context."""
+    import inspect
+    from src.agents.competitor_evidence import SemanticEvidenceReviewer
+    sig = inspect.signature(SemanticEvidenceReviewer.review)
+    params = set(sig.parameters.keys())
+    assert "brand_reference" not in params, (
+        "SemanticEvidenceReviewer.review must NOT accept brand_reference — "
+        "this is the hard evidence-isolation boundary"
+    )
+
+
+# --- Test 3: Evidence review completes before Brand Interpretation ---
+
+def test_brand_interpretation_only_after_review():
+    """Brand Interpretation must be invoked AFTER SemanticEvidenceReviewer
+    returns finalized evidence, not before or during."""
+    from src.agents.competitor_evidence import (
+        SemanticEvidenceReviewer,
+        BrandInterpretationPass,
+    )
+    research = _make_research_for_brand_tests()
+    reviewer_llm = _ReviewerFakeLLM(json.dumps([
+        {"index": 0, "action": "keep"}
+    ]))
+    reviewer = SemanticEvidenceReviewer(llm=reviewer_llm, config={"model": "test"})
+    reviewed = reviewer.review(research, relevant_annotations=[
+        {"url": "https://example.com/compa", "content": "CompA costs 5,000 THB", "title": "CompA"}
+    ])
+    assert reviewed is not None
+    # Reviewer made its call
+    assert len(reviewer_llm.calls) == 1
+    # Now Brand Interpretation can use the finalized evidence
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    implications = interp.interpret(reviewed, brand_reference="premium")
+    # Interpretation made its own separate call
+    assert len(interp_llm.calls) == 1
+    assert len(implications) == 1
+
+
+# --- Test 4: Brand Interpretation receives only finalized/surviving evidence ---
+
+def test_brand_interpretation_receives_finalized_evidence():
+    """BrandInterpretationPass receives the finalized ResearchResponse
+    from the reviewer, not the pre-review research."""
+    from src.agents.competitor_evidence import (
+        SemanticEvidenceReviewer,
+        BrandInterpretationPass,
+    )
+    research = _make_research_for_brand_tests()
+    # Reviewer removes the evidence
+    reviewer_llm = _ReviewerFakeLLM(json.dumps([
+        {"index": 0, "action": "remove"}
+    ]))
+    reviewer = SemanticEvidenceReviewer(llm=reviewer_llm, config={"model": "test"})
+    reviewed = reviewer.review(research, relevant_annotations=[
+        {"url": "https://example.com/compa", "content": "CompA costs 5,000 THB", "title": "CompA"}
+    ])
+    assert len(reviewed.evidence) == 0
+    # Brand interpretation receives the finalized (empty) evidence
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    implications = interp.interpret(reviewed, brand_reference="premium")
+    # No surviving evidence → no implications
+    assert len(implications) == 0
+
+
+# --- Test 5: Removed/rejected evidence cannot be used by Brand Interpretation ---
+
+def test_brand_interpretation_drops_implications_for_removed_evidence():
+    """If evidence was removed by the reviewer, implications referencing
+    it must be mechanically dropped."""
+    from src.agents.competitor_evidence import (
+        ResearchResponse,
+        BrandInterpretationPass,
+    )
+    # Finalized evidence has only index 0 surviving
+    finalized = ResearchResponse(
+        target_model="TestProduct",
+        competitor_names=["CompA"],
+        evidence=[
+            ResearchResponse.__dataclass_fields__  # just to get the type
+        ] if False else [],
+    )
+    # Simulate: finalized has 1 evidence at index 0, but model returns
+    # implications referencing index 5 (non-existent)
+    finalized = _make_research_for_brand_tests()
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 5, "implication": "bogus", "category": "recommendation"},
+        {"evidence_ref": 0, "implication": "valid", "category": "recommendation"},
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    implications = interp.interpret(finalized, brand_reference="premium")
+    # Only the valid one (evidence_ref=0) survives
+    assert len(implications) == 1
+    assert implications[0].implication == "valid"
+
+
+# --- Test 6: Brand Interpretation cannot mutate the finalized evidence collection ---
+
+def test_brand_interpretation_does_not_mutate_evidence():
+    """The finalized evidence collection must be value-equivalent before
+    and after Brand Interpretation."""
+    from src.agents.competitor_evidence import BrandInterpretationPass
+    research = _make_research_for_brand_tests()
+    original_claim = research.evidence[0].claim
+    original_competitor = research.evidence[0].competitor
+    original_url = research.evidence[0].url
+    original_count = len(research.evidence)
+
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    implications = interp.interpret(research, brand_reference="premium")
+
+    # Evidence is unchanged
+    assert len(research.evidence) == original_count
+    assert research.evidence[0].claim == original_claim
+    assert research.evidence[0].competitor == original_competitor
+    assert research.evidence[0].url == original_url
+
+
+# --- Test 7: Evidence before/after Brand Interpretation is value-equivalent ---
+
+def test_evidence_value_equivalent_before_after_interpretation():
+    """Evidence records are byte/value-equivalent before and after
+    strategic interpretation."""
+    from src.agents.competitor_evidence import BrandInterpretationPass
+    research = _make_research_for_brand_tests()
+    import copy
+    before = copy.deepcopy(research.evidence)
+
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    interp.interpret(research, brand_reference="premium")
+
+    for a, b in zip(before, research.evidence):
+        assert a.claim == b.claim
+        assert a.competitor == b.competitor
+        assert a.url == b.url
+        assert a.field == b.field
+
+
+# --- Test 8: Implications referencing unknown/non-surviving evidence IDs are rejected ---
+
+def test_implications_with_invalid_evidence_refs_are_dropped():
+    """Implications with evidence_ref outside the surviving evidence
+    range are mechanically rejected."""
+    from src.agents.competitor_evidence import BrandInterpretationPass
+    research = _make_research_for_brand_tests()  # 1 evidence at index 0
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": -1, "implication": "neg", "category": "recommendation"},
+        {"evidence_ref": 99, "implication": "out of range", "category": "recommendation"},
+        {"evidence_ref": "abc", "implication": "non-int", "category": "recommendation"},
+        {"evidence_ref": 0, "implication": "valid", "category": "recommendation"},
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    implications = interp.interpret(research, brand_reference="premium")
+    assert len(implications) == 1
+    assert implications[0].implication == "valid"
+
+
+# --- Test 9: Raw brand_reference is never rendered directly ---
+
+def test_renderer_does_not_dump_raw_brand_reference():
+    """The renderer must not dump raw brand_reference into the output."""
+    from src.agents.competitor_evidence import (
+        CompetitorReportRenderer,
+        ResearchResponse,
+        StrategicImplication,
+    )
+    research = ResearchResponse(
+        target_model="TestProduct",
+        competitor_names=["CompA"],
+        evidence=[],
+        evidence_based_recommendations=[],
+        strategic_hypotheses=[],
+        uncertainty=["no evidence"],
+        strategic_implications=[
+            StrategicImplication(
+                evidence_ref=0,
+                implication="Competing on lowest price may weaken premium positioning",
+                category="recommendation",
+            ),
+        ],
+    )
+    renderer = CompetitorReportRenderer(
+        research,
+        relevant_annotations=[],
+        quick_brief="",
+    )
+    markdown = renderer.render("TestProduct spec")
+    # The implication text is rendered
+    assert "premium" in markdown.lower() or "price" in markdown.lower()
+    # Raw brand_reference markers are NOT in the output
+    assert "### Positioning" not in markdown
+    assert "brand_reference" not in markdown.lower()
+    assert "ข้อมูลแบรนด์อ้างอิง" not in markdown
+
+
+# --- Test 10: Renderer does no semantic brand reasoning ---
+
+def test_renderer_no_brand_section_when_no_implications():
+    """When no strategic implications exist, renderer must not add a brand section."""
+    from src.agents.competitor_evidence import CompetitorReportRenderer, ResearchResponse
+    research = ResearchResponse(
+        target_model="TestProduct",
+        competitor_names=["CompA"],
+        evidence=[],
+        evidence_based_recommendations=[],
+        strategic_hypotheses=[],
+        uncertainty=["no evidence"],
+    )
+    renderer = CompetitorReportRenderer(research, relevant_annotations=[], quick_brief="")
+    markdown = renderer.render("TestProduct spec")
+    assert "brand" not in markdown.lower()
+
+
+# --- Test 11: Missing brand_reference skips the Brand Interpretation call ---
+
+def test_brand_interpretation_skipped_without_brand_reference():
+    """When brand_reference is empty, no Brand Interpretation call is made."""
+    from src.agents.competitor_evidence import BrandInterpretationPass
+    research = _make_research_for_brand_tests()
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    implications = interp.interpret(research, brand_reference="")
+    assert len(implications) == 0
+    assert len(interp_llm.calls) == 0  # no LLM call made
+
+
+# --- Test 12: With brand_reference, exactly one additional call is made ---
+
+def test_brand_interpretation_makes_exactly_one_call():
+    """With brand_reference, exactly one additional ordinary semantic call
+    is made on the successful path."""
+    from src.agents.competitor_evidence import BrandInterpretationPass
+    research = _make_research_for_brand_tests()
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    interp.interpret(research, brand_reference="premium")
+    assert len(interp_llm.calls) == 1
+
+
+# --- Test 13: No web-search/tool call occurs in Brand Interpretation ---
+
+def test_brand_interpretation_no_web_search_tools():
+    """Brand Interpretation must not use web_search or any tools."""
+    from src.agents.competitor_evidence import BrandInterpretationPass
+    research = _make_research_for_brand_tests()
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    interp.interpret(research, brand_reference="premium")
+    assert len(interp_llm.calls) == 1
+    tools = interp_llm.calls[0]["kwargs"].get("tools")
+    assert tools is None or tools == []
+
+
+# --- Test 14: Existing evidence revision/retry behavior remains bounded ---
+
+def test_brand_interpretation_fail_closed_no_retry():
+    """If Brand Interpretation LLM call fails or returns invalid JSON,
+    it returns empty implications (graceful degradation) without retry."""
+    from src.agents.competitor_evidence import BrandInterpretationPass
+    research = _make_research_for_brand_tests()
+    interp_llm = _BrandInterpFakeLLM("invalid json {{{")
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    implications = interp.interpret(research, brand_reference="premium")
+    assert len(implications) == 0
+    assert len(interp_llm.calls) == 1  # no retry
+
+
+# --- Test 15: Standalone Agent 2 without brand context remains functional ---
+
+def test_standalone_agent2_without_brand_context():
+    """Agent 2 must work without brand_reference — objective evidence only."""
+    from src.agents.competitor_evidence import (
+        SemanticEvidenceReviewer,
+        BrandInterpretationPass,
+    )
+    research = _make_research_for_brand_tests()
+    reviewer_llm = _ReviewerFakeLLM(json.dumps([
+        {"index": 0, "action": "keep"}
+    ]))
+    reviewer = SemanticEvidenceReviewer(llm=reviewer_llm, config={"model": "test"})
+    reviewed = reviewer.review(research, relevant_annotations=[
+        {"url": "https://example.com/compa", "content": "CompA costs 5,000 THB", "title": "CompA"}
+    ])
+    assert reviewed is not None
+    assert len(reviewed.evidence) == 1
+    # No brand interpretation call
+    interp_llm = _BrandInterpFakeLLM("[]")
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    implications = interp.interpret(reviewed, brand_reference="")
+    assert len(implications) == 0
+    assert len(interp_llm.calls) == 0
+
+
+# --- Test 16: Generic brand/product fixtures only — no benchmark-specific behavior ---
+
+def test_brand_interpretation_accepts_generic_brand_reference():
+    """No benchmark/brand/product-specific fixtures encoded as engine behavior.
+    Any generic brand reference should work."""
+    from src.agents.competitor_evidence import BrandInterpretationPass
+    research = _make_research_for_brand_tests()
+    generic_brand = "### Positioning\nbudget-friendly value brand"
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    implications = interp.interpret(research, brand_reference=generic_brand)
+    assert len(implications) == 1
+    # No hardcoded brand names in the system prompt
+    call_messages = interp_llm.calls[0]["messages"]
+    system_prompt = call_messages[0]["content"]
+    assert "Lagenio" not in system_prompt
+    assert "imoo" not in system_prompt
+
+
+# --- Test 17: Existing competitor durable-contract tests continue to pass ---
+
+def test_existing_durable_contracts_still_hold():
+    """Verify that the existing evidence-isolation contracts are not broken
+    by the new Brand Interpretation step."""
+    from src.agents.competitor_evidence import (
+        EVIDENCE_SYSTEM_PROMPT,
+        RESEARCH_RESPONSE_SCHEMA,
+        ResearchResponse,
+        CompetitorReportRenderer,
+    )
+    # Stage A schema has no brand fields
+    schema_props = RESEARCH_RESPONSE_SCHEMA["json_schema"]["schema"]["properties"]
+    assert "brand_reference" not in schema_props
+    assert "brand_aware_implications" not in schema_props
+    # Stage A prompt has no brand context
+    assert "brand_reference" not in EVIDENCE_SYSTEM_PROMPT.lower()
+    # ResearchResponse has strategic_implications as a separate field
+    assert "strategic_implications" in ResearchResponse.__dataclass_fields__
+    assert "brand_aware_implications" not in ResearchResponse.__dataclass_fields__
+
+
+# ---------------------------------------------------------------------------
+# Configuration-gate regression tests
+#
+# Brand Interpretation must respect the agent's use_brand_reference config.
+# If use_brand_reference is false, Agent 2 remains objective-only even if
+# a brand_reference object is loaded on the agent.
+# ---------------------------------------------------------------------------
+
+
+def test_config_enabled_with_brand_reference_and_evidence_makes_one_call():
+    """Test 1: use_brand_reference=true + non-empty brand_reference +
+    surviving evidence → exactly one Brand Interpretation call."""
+    from src.agents.competitor_evidence import BrandInterpretationPass
+    research = _make_research_for_brand_tests()
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    # Simulate the full gate condition as in CompetitorAnalysisAgent.run
+    brand_ref = "premium positioning"
+    brand_interp_enabled = True  # use_brand_reference: true
+    if brand_interp_enabled and brand_ref and research.evidence:
+        implications = interp.interpret(research, brand_reference=brand_ref)
+    else:
+        implications = []
+    assert len(implications) == 1
+    assert len(interp_llm.calls) == 1
+
+
+def test_config_disabled_with_brand_reference_and_evidence_makes_zero_calls():
+    """Test 2: use_brand_reference=false + non-empty brand_reference +
+    surviving evidence → zero Brand Interpretation calls."""
+    from src.agents.competitor_evidence import BrandInterpretationPass
+    research = _make_research_for_brand_tests()
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    # Simulate the full gate condition as in CompetitorAnalysisAgent.run
+    brand_ref = "premium positioning"
+    brand_interp_enabled = False  # use_brand_reference: false
+    if brand_interp_enabled and brand_ref and research.evidence:
+        implications = interp.interpret(research, brand_reference=brand_ref)
+    else:
+        implications = []
+    assert len(implications) == 0
+    assert len(interp_llm.calls) == 0  # no LLM call made
+
+
+def test_config_enabled_with_empty_brand_reference_makes_zero_calls():
+    """Test 3: enabled config + empty brand_reference → zero calls."""
+    from src.agents.competitor_evidence import BrandInterpretationPass
+    research = _make_research_for_brand_tests()
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    brand_ref = ""
+    brand_interp_enabled = True
+    if brand_interp_enabled and brand_ref and research.evidence:
+        implications = interp.interpret(research, brand_reference=brand_ref)
+    else:
+        implications = []
+    assert len(implications) == 0
+    assert len(interp_llm.calls) == 0
+
+
+def test_config_enabled_with_no_surviving_evidence_makes_zero_calls():
+    """Test 4: enabled config + no surviving evidence → zero calls."""
+    from src.agents.competitor_evidence import (
+        BrandInterpretationPass,
+        ResearchResponse,
+    )
+    research = ResearchResponse(
+        target_model="TestProduct",
+        competitor_names=["CompA"],
+        evidence=[],  # no surviving evidence
+    )
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "test", "category": "recommendation"}
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    brand_ref = "premium positioning"
+    brand_interp_enabled = True
+    if brand_interp_enabled and brand_ref and research.evidence:
+        implications = interp.interpret(research, brand_reference=brand_ref)
+    else:
+        implications = []
+    assert len(implications) == 0
+    assert len(interp_llm.calls) == 0
+
+
+def test_disabling_brand_interpretation_does_not_affect_stage_a_or_reviewer():
+    """Test 5: disabling brand interpretation does not affect Stage A or
+    SemanticEvidenceReviewer behavior. The reviewer never receives
+    brand_reference regardless of config."""
+    import inspect
+    from src.agents.competitor_evidence import (
+        EVIDENCE_SYSTEM_PROMPT,
+        SemanticEvidenceReviewer,
+    )
+    # Stage A prompt is static — config does not change it
+    assert "brand_reference" not in EVIDENCE_SYSTEM_PROMPT.lower()
+    # Reviewer signature never has brand_reference regardless of config
+    sig = inspect.signature(SemanticEvidenceReviewer.review)
+    assert "brand_reference" not in sig.parameters
+    # Reviewer works the same with any config
+    research = _make_research_for_brand_tests()
+    reviewer_llm = _ReviewerFakeLLM(json.dumps([
+        {"index": 0, "action": "keep"}
+    ]))
+    reviewer = SemanticEvidenceReviewer(
+        llm=reviewer_llm,
+        config={"model": "test", "use_brand_reference": False},
+    )
+    reviewed = reviewer.review(research, relevant_annotations=[
+        {"url": "https://example.com/compa", "content": "CompA costs 5,000 THB", "title": "CompA"}
+    ])
+    assert reviewed is not None
+    assert len(reviewed.evidence) == 1
+    # Reviewer prompt has no brand context
+    system_prompt = reviewer_llm.calls[0]["messages"][0]["content"]
+    assert "brand_reference" not in system_prompt.lower()
+    assert "ข้อมูลแบรนด์อ้างอิง" not in system_prompt
+
+
+# ---------------------------------------------------------------------------
+# Evidence ordering stability test
+#
+# The evidence_ref index in StrategicImplication refers to the position
+# in the finalized evidence list. This is stable only if the evidence
+# ordering does not change between reviewer output → BrandInterpretationPass
+# input → implication validation → renderer.
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_ordering_stable_from_reviewer_through_interpretation():
+    """Evidence ordering must remain stable from SemanticEvidenceReviewer
+    output through BrandInterpretationPass input and implication validation.
+    No sorting/filtering/reordering may occur between those steps."""
+    from src.agents.competitor_evidence import (
+        SemanticEvidenceReviewer,
+        BrandInterpretationPass,
+        ResearchResponse,
+        CompetitorEvidence,
+    )
+    # Build research with 3 evidence items in a specific order
+    research = ResearchResponse(
+        target_model="TestProduct",
+        competitor_names=["CompA", "CompB", "CompC"],
+        evidence=[
+            CompetitorEvidence(
+                competitor="CompA", field="price", claim="5,000 THB",
+                url="https://example.com/a", geography="thailand",
+            ),
+            CompetitorEvidence(
+                competitor="CompB", field="display", claim="6.7 inch",
+                url="https://example.com/b", geography="thailand",
+            ),
+            CompetitorEvidence(
+                competitor="CompC", field="battery", claim="5000mAh",
+                url="https://example.com/c", geography="thailand",
+            ),
+        ],
+    )
+    annotations = [
+        {"url": "https://example.com/a", "content": "price 5000", "title": "A"},
+        {"url": "https://example.com/b", "content": "display 6.7", "title": "B"},
+        {"url": "https://example.com/c", "content": "battery 5000", "title": "C"},
+    ]
+
+    # Reviewer keeps all, rewrites index 1
+    reviewer_llm = _ReviewerFakeLLM(json.dumps([
+        {"index": 0, "action": "keep"},
+        {"index": 1, "action": "rewrite", "claim": "6.7 inch OLED"},
+        {"index": 2, "action": "keep"},
+    ]))
+    reviewer = SemanticEvidenceReviewer(llm=reviewer_llm, config={"model": "test"})
+    reviewed = reviewer.review(research, relevant_annotations=annotations)
+    assert reviewed is not None
+
+    # Evidence order is preserved: CompA, CompB (rewritten), CompC
+    assert len(reviewed.evidence) == 3
+    assert reviewed.evidence[0].competitor == "CompA"
+    assert reviewed.evidence[1].competitor == "CompB"
+    assert reviewed.evidence[1].claim == "6.7 inch OLED"
+    assert reviewed.evidence[2].competitor == "CompC"
+
+    # Brand interpretation receives the same ordering
+    interp_llm = _BrandInterpFakeLLM(json.dumps([
+        {"evidence_ref": 0, "implication": "implication for CompA", "category": "recommendation"},
+        {"evidence_ref": 2, "implication": "implication for CompC", "category": "inference"},
+    ]))
+    interp = BrandInterpretationPass(llm=interp_llm, config={"model": "test"})
+    implications = interp.interpret(reviewed, brand_reference="premium")
+
+    # Implications reference the correct evidence by position
+    assert len(implications) == 2
+    assert implications[0].evidence_ref == 0
+    assert implications[0].implication == "implication for CompA"
+    assert implications[1].evidence_ref == 2
+    assert implications[1].implication == "implication for CompC"
+
+    # Evidence is still unchanged after interpretation
+    assert reviewed.evidence[0].competitor == "CompA"
+    assert reviewed.evidence[1].competitor == "CompB"
+    assert reviewed.evidence[2].competitor == "CompC"

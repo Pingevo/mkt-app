@@ -154,14 +154,45 @@ class StrategicHypothesis:
 
 
 @dataclass
+class StrategicImplication:
+    """A brand-aware strategic implication derived from finalized evidence
+    + optional runtime brand context. This is inference/recommendation,
+    NOT evidence. It is produced by the separate BrandInterpretationPass
+    AFTER the SemanticEvidenceReviewer has finalized evidence.
+
+    evidence_ref links this implication to a specific surviving evidence
+    record. Implications referencing non-surviving evidence are
+    mechanically rejected.
+    """
+    evidence_ref: int
+    implication: str
+    category: str = "recommendation"  # recommendation | inference
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "StrategicImplication":
+        return cls(
+            evidence_ref=d.get("evidence_ref", -1),
+            implication=d.get("implication", ""),
+            category=d.get("category", "recommendation"),
+        )
+
+
+@dataclass
 class ResearchResponse:
-    """Stage A output."""
+    """Stage A output + optional strategic implications from the
+    post-review Brand Interpretation pass.
+
+    strategic_implications is additive (default empty) and does NOT
+    appear in RESEARCH_RESPONSE_SCHEMA — it is populated only after
+    the reviewer finalizes evidence and the BrandInterpretationPass runs.
+    """
     target_model: str
     competitor_names: list[str] = field(default_factory=list)
     evidence: list[CompetitorEvidence] = field(default_factory=list)
     evidence_based_recommendations: list[EvidenceBasedRecommendation] = field(default_factory=list)
     strategic_hypotheses: list[StrategicHypothesis] = field(default_factory=list)
     uncertainty: list[str] = field(default_factory=list)
+    strategic_implications: list[StrategicImplication] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ResearchResponse":
@@ -178,6 +209,10 @@ class ResearchResponse:
                 for h in d.get("strategic_hypotheses", [])
             ],
             uncertainty=d.get("uncertainty", []),
+            strategic_implications=[
+                StrategicImplication.from_dict(i)
+                for i in d.get("strategic_implications", [])
+            ],
         )
 
     @classmethod
@@ -595,6 +630,21 @@ class CompetitorReportRenderer:
             for u in self.research.uncertainty:
                 lines.append(f"- {u}")
 
+        # Strategic implications — rendered as a separate section.
+        # These are inference/recommendation from the post-review Brand
+        # Interpretation pass, NOT evidence. Raw brand_reference is
+        # never dumped here — only structured implications.
+        if self.research.strategic_implications:
+            lines.extend([
+                "",
+                "## นัยยะเชิงกลยุทธ์ตามแบรนด์ (Strategic Implications)",
+                "",
+                "*ข้อความในส่วนนี้เป็น inference/recommendation ไม่ใช่ evidence*",
+                "",
+            ])
+            for imp in self.research.strategic_implications:
+                lines.append(f"- {imp.implication}")
+
         return "\n".join(lines)
 
     def _render_limited_analysis(self, product_spec: str) -> str:
@@ -666,6 +716,19 @@ class CompetitorReportRenderer:
             "",
             "*หมายเหตุ: รายงานนี้ไม่มีการสร้างหรืออนุมานข้อมูลคู่แข่งเอง*",
         ])
+
+        # Strategic implications — also rendered in limited analysis.
+        if self.research.strategic_implications:
+            lines.extend([
+                "",
+                "## นัยยะเชิงกลยุทธ์ตามแบรนด์ (Strategic Implications)",
+                "",
+                "*ข้อความในส่วนนี้เป็น inference/recommendation ไม่ใช่ evidence*",
+                "",
+            ])
+            for imp in self.research.strategic_implications:
+                lines.append(f"- {imp.implication}")
+
         return "\n".join(lines)
 
 
@@ -855,6 +918,164 @@ class SemanticEvidenceReviewer:
             strategic_hypotheses=research.strategic_hypotheses,
             uncertainty=research.uncertainty,
         )
+
+
+class BrandInterpretationPass:
+    """Post-review Brand Interpretation — a SEPARATE model call that runs
+    AFTER the SemanticEvidenceReviewer has finalized evidence.
+
+    Hard evidence-isolation boundary:
+    - This class NEVER receives brand_reference during evidence review.
+    - It receives ONLY finalized/surviving evidence from the reviewer.
+    - It CANNOT modify the evidence collection — it only produces
+      strategic implications that reference evidence by index.
+    - Implications referencing non-surviving evidence are mechanically
+      rejected.
+
+    Cost: exactly one LLM call, only when brand_reference is non-empty.
+    No web tools, no retry, no web search.
+
+    If brand_reference is empty: zero calls, returns empty list.
+    If LLM fails or returns invalid JSON: returns empty list (grace
+    degradation — evidence is still available for rendering).
+    """
+
+    _SYSTEM_PROMPT = """คุณคือนักยุทธศาสตร์ที่วิเคราะห์นัยยะของหลักฐานคู่แข่ง
+ต่อตำแหน่งของแบรนด์ของเรา
+
+หน้าที่ของคุณคือรับหลักฐานที่ผ่านการตรวจสอบแล้ว (finalized evidence)
+และ brand context ของเรา แล้วสร้าง strategic implications
+
+กฎสำคัญ:
+1. ห้ามสร้างข้อเท็จจริงเกี่ยวกับคู่แข่งที่ไม่มีใน evidence
+2. ห้ามเปลี่ยนแปลง evidence — คุณไม่สามารถเพิ่ม ลบ หรือแก้ไข evidence ได้
+3. implications เป็น inference/recommendation ไม่ใช่ evidence
+4. แต่ละ implication ต้องอ้างอิง evidence ที่อยู่ในรายการที่ให้มา (evidence_ref = index)
+5. ห้าม dump raw brand context ลงใน implications — ใช้เป็นเลนส์คิดเท่านั้น
+
+ตัวอย่าง:
+- evidence[0]: "CompA ราคา 5,000 THB" + brand: "premium positioning"
+- valid implication: "การแข่งขันด้านราคาต่ำอาจทำให้ premium positioning อ่อนแอลง"
+- invalid: "ลูกค้า CompA ชอบของถูก" (ไม่มีใน evidence)
+
+ส่งกลับ JSON array แต่ละ element มี:
+- evidence_ref: index ของ evidence ที่อ้างอิง (int)
+- implication: ข้อความ inference/recommendation
+- category: "recommendation" หรือ "inference"
+
+ห้ามครอบ JSON ด้วย markdown code fence
+"""
+
+    def __init__(self, llm, config: dict | None = None):
+        self.llm = llm
+        self.config = config or {}
+
+    def interpret(
+        self,
+        research: ResearchResponse,
+        brand_reference: str = "",
+        product_spec: str = "",
+        quick_brief: str = "",
+    ) -> list[StrategicImplication]:
+        """Produce brand-aware strategic implications from finalized evidence.
+
+        Returns a list of StrategicImplication, each referencing a surviving
+        evidence index. Implications referencing non-surviving evidence are
+        mechanically rejected.
+
+        If brand_reference is empty, returns [] without making an LLM call.
+        If the LLM call fails or returns invalid JSON, returns [] (grace
+        degradation — evidence is still available for rendering).
+
+        This method does NOT modify ``research`` — it only reads it.
+        """
+        if not brand_reference:
+            return []
+        if not research.evidence:
+            return []
+
+        # Build compact evidence summary for the prompt — only surviving evidence
+        evidence_lines: list[str] = []
+        for i, ev in enumerate(research.evidence):
+            evidence_lines.append(
+                f"[{i}] competitor: {ev.competitor} | field: {ev.field} | "
+                f"claim: {ev.claim} | url: {ev.url}"
+            )
+
+        user_msg = (
+            f"หลักฐานที่ผ่านการตรวจสอบแล้ว ({len(research.evidence)} รายการ):\n"
+            + "\n".join(evidence_lines)
+            + f"\n\n--- Brand Context ---\n{brand_reference}\n--- สิ้นสุด Brand Context ---\n"
+        )
+        if product_spec:
+            user_msg += f"\nProduct spec: {product_spec[:500]}\n"
+        if quick_brief:
+            user_msg += f"Quick brief: {quick_brief[:300]}\n"
+        user_msg += "\nส่งกลับ JSON array ของ strategic implications"
+
+        messages = [
+            {"role": "system", "content": self._SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ]
+
+        try:
+            response = self.llm.chat(
+                messages,
+                model=self.config.get("model"),
+                temperature=0.2,
+                max_tokens=1024,
+                max_retry_limit=0,  # no retry — one pass only
+                stream=False,
+                tools=None,  # no web tools — no web calls
+                source="competitor_analysis.brand_interpretation",
+            )
+        except Exception:
+            return []  # graceful degradation
+
+        if not response or not response.strip():
+            return []
+
+        # Parse JSON response
+        try:
+            clean = response.strip()
+            if clean.startswith("```"):
+                clean = re.sub(r"^```(?:json)?\s*\n?", "", clean)
+                clean = re.sub(r"\n?```\s*$", "", clean)
+            raw_implications = json.loads(clean)
+        except (json.JSONDecodeError, ValueError):
+            return []
+
+        if not isinstance(raw_implications, list):
+            return []
+
+        # Build set of valid evidence indices
+        valid_indices = set(range(len(research.evidence)))
+
+        # Filter implications — mechanically reject invalid evidence_refs
+        implications: list[StrategicImplication] = []
+        for imp in raw_implications:
+            if not isinstance(imp, dict):
+                continue
+            ref = imp.get("evidence_ref", -1)
+            if not isinstance(ref, int):
+                continue
+            if ref not in valid_indices:
+                continue  # mechanically reject non-surviving evidence refs
+            implication_text = imp.get("implication", "")
+            if not implication_text:
+                continue
+            category = imp.get("category", "recommendation")
+            if category not in ("recommendation", "inference"):
+                category = "recommendation"
+            implications.append(
+                StrategicImplication(
+                    evidence_ref=ref,
+                    implication=implication_text,
+                    category=category,
+                )
+            )
+
+        return implications
 
 
 def render_competitor_report(

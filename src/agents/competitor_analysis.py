@@ -9,6 +9,7 @@ from typing import Any
 from ..output_validators import _strip_citations_and_urls
 from .base_agent import BaseAgent
 from .competitor_evidence import (
+    BrandInterpretationPass,
     CompetitorReportRenderer,
     EVIDENCE_SYSTEM_PROMPT,
     ResearchResponse,
@@ -204,6 +205,45 @@ class CompetitorAnalysisAgent(BaseAgent):
                 self._last_draft_output = final_json
                 return markdown
             research = reviewed
+
+        # Stage 2.7: Brand Interpretation — a SEPARATE model call that
+        # runs AFTER the reviewer has finalized evidence. This is the
+        # hard evidence-isolation boundary: the brand interpretation pass
+        # receives ONLY finalized/surviving evidence and cannot modify it.
+        # It produces strategic implications that reference evidence by
+        # index.
+        #
+        # Execution condition (all three required):
+        #   1. use_brand_reference config is true for this agent
+        #   2. brand_reference is non-empty
+        #   3. finalized surviving evidence exists
+        # If use_brand_reference is false, Agent 2 remains objective-only
+        # even if a brand_reference object is loaded on the agent.
+        brand_ref = getattr(self, "brand_reference", "")
+        brand_interp_enabled = self.config.get("use_brand_reference", False)
+        if brand_interp_enabled and brand_ref and research.evidence:
+            brand_interp = BrandInterpretationPass(
+                llm=self.llm,
+                config={
+                    "model": self.config.get("review_model") or self.config.get("model"),
+                },
+            )
+            implications = brand_interp.interpret(
+                research,
+                brand_reference=brand_ref,
+                product_spec=getattr(self, "_product_spec", ""),
+                quick_brief=getattr(self, "_quick_brief", ""),
+            )
+            # Attach implications as a separate field — evidence is NOT modified
+            research = ResearchResponse(
+                target_model=research.target_model,
+                competitor_names=research.competitor_names,
+                evidence=research.evidence,
+                evidence_based_recommendations=research.evidence_based_recommendations,
+                strategic_hypotheses=research.strategic_hypotheses,
+                uncertainty=research.uncertainty,
+                strategic_implications=implications,
+            )
 
         renderer = CompetitorReportRenderer(
             research,
