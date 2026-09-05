@@ -498,29 +498,38 @@ M6.1 qualification result and remediation constraints.
   - No `step_context` (standalone/script paths) remains valid.
   - Truncated ready resources remain valid.
 
-### Competitor Stage 3 — unresolved semantic architecture decision
+### Competitor Stage 3 — hard-isolated Brand Interpretation (offline, uncommitted)
 
 - Stage A (evidence research) remains brand-independent: evidence
   prompt, schema, and records contain no brand fields.
-- Stage 3 (`CompetitorReportRenderer`) remains a deterministic Markdown
-  renderer with no semantic reasoning capability.
-- **Current model-call lifecycle:** typical successful run = 2 LLM calls
-  (Stage 1 evidence generation + `SemanticEvidenceReviewer.review`);
-  maximum = 3 calls (adds `_revise_research` on validation failure).
-  No existing call receives `brand_reference`.
-- A design-only proposal is documented in
-  `M6_COMPETITOR_STAGE3_DESIGN.md`. It compares:
-  - Option A — dedicated post-evidence semantic Brand reasoning step
-    (+1 LLM call).
-  - Option A-variant — reuse `SemanticEvidenceReviewer.review` (zero
-    extra calls, merged responsibility).
-  - Option B — keep Agent 2 evidence-only, delegate brand-aware
-    strategy to `campaign_strategy` (recommended default).
-- **No implementation has been performed.** No additional model call is
-  authorized in the current phase.
-- Item 4 (brand-aware competitor recommendations) is **not fully solved**
-  for competitor analysis. It remains an unresolved architecture decision
-  pending Product Owner approval.
+- `SemanticEvidenceReviewer.review()` remains objective — it does NOT
+  receive `brand_reference`. Its signature has no `brand_reference`
+  parameter. This is the hard evidence-isolation boundary.
+- **Rejected design:** A combined reviewer+brand call was attempted and
+  rejected before commit. A model that sees brand context while
+  reviewing evidence cannot provide a hard evidence-objectivity
+  guarantee through prompt instructions alone. Offline tests comparing
+  mocked evidence decisions with/without brand_reference do NOT prove
+  real-model invariance.
+- **Corrected architecture (implemented, uncommitted):** A separate
+  `BrandInterpretationPass` runs AFTER the reviewer finalizes evidence.
+  It receives only finalized/surviving evidence (read-only) + optional
+  `brand_reference`. It produces `StrategicImplication` objects that
+  reference evidence by index. Implications referencing non-surviving
+  evidence are mechanically rejected. The pass cannot modify the
+  evidence collection.
+- **Model-call lifecycle:**
+  - Without `brand_reference`: unchanged (typical 2 calls, max 3).
+  - With `brand_reference`: typical 3 calls (Stage A + reviewer + brand
+    interpretation), max 4 (adds `_revise_research`). The extra call
+    occurs only when `brand_reference` is non-empty AND evidence exists.
+- The deterministic renderer formats strategic implications as a
+  separate "Strategic Implications" section, labeled as
+  inference/recommendation. Raw `brand_reference` is never rendered.
+- Agent 2 remains functional standalone without `brand_reference`.
+- Item 4 (brand-aware competitor recommendations) is considered
+  **implemented offline** but still awaits clean paid qualification.
+- Design details in `M6_COMPETITOR_STAGE3_DESIGN.md`.
 
 ### Testing-layer distinction
 

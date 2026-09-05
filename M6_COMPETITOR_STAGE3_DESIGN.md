@@ -1,8 +1,10 @@
-# Competitor Analysis — Brand Stage 3 Semantic Reasoning Design Proposal
+# Competitor Analysis — Brand Stage 3 Semantic Reasoning Design
 
-**Status:** Design-only. No implementation authorized in the current phase.
+**Status:** Corrected hard-isolated implementation (offline, uncommitted).
+Awaits Product Owner review and clean paid qualification.
 **Created:** 2026-09-04 (Round 10 remediation).
-**Approval required:** Product Owner must approve before any implementation.
+**Updated:** 2026-09-04 — combined reviewer design rejected; corrected
+sequential architecture implemented.
 
 ---
 
@@ -287,17 +289,126 @@ approval before implementation.**
 
 ---
 
-## 8. Current durable tests (already in place)
+## 8. Rejected design — combined reviewer+brand call (Option A-variant)
 
-The following tests in `tests/test_competitor_analysis.py` prove the
-current limitation and protect against regressions:
+### What was attempted
+
+The Option A-variant proposed reusing the existing
+`SemanticEvidenceReviewer.review()` call to also produce brand-aware
+implications. The reviewer would receive `brand_reference` and the
+prompt would instruct the model to keep evidence decisions independent
+of brand context.
+
+### Why it was rejected
+
+A model that sees brand context while reviewing evidence cannot provide
+a hard evidence-objectivity guarantee merely through prompt instructions.
+
+- The prompt says "don't let brand context influence evidence decisions"
+  but the model CAN see the brand context while making those decisions.
+- Offline tests comparing mocked evidence decisions with/without
+  `brand_reference` only prove the mock is deterministic — they do NOT
+  prove real-model invariance.
+- This is a prompt-level promise, not an architectural boundary.
+
+### Lesson
+
+Evidence isolation must be enforced by architecture (sequential
+boundary), not by prompt wording. The reviewer must not even have the
+option to receive brand context.
+
+---
+
+## 9. Corrected architecture — hard-isolated sequential Brand Interpretation
+
+### Design
+
+```
+Stage A (no brand_reference)
+  → Deterministic validation
+  → SemanticEvidenceReviewer (no brand_reference)
+  → FINALIZED immutable evidence
+  → BrandInterpretationPass (separate call, optional brand_reference)
+  → Strategic implications (separate from evidence)
+  → Deterministic renderer
+```
+
+### Key properties
+
+1. `SemanticEvidenceReviewer.review()` signature has NO
+   `brand_reference` parameter — it is architecturally impossible for
+   brand context to reach the reviewer.
+2. `BrandInterpretationPass` runs ONLY after the reviewer finalizes
+   evidence.
+3. `BrandInterpretationPass` receives finalized evidence read-only —
+   it returns `list[StrategicImplication]`, not a modified
+   `ResearchResponse`.
+4. Implications referencing non-surviving evidence indices are
+   mechanically rejected.
+5. The pass is skipped entirely when `brand_reference` is empty.
+6. No web tools, no retry, no web search in the brand interpretation call.
+
+### Cost impact
+
+- Without `brand_reference`: zero additional calls (unchanged).
+- With `brand_reference`: +1 LLM call on the successful path. Input is
+  compact structured evidence summary + brand reference (no raw source
+  pages). Output is a small JSON array of implications.
+
+### Implementation (uncommitted)
+
+- `src/agents/competitor_evidence.py`:
+  - Added `StrategicImplication` dataclass (evidence_ref, implication,
+    category).
+  - Added `strategic_implications` field to `ResearchResponse`
+    (additive, backward-compatible default, NOT in
+    `RESEARCH_RESPONSE_SCHEMA`).
+  - Added `BrandInterpretationPass` class with `interpret()` method.
+  - `SemanticEvidenceReviewer.review()` — UNCHANGED, no
+    `brand_reference` parameter.
+  - `CompetitorReportRenderer` renders strategic implications as a
+    separate section.
+- `src/agents/competitor_analysis.py`:
+  - Calls `BrandInterpretationPass.interpret()` after the reviewer,
+    only when `brand_reference` is non-empty.
+  - Attaches implications as a separate field — evidence is NOT
+    modified.
+
+### What was NOT changed
+
+- `RESEARCH_RESPONSE_SCHEMA` (Stage A LLM schema) — no brand fields.
+- `EVIDENCE_SYSTEM_PROMPT` — no brand context.
+- `SemanticEvidenceReviewer` — no brand_reference parameter.
+- Stage A evidence generation — unchanged.
+
+---
+
+## 10. Durable tests
+
+### Existing evidence-isolation tests (committed in checkpoint 3)
 
 - Stage A schema has no brand fields.
 - Stage A system prompt has no brand context.
 - Renderer does not dump brand reference.
-- Evidence records remain unchanged.
+- Evidence records remain unchanged by rendering.
 - Renderer does not fabricate brand-aware recommendations.
 
-These tests ensure that no fake deterministic semantic behavior is
-introduced and that the limitation remains honestly documented until
-a semantic reasoning seam is separately approved.
+### New hard-isolation tests (uncommitted)
+
+1. Stage A prompt excludes brand_reference.
+2. `SemanticEvidenceReviewer.review` signature has no brand_reference.
+3. Brand Interpretation runs only after reviewer finalizes evidence.
+4. Brand Interpretation receives only finalized/surviving evidence.
+5. Removed/rejected evidence cannot be used by Brand Interpretation.
+6. Brand Interpretation cannot mutate the finalized evidence collection.
+7. Evidence is value-equivalent before/after Brand Interpretation.
+8. Implications with invalid/non-surviving evidence refs are rejected.
+9. Raw brand_reference is never rendered directly.
+10. Renderer does no semantic brand reasoning.
+11. Missing brand_reference skips the Brand Interpretation call.
+12. With brand_reference, exactly one additional call is made.
+13. No web-search/tools in Brand Interpretation.
+14. Brand Interpretation fail-closed — no retry, returns empty on error.
+15. Standalone Agent 2 without brand context remains functional.
+16. No benchmark/brand-specific fixtures in engine behavior.
+17. Existing durable-contract tests continue to pass.
