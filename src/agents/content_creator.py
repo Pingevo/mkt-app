@@ -18,6 +18,8 @@ class ContentCreatorAgent(BaseAgent):
         media_type: str = "",
         visual_style: str = "",
         asset_summary: str = "",
+        selected_pillar: str = "",
+        content_pillars: str = "",
     ) -> str:
         parts = ["กรุณาสร้าง **1 โพสต์** สำหรับโปรโมทสินค้า ตามรูปแบบใน system prompt"]
 
@@ -69,6 +71,25 @@ class ContentCreatorAgent(BaseAgent):
                 f"{asset_summary}\n"
                 f"--- สิ้นสุดวัตถุดิบแบรนด์ ---\n"
                 f"ระบุ asset_ids ที่ใช้ในแต่ละโพสต์"
+            )
+
+        # Content Pillars — optional content-strategy guidance (not mandatory keywords)
+        if selected_pillar:
+            parts.append(
+                f"--- Content Pillar ที่เลือก (ใช้เป็นแนวทางสร้างคอนเทนต์) ---\n"
+                f"{selected_pillar}\n"
+                f"--- สิ้นสุด Content Pillar ที่เลือก ---"
+            )
+        if content_pillars:
+            parts.append(
+                f"--- Content Pillars ทั้งหมด (ใช้เป็นบริบทยุทธศาสตร์เนื้อหาเมื่อเกี่ยวข้อง) ---\n"
+                f"{content_pillars}\n"
+                f"--- สิ้นสุด Content Pillars ---"
+            )
+        if selected_pillar or content_pillars:
+            parts.append(
+                "ใช้ Content Pillar เป็นแนวทางสร้างคอนเทนต์เมื่อเกี่ยวข้อง — "
+                "ไม่บังคับให้กล่าวถึงชื่อ Pillar ในผลลัพธ์"
             )
 
         parts.append("สร้าง 1 โพสต์ตามรูปแบบที่กำหนดใน system prompt")

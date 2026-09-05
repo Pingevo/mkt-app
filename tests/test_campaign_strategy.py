@@ -313,3 +313,63 @@ def test_repair_does_not_dump_full_page():
     repair_calls = [c for c in llm.calls if "repair" in c["kwargs"].get("source", "")]
     user_msg = repair_calls[0]["messages"][-1]["content"]
     assert user_msg.count("x ") < 2000
+
+
+# ---------------------------------------------------------------------------
+# Content Pillars — optional content-strategy guidance
+# ---------------------------------------------------------------------------
+
+def test_campaign_strategy_receives_configured_pillars():
+    """campaign_strategy can receive optional configured Content Pillars
+    via the context dict."""
+    agent = CampaignStrategyAgent(_campaign_config(), FakeLLM())
+    prompt = agent.build_prompt({
+        "product": "TestProduct",
+        "content_pillars": "- Safety\n- Fun\n- Value",
+    })
+    assert "Safety" in prompt
+    assert "Fun" in prompt
+    assert "Value" in prompt
+    assert "Content Pillars" in prompt
+
+
+def test_campaign_strategy_receives_selected_pillar():
+    """campaign_strategy can receive a selected Content Pillar when one
+    legitimately exists in the flow."""
+    agent = CampaignStrategyAgent(_campaign_config(), FakeLLM())
+    prompt = agent.build_prompt({
+        "product": "TestProduct",
+        "selected_pillar": "Safety",
+    })
+    assert "Safety" in prompt
+    assert "Content Pillar ที่เลือก" in prompt
+
+
+def test_campaign_strategy_works_without_pillars():
+    """campaign_strategy must work normally when no Pillars are provided."""
+    agent = CampaignStrategyAgent(_campaign_config(), FakeLLM())
+    prompt = agent.build_prompt({"product": "TestProduct"})
+    assert "Content Pillar" not in prompt
+    assert "TestProduct" in prompt
+
+
+def test_campaign_strategy_pillars_are_guidance_not_mandatory():
+    """Pillar context must include guidance that usage is optional,
+    not mandatory keyword inclusion."""
+    agent = CampaignStrategyAgent(_campaign_config(), FakeLLM())
+    prompt = agent.build_prompt({
+        "product": "TestProduct",
+        "content_pillars": "- Safety",
+        "selected_pillar": "Safety",
+    })
+    assert "ไม่บังคับ" in prompt
+
+
+def test_campaign_strategy_no_pillar_names_hardcoded():
+    """No specific Pillar names are hardcoded into the agent logic.
+    The agent renders whatever pillars are passed via context."""
+    agent = CampaignStrategyAgent(_campaign_config(), FakeLLM())
+    prompt_a = agent.build_prompt({"product": "P", "content_pillars": "- Alpha"})
+    prompt_b = agent.build_prompt({"product": "P", "content_pillars": "- Beta"})
+    assert "Alpha" in prompt_a and "Beta" not in prompt_a
+    assert "Beta" in prompt_b and "Alpha" not in prompt_b

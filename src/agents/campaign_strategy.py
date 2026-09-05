@@ -64,6 +64,29 @@ class CampaignStrategyAgent(BaseAgent):
             if value:
                 sections.extend([f"--- {label} ---", str(value), ""])
 
+        # Content Pillars — optional content-strategy guidance (not mandatory keywords)
+        configured_pillars = context.get("content_pillars", "")
+        selected_pillar = context.get("selected_pillar", "")
+        if configured_pillars or selected_pillar:
+            pillar_parts = []
+            if selected_pillar:
+                pillar_parts.append(
+                    f"--- Content Pillar ที่เลือก (ใช้เป็นแนวทางยุทธศาสตร์เนื้อหา) ---\n"
+                    f"{selected_pillar}\n"
+                    f"--- สิ้นสุด Content Pillar ที่เลือก ---"
+                )
+            if configured_pillars:
+                pillar_parts.append(
+                    f"--- Content Pillars ทั้งหมด (ใช้เป็นบริบทยุทธศาสตร์เนื้อหาเมื่อเกี่ยวข้อง) ---\n"
+                    f"{configured_pillars}\n"
+                    f"--- สิ้นสุด Content Pillars ---"
+                )
+            pillar_parts.append(
+                "ใช้ Content Pillars เป็นแนวทางยุทธศาสตร์เนื้อหาเมื่อเกี่ยวข้อง — "
+                "ไม่บังคับใช้ทุก Pillar ไม่บังคับให้กล่าวถึงชื่อ Pillar ในผลลัพธ์"
+            )
+            sections.extend(pillar_parts)
+
         selected = sorted(self._selected_evidence_urls)
         if selected:
             sections.extend(

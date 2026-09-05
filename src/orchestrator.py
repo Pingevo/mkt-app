@@ -293,6 +293,17 @@ class Orchestrator:
             paths = product_db.get_product_image_paths(self.product_id)
         return paths
 
+    def _build_configured_pillars_text(self) -> str:
+        """Build a compact text representation of configured Content Pillars.
+
+        Returns empty string if no pillars are configured. The model decides
+        semantic use — this is optional strategic context, not mandatory keywords.
+        """
+        pillars = self.config.get("pillars", [])
+        if not pillars:
+            return ""
+        return "\n".join(f"- {p}" for p in pillars)
+
     def run_competitor_analysis(
         self, product_spec: str, competitor_data: str | None = None, llm: LLMClient | None = None,
         quick_brief: str = "", resource_context: str = "",
@@ -327,6 +338,7 @@ class Orchestrator:
         extra_image_paths: list[str] | None = None,
         step_context: StepRunContext | None = None,
         web_search: bool | None = None,
+        selected_pillar: str = "",
     ) -> str:
         own = llm is None
         if own:
@@ -348,6 +360,12 @@ class Orchestrator:
                 "product": product_data,
                 "competitors": competitor_analysis or "",
             }
+            # Content Pillars — optional content-strategy guidance
+            configured_pillars = self._build_configured_pillars_text()
+            if configured_pillars:
+                context["content_pillars"] = configured_pillars
+            if selected_pillar:
+                context["selected_pillar"] = selected_pillar
             prompt = agent.build_prompt(context)
             image_paths = self._get_product_image_paths()
             run_ref = f"orchestrator:{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
@@ -435,6 +453,8 @@ class Orchestrator:
         resource_context: str = "",
         extra_image_paths: list[str] | None = None,
         step_context: StepRunContext | None = None,
+        selected_pillar: str = "",
+        content_pillars: str = "",
     ) -> str:
         own = llm is None
         if own:
@@ -510,6 +530,8 @@ class Orchestrator:
                 media_type=media_type,
                 visual_style=visual_style,
                 asset_summary=asset_summary,
+                selected_pillar=selected_pillar,
+                content_pillars=content_pillars,
             )
             image_paths = self._get_product_image_paths()
             # ใช้ Structured Outputs — LLM คืน JSON ที่ตรง schema
@@ -1287,6 +1309,8 @@ class Orchestrator:
                         "asset_summary": asset_summary,
                         "resource_context": resource_context,
                         "extra_image_paths": extra_image_paths,
+                        "selected_pillar": chosen_pillar,
+                        "content_pillars": self._build_configured_pillars_text(),
                     }
                     if step_context is not None:
                         content_kwargs["step_context"] = step_context.with_quick_brief(attempt_brief)
@@ -1437,7 +1461,7 @@ class Orchestrator:
                 task = progress.add_task("Agent 3/4: นักวางกลยุทธ์แคมเปญ — กำลังสร้าง...", total=1)
                 progress.update(task, description="Agent 3/4: นักวางกลยุทธ์แคมเปญ — กำลังตรวจงาน...")
                 campaign_strategy = self.run_campaign_strategy(
-                    product_spec, competitor_analysis, llm
+                    product_spec, competitor_analysis, llm,
                 )
                 progress.update(
                     task, description="[green]✓[/green] Agent 3/4: แคมเปญ + ตรวจงานเสร็จ"
@@ -1446,7 +1470,8 @@ class Orchestrator:
                 task = progress.add_task("Agent 4/4: นักสร้างคอนเทนต์ — กำลังสร้าง...", total=1)
                 progress.update(task, description="Agent 4/4: นักสร้างคอนเทนต์ — กำลังตรวจงาน...")
                 content = self.run_content_creator(
-                    product_spec, competitor_analysis, campaign_strategy, llm
+                    product_spec, competitor_analysis, campaign_strategy, llm,
+                    content_pillars=self._build_configured_pillars_text(),
                 )
                 progress.update(
                     task, description="[green]✓[/green] Agent 4/4: คอนเทนต์ + ตรวจงานเสร็จ"
