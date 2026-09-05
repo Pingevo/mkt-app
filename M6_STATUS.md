@@ -1,7 +1,7 @@
 # M6 Status
 
 **Canonical current-state document for M6.1 qualification and remediation.**
-Last updated: 2026-09-04 (Round 8 — truncation evidence correction + qualification-validity axes).
+Last updated: 2026-09-04 (Round 10 — selected-Pillar state scope, fatal attachment preflight at shared seam, pillar_keywords characterization correction, competitor Stage 3 design-only proposal, testing-layer distinction).
 
 ---
 
@@ -336,3 +336,212 @@ and are **superseded** by this canonical status document:
 
 This `M6_STATUS.md` is the **single source of truth** for the current
 M6.1 qualification result and remediation constraints.
+
+---
+
+## Consolidated Audit Findings (Round 9)
+
+### Content Pillars
+
+- UI/config existed (`config/content_policy.yaml`: `pillars`, `pillar_keywords`)
+- `pillar_keywords` is **legacy deterministic lexical Pillar-classification
+  fallback** logic. It is used by
+  `pillar_manager.infer_pillar(concept, pillars, keywords_map)` in Auto Mode
+  product selection (`src/orchestrator.py`) when the LLM output omits the
+  `pillar` field — it performs a case-insensitive substring match of pillar
+  names and configured keywords against the concept text to classify which
+  Pillar the concept belongs to. It is NOT model semantic reasoning. It is
+  NOT part of the new Agent 3/4 Pillar wiring. It predates this remediation.
+  It must not be expanded with additional keyword/regex semantic logic. It
+  may be treated as future technical debt. It is also used by
+  `pillar_manager.find_duplicate_keywords` for UI duplicate-keyword
+  validation.
+- Downstream Agent 3/4 wiring was missing — selected Pillar was extracted
+  in `select_product_auto` but discarded before `content_creator`
+- Configured/selected Pillar context is now preserved through the
+  orchestrator to `campaign_strategy` (via context dict) and
+  `content_creator` (via optional parameters)
+- Pillars remain optional strategic guidance — no forced usage, no
+  keyword/regex classification, no hardcoded Pillar names
+- Pillars remain separate from brand factual/compliance context
+
+### Attachments
+
+- Attachment delivery path: wizard UI → `/api/run-resources/upload`
+  → `RunResourceStore` → `build_step_run_context` → `BaseAgent.run`
+- Supported formats: `.txt`, `.md`, `.csv`, `.pdf`, `.xlsx`, `.xls`,
+  `.docx`, `.png`, `.jpg`, `.jpeg`, `.webp`
+- Default limits: 5 files per flow, 15 MB per file, 30 MB total,
+  50,000 extracted chars per file, 120,000 total extracted chars
+- **Terminology:**
+  - **Truncation** = non-fatal limitation where a successfully extracted
+    ready resource was shortened according to an explicit size limit.
+    Truncation is tracked in `resource_trace` (not in `warnings`) and
+    does NOT block execution.
+  - **`StepRunContext.warnings`** = in the current implementation, this
+    field contains only fatal resource-resolution failures: unsupported
+    refs, missing/invalid refs, and non-ready referenced resources. It
+    does NOT contain truncation notices.
+  - **Fatal resource preflight error** = a resource explicitly
+    referenced by the user cannot supply usable context/input (missing,
+    rejected, parser error, otherwise non-ready). Execution must stop.
+    In the current implementation, any non-empty `step_context.warnings`
+    is treated as fatal at the shared execution seam.
+- **Fatal preflight enforcement (agent execution):** `BaseAgent.run()`
+  in `src/agents/base_agent.py` is the single shared seam. If
+  `step_context.warnings` is non-empty, it raises
+  `ValueError("resource preflight failed: ...")` before any prompt
+  construction or LLM call. This guarantees no agent execution can
+  silently proceed without a required resource, regardless of whether
+  the caller pre-checks warnings.
+- **Fatal preflight enforcement (media generation):**
+  `/api/generate_all_media` now treats any non-empty
+  `step_context.warnings` as fatal and returns HTTP 400 before media
+  generation is invoked. This closes the prior silent-loss path where
+  non-ready referenced image resources could be silently dropped.
+- Web endpoints (`/api/run_agent`, `/api/run_agents`, `/api/run_flows`,
+  `/api/run_auto`) additionally raise at the endpoint level before
+  `_run_single_agent` is invoked — defense in depth.
+- Zero attachments remains valid (empty warnings → execution proceeds).
+- Ready resources that were truncated remain valid (truncation does not
+  produce a fatal preflight error; only non-ready/missing/rejected refs
+  do).
+- Grounding clarification: resource context block states that uploaded
+  file content is supplied/user-provided facts and does not require web
+  citation merely because it came from an attachment.
+- Known limitation: script-level paths (`scripts/qual_runner.py`,
+  `scripts/m6_frontier_uat.py`) pass `resource_context` as a raw string
+  and bypass `build_step_run_context`. These paths have no resource refs
+  to validate and are out of scope for the fatal preflight.
+
+### Novelty / history
+
+- Persistence already exists (`cache/content_history.json` via
+  `src/content_history.py`)
+- Current preventive-history routing is incomplete:
+  - `content_creator` sees history only in manual web UI flow (via
+    `quick_brief`), not in orchestrator `run_content_creator` or
+    `run_content_creator_auto` first attempt
+  - `campaign_strategy` never sees history
+- History is global with per-product filtering — no user/workspace/brand
+  isolation
+- Product IDs are folder names with no tenant prefix — two users can
+  collide on the same product name
+- Isolation/scoping must be resolved before wider history injection
+- System must NOT yet claim guaranteed non-repetition
+- History queries are bounded (`default_limit: 50`, `max_entries: 200`)
+
+### competitor_analysis
+
+- Stage A remains brand-objective (evidence prompt, schema, records)
+- Deterministic Stage 3 renderer (`CompetitorReportRenderer`) has no
+  semantic brand-reasoning seam
+- Previous raw brand-reference framing proposal was rejected/reverted
+- This remains a known gap pending a separately approved semantic design
+  that would require a model reasoning step (not authorized in this phase)
+
+### campaign_strategy web search
+
+- `web_search: true` in `config/agents.yaml` — web tool execution is
+  reachable at runtime
+- `grounding_policy` and citation provenance validation apply
+- Context-routing matrix corrected: campaign_strategy **does** receive
+  web evidence (not N/A as previously reported)
+
+---
+
+## Round 10 Corrections — selected-Pillar state, fatal preflight, Stage 3 design
+
+### Selected-Pillar state scope
+
+- A previous implementation stored `self._selected_pillar` on the
+  `Orchestrator` instance, creating possible stale state leakage across
+  runs on a reusable orchestrator.
+- This attribute has been removed. No hidden mutable selected-Pillar
+  state persists on the `Orchestrator` instance.
+- **Normal pipeline (`run_pipeline`):** passes configured Pillars only
+  (via `_build_configured_pillars_text()`). It does not accept or pass
+  a selected Pillar because it does not perform auto-mode product
+  selection. `run_campaign_strategy` is called without
+  `selected_pillar`; `run_content_creator` is called with
+  `content_pillars` only.
+- **Auto Mode (`run_content_creator_auto`):** `chosen_pillar` is a
+  run-local variable derived from the selection LLM output
+  (`selection.get("pillar", "")`). It is forwarded directly to
+  `run_content_creator` via `selected_pillar=chosen_pillar`. It is
+  never persisted on the Orchestrator object and never inherited by a
+  subsequent run.
+- `run_campaign_strategy` accepts an optional `selected_pillar`
+  parameter for callers that have one; `run_pipeline` does not supply
+  one.
+- Contract verified by regression tests in
+  `tests/test_content_pillars.py`:
+  1. Run A with selected Pillar X receives X.
+  2. A subsequent Run B with no selected Pillar does not receive X.
+  3. Configured Pillars remain available independently.
+  4. Explicit selected Pillar values are preserved unchanged.
+
+### Fatal attachment preflight — shared seam enforcement
+
+- The attachment preflight is now enforced at the single shared
+  execution seam: `BaseAgent.run()` in `src/agents/base_agent.py`.
+- If `step_context.warnings` is non-empty, `BaseAgent.run` raises
+  `ValueError("resource preflight failed: ...")` before any prompt
+  construction or LLM call.
+- This closes the gap where a caller could pass a `StepRunContext` with
+  non-ready-resource warnings directly to `agent.run()` and the agent
+  would silently proceed.
+- Tests in `tests/test_run_context.py` prove:
+  - LLM mock is not called after fatal preflight failure.
+  - Ready resource (zero warnings) allows execution.
+  - Zero attachments remains valid.
+  - No `step_context` (standalone/script paths) remains valid.
+  - Truncated ready resources remain valid.
+
+### Competitor Stage 3 — unresolved semantic architecture decision
+
+- Stage A (evidence research) remains brand-independent: evidence
+  prompt, schema, and records contain no brand fields.
+- Stage 3 (`CompetitorReportRenderer`) remains a deterministic Markdown
+  renderer with no semantic reasoning capability.
+- **Current model-call lifecycle:** typical successful run = 2 LLM calls
+  (Stage 1 evidence generation + `SemanticEvidenceReviewer.review`);
+  maximum = 3 calls (adds `_revise_research` on validation failure).
+  No existing call receives `brand_reference`.
+- A design-only proposal is documented in
+  `M6_COMPETITOR_STAGE3_DESIGN.md`. It compares:
+  - Option A — dedicated post-evidence semantic Brand reasoning step
+    (+1 LLM call).
+  - Option A-variant — reuse `SemanticEvidenceReviewer.review` (zero
+    extra calls, merged responsibility).
+  - Option B — keep Agent 2 evidence-only, delegate brand-aware
+    strategy to `campaign_strategy` (recommended default).
+- **No implementation has been performed.** No additional model call is
+  authorized in the current phase.
+- Item 4 (brand-aware competitor recommendations) is **not fully solved**
+  for competitor analysis. It remains an unresolved architecture decision
+  pending Product Owner approval.
+
+### Testing-layer distinction
+
+The five testing layers (unit/offline, integration, Frontier
+qualification, Web E2E, Product Owner manual acceptance) are defined
+in the canonical qualification plan: `M6_QUALIFICATION_PLAN.md` §
+Testing Layers.
+
+### Novelty / history — current factual state
+
+- History persistence exists (`cache/content_history.json` via
+  `src/content_history.py`) but is globally scoped with per-product
+  filtering — no user/workspace/brand isolation.
+- Broader preventive history injection is **not approved** because
+  isolation is absent. No guarantee of non-repetition may be claimed.
+- The intended product goal and forward plan for content novelty are
+  documented in `M6_QUALIFICATION_PLAN.md` § Content Novelty /
+  Non-Repetition.
+
+### Canonical forward plan
+
+`M6_QUALIFICATION_PLAN.md` is now the canonical forward qualification
+plan. This document (`M6_STATUS.md`) remains the factual current-state
+record.
