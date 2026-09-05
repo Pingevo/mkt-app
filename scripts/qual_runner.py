@@ -53,6 +53,13 @@ from src.evaluation.campaign_qualification import (
 from src.flow_context import set_usage_reference, set_usage_metadata, clear_usage_context
 from src import product_db
 from src.config_loader import load_config, get_agent_config
+from src.candidate_completeness import (
+    CallFinishRecord,
+    CallRole,
+    CandidateEvidence,
+    CompletenessStatus,
+    evaluate_completeness,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +354,91 @@ def make_llm(orch: Orchestrator) -> LLMClient:
     return orch.make_client()
 
 
+def _classify_call_role(source: str, agent_key: str) -> str:
+    """Classify an LLM call by its role in the scenario pipeline.
+
+    Classification uses the source label suffix that LLMClient assigns.
+    Source labels follow the convention ``{agent_name}.{role}`` where role
+    is one of the stable programmatic contracts:
+
+    - ``.generate``     → PRIMARY_GENERATION (main agent output)
+    - ``.review``       → SEMANTIC_REVIEW (review/refine pass)
+    - ``.semantic_review`` → SEMANTIC_REVIEW
+    - ``.repair``       → REPAIR_REVISION (repair after validation failure)
+    - ``.revise``       → REPAIR_REVISION (revision pass)
+    - ``.fetch``        → TOOL_CONTINUATION (tool/web-search turn)
+    - ``.brand_interpretation`` → DOWNSTREAM_INTERPRETATION
+    - ``chat_with_tools`` → TOOL_CONTINUATION
+
+    This is mechanically knowable — the source label is set by the calling
+    code (BaseAgent, CompetitorEvidenceAgent), not inferred from content.
+    The suffix matching is precise to avoid false positives from agent
+    names that might contain role-like substrings.
+    """
+    s = (source or "").lower()
+    # Match exact suffixes after the last dot, or known full labels
+    if s.endswith(".review") or s.endswith(".semantic_review") or ".semantic_review" in s:
+        return CallRole.SEMANTIC_REVIEW.value
+    if s.endswith(".repair") or s.endswith(".revise"):
+        return CallRole.REPAIR_REVISION.value
+    if ".brand_interpretation" in s or s.endswith(".interpretation"):
+        return CallRole.DOWNSTREAM_INTERPRETATION.value
+    if s.endswith(".fetch") or "chat_with_tools" in s or s.endswith(".tool"):
+        return CallRole.TOOL_CONTINUATION.value
+    # Default: the main generation call for the agent
+    return CallRole.PRIMARY_GENERATION.value
+
+
+def _build_finish_records(
+    run_entries: list[dict[str, Any]], agent_key: str
+) -> list[CallFinishRecord]:
+    """Build per-call finish records from usage log entries.
+
+    Each usage entry now has finish_reason and truncated (from Item 5).
+    This function extracts them into CallFinishRecord objects for
+    completeness evaluation.
+
+    A call that was followed by a successful repair/revision call is
+    marked as superseded — its truncation does not invalidate the
+    final candidate.
+    """
+    records: list[CallFinishRecord] = []
+    for i, entry in enumerate(run_entries):
+        source = entry.get("source", "")
+        role = _classify_call_role(source, agent_key)
+        fr = entry.get("finish_reason")
+        trunc = entry.get("truncated")
+        # If truncated is not explicitly set, infer from finish_reason
+        if trunc is None and fr == "length":
+            trunc = True
+        records.append(CallFinishRecord(
+            call_index=i,
+            role=role,
+            finish_reason=fr,
+            truncated=trunc,
+            prompt_tokens=entry.get("prompt_tokens"),
+            completion_tokens=entry.get("completion_tokens"),
+            max_tokens=None,  # not persisted in usage entry
+            request_id=entry.get("request_id"),
+            model=entry.get("model"),
+            source=source,
+        ))
+
+    # Mark superseded calls: if a truncated primary_generation call is
+    # followed by a successful (non-truncated) repair call, the primary
+    # is superseded.
+    for i, rec in enumerate(records):
+        if rec.is_truncated() and rec.role == CallRole.PRIMARY_GENERATION.value:
+            later_repair = [
+                r for r in records[i + 1:]
+                if r.role == CallRole.REPAIR_REVISION.value and not r.is_truncated()
+            ]
+            if later_repair:
+                rec.superseded = True
+
+    return records
+
+
 def run_case(
     case_id: str,
     agent_key: str,
@@ -364,6 +456,7 @@ def run_case(
     output_dir: Path | None = None,
     product_ids: list[str] | None = None,
     resource_context: str = "",
+    llm: Any = None,
 ) -> dict[str, Any]:
     """Run one UI-equivalent case and capture all evidence.
 
@@ -373,6 +466,9 @@ def run_case(
     - captures usage log entries + Hub receipts
     - product_ids: optional list for multi-product runs; joined with " + " to
       match production multi-product flow in orchestrator.py
+    - llm: optional pre-constructed LLM client (e.g. BudgetGuardedLLMClient).
+      If provided, used instead of make_llm(orch).  This is the dependency
+      injection seam for qualification budget enforcement.
     """
     # Pre-flight dry-run plan: no model calls, just expected calls + upper-bound cost
     plan = dry_run_cost_plan(
@@ -410,7 +506,10 @@ def run_case(
     effective_product_id = " + ".join(folder_list)
 
     orch = make_orchestrator(effective_product_id)
-    llm = make_llm(orch)
+    # Use injected LLM client if provided (qualification budget guard),
+    # otherwise create one exactly like the UI does.
+    if llm is None:
+        llm = make_llm(orch)
     orch.product_id = effective_product_id
 
     # Snapshot usage log before run
@@ -539,12 +638,40 @@ def run_case(
                                     posts[0]["platform"] = platform_label
                                 all_posts.append(posts[0])
                     combined = {"posts": all_posts}
-                    result_text = json.dumps(combined, ensure_ascii=False, indent=2)
+                    raw_json = json.dumps(combined, ensure_ascii=False, indent=2)
 
-                    # Auto media generation (mirrors UI)
+                    # Item 10: S4 presentation parity — Judge should see the
+                    # production-equivalent rendered representation, not raw JSON.
+                    # The production UI renders posts to markdown via
+                    # render_posts_to_markdown (src/content_schema.py).
+                    # We preserve raw JSON as a separate audit artifact and
+                    # write the rendered markdown as the judge-facing output.
+                    try:
+                        from src.content_schema import render_posts_to_markdown
+                        rendered_md = render_posts_to_markdown(combined)
+                        if rendered_md and rendered_md.strip():
+                            result_text = rendered_md
+                        else:
+                            # Renderer returned empty — fall back to raw JSON
+                            # but flag it so it's not silently treated as
+                            # production-equivalent.
+                            result_text = raw_json
+                            error = "content_creator render_posts_to_markdown returned empty — falling back to raw JSON"
+                    except Exception as render_exc:
+                        # Renderer failure — do NOT silently fall back to raw JSON.
+                        # This is a harness presentation failure that should be
+                        # visible, not hidden.
+                        result_text = raw_json
+                        error = f"content_creator render_posts_to_markdown failed: {render_exc}"
+
+                    # Save raw JSON as audit artifact (machine-readable)
+                    raw_json_file = output_dir / f"{case_id}_output_raw.json"
+                    raw_json_file.write_text(raw_json, encoding="utf-8")
+
+                    # Auto media generation (mirrors UI) — uses raw JSON
                     if (auto_image or auto_video) and all_posts:
                         _run_media_gen(
-                            orch, llm, result_text, output_dir,
+                            orch, llm, raw_json, output_dir,
                             auto_image=auto_image or False,
                             auto_video=auto_video or False,
                             product_id=product_id,
@@ -575,12 +702,35 @@ def run_case(
     call_sources = [e.get("source") for e in run_entries]
     models_used = [e.get("model") for e in run_entries if e.get("model")]
 
+    # Build per-call finish records from usage entries for completeness evaluation.
+    # Each usage entry now has finish_reason and truncated (from Item 5).
+    # Classify call roles by source label — generic, not scenario-specific.
+    finish_records = _build_finish_records(run_entries, agent_key)
+    final_fr = finish_records[-1].finish_reason if finish_records else None
+    final_trunc = finish_records[-1].is_truncated() if finish_records else None
+
     # Reconcile Hub receipts (hub_results already captured inside `with`)
     hub_reconciliation = reconcile_hub_receipts(run_entries, hub_results, flush_completed=hub_ack)
 
     # Save output
     out_file = output_dir / f"{case_id}_output.txt"
     out_file.write_text(result_text or f"(error: {error})", encoding="utf-8")
+
+    # Build candidate evidence for completeness determination
+    import hashlib
+    output_hash = hashlib.sha256(out_file.read_bytes()).hexdigest() if out_file.exists() else None
+    candidate_ev = CandidateEvidence(
+        scenario_id=case_id,
+        side="mktapp",
+        model=models_used[0] if models_used else None,
+        run_id=run_ref,
+        output_artifact_path=str(out_file),
+        output_hash=output_hash,
+        finish_records=finish_records,
+        final_finish_reason=final_fr,
+        final_truncated=final_trunc,
+    )
+    completeness_status = evaluate_completeness(candidate_ev)
 
     # Save full evidence
     evidence = {
@@ -616,6 +766,15 @@ def run_case(
         "actual_call_classifications": (call_guard.actual_calls() if call_guard is not None else []),
         "cumulative_spend_after": _read_cumulative_cost(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        # Item 4/6: per-call finish metadata and candidate completeness
+        "finish_records": [r.__dict__ for r in finish_records],
+        "final_finish_reason": final_fr,
+        "final_truncated": final_trunc,
+        "candidate_completeness": completeness_status.value,
+        "candidate_evidence": candidate_ev.to_dict(),
+        # Item 10: S4 presentation parity — track raw JSON audit artifact
+        "raw_json_artifact_path": str(output_dir / f"{case_id}_output_raw.json") if agent_key == "content_creator" else None,
+        "judge_facing_representation": "rendered_markdown" if agent_key == "content_creator" else "raw_output",
     }
 
     # Also capture orchestrator results dict for campaign_strategy
