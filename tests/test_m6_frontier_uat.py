@@ -727,7 +727,13 @@ class TestJudgePreflightFailClosed:
             "scenarios": [
                 {"id": f"S{i}", "frontier_charged_but_invalid": False,
                  "frontier_model": "anthropic/claude-fable-5.1",
-                 "mktapp_model": "google/gemini-3.7-flash"}
+                 "mktapp_model": "google/gemini-3.7-flash",
+                 "frontier_completeness": "COMPLETE",
+                 "mktapp_completeness": "COMPLETE",
+                 "frontier_finish_reason": "stop",
+                 "frontier_truncated": False,
+                 "mktapp_final_finish_reason": "stop",
+                 "mktapp_final_truncated": False}
                 for i in range(1, 5)
             ],
         }))
@@ -946,7 +952,13 @@ class TestJudgePartialVerdict:
             "scenarios": [
                 {"id": f"S{i}", "frontier_charged_but_invalid": False,
                  "frontier_model": "anthropic/claude-fable-5.1",
-                 "mktapp_model": "google/gemini-3.7-flash"}
+                 "mktapp_model": "google/gemini-3.7-flash",
+                 "frontier_completeness": "COMPLETE",
+                 "mktapp_completeness": "COMPLETE",
+                 "frontier_finish_reason": "stop",
+                 "frontier_truncated": False,
+                 "mktapp_final_finish_reason": "stop",
+                 "mktapp_final_truncated": False}
                 for i in range(1, 5)
             ],
         }))
@@ -1012,7 +1024,13 @@ class TestCompleteJudgeCalls:
             "scenarios": [
                 {"id": f"S{i}", "frontier_charged_but_invalid": False,
                  "frontier_model": "anthropic/claude-fable-5.1",
-                 "mktapp_model": "google/gemini-3.7-flash"}
+                 "mktapp_model": "google/gemini-3.7-flash",
+                 "frontier_completeness": "COMPLETE",
+                 "mktapp_completeness": "COMPLETE",
+                 "frontier_finish_reason": "stop",
+                 "frontier_truncated": False,
+                 "mktapp_final_finish_reason": "stop",
+                 "mktapp_final_truncated": False}
                 for i in range(1, 5)
             ],
         }))
@@ -1504,7 +1522,13 @@ class TestCompleteJudgeUpdatesAccounting:
             "scenarios": [
                 {"id": f"S{i}", "frontier_charged_but_invalid": False,
                  "frontier_model": "anthropic/claude-fable-5.1",
-                 "mktapp_model": "google/gemini-3.7-flash"}
+                 "mktapp_model": "google/gemini-3.7-flash",
+                 "frontier_completeness": "COMPLETE",
+                 "mktapp_completeness": "COMPLETE",
+                 "frontier_finish_reason": "stop",
+                 "frontier_truncated": False,
+                 "mktapp_final_finish_reason": "stop",
+                 "mktapp_final_truncated": False}
                 for i in range(1, 5)
             ],
         }))
@@ -1706,7 +1730,13 @@ class TestJudgeAccountingAccuracy:
             "scenarios": [
                 {"id": f"S{i}", "frontier_charged_but_invalid": False,
                  "frontier_model": "anthropic/claude-fable-5.1",
-                 "mktapp_model": "google/gemini-3.7-flash"}
+                 "mktapp_model": "google/gemini-3.7-flash",
+                 "frontier_completeness": "COMPLETE",
+                 "mktapp_completeness": "COMPLETE",
+                 "frontier_finish_reason": "stop",
+                 "frontier_truncated": False,
+                 "mktapp_final_finish_reason": "stop",
+                 "mktapp_final_truncated": False}
                 for i in range(1, 5)
             ],
         }))
@@ -1816,7 +1846,13 @@ class TestPreflightProvenanceFailClosed:
             "scenarios": [
                 {"id": f"S{i}", "frontier_charged_but_invalid": False,
                  "frontier_model": "anthropic/claude-fable-5.1",
-                 "mktapp_model": "google/gemini-3.7-flash"}
+                 "mktapp_model": "google/gemini-3.7-flash",
+                 "frontier_completeness": "COMPLETE",
+                 "mktapp_completeness": "COMPLETE",
+                 "frontier_finish_reason": "stop",
+                 "frontier_truncated": False,
+                 "mktapp_final_finish_reason": "stop",
+                 "mktapp_final_truncated": False}
                 for i in range(1, 5)
             ],
         }))
@@ -2324,7 +2360,13 @@ class TestM6BaselineProvenance:
             "scenarios": [
                 {"id": f"S{i}", "frontier_charged_but_invalid": False,
                  "frontier_model": "anthropic/claude-fable-5.1",
-                 "mktapp_model": "google/gemini-3.7-flash"}
+                 "mktapp_model": "google/gemini-3.7-flash",
+                 "frontier_completeness": "COMPLETE",
+                 "mktapp_completeness": "COMPLETE",
+                 "frontier_finish_reason": "stop",
+                 "frontier_truncated": False,
+                 "mktapp_final_finish_reason": "stop",
+                 "mktapp_final_truncated": False}
                 for i in range(1, 5)
             ],
         }))
@@ -2725,7 +2767,13 @@ class TestIncompleteCountsCorrect:
             "scenarios": [
                 {"id": f"S{i}", "frontier_charged_but_invalid": False,
                  "frontier_model": "anthropic/claude-fable-5.1",
-                 "mktapp_model": "google/gemini-3.7-flash"}
+                 "mktapp_model": "google/gemini-3.7-flash",
+                 "frontier_completeness": "COMPLETE",
+                 "mktapp_completeness": "COMPLETE",
+                 "frontier_finish_reason": "stop",
+                 "frontier_truncated": False,
+                 "mktapp_final_finish_reason": "stop",
+                 "mktapp_final_truncated": False}
                 for i in range(1, 5)
             ],
         }))
@@ -2917,7 +2965,13 @@ class TestCostSourceSerialization:
             "scenarios": [
                 {"id": f"S{i}", "frontier_charged_but_invalid": False,
                  "frontier_model": "anthropic/claude-fable-5.1",
-                 "mktapp_model": "google/gemini-3.7-flash"}
+                 "mktapp_model": "google/gemini-3.7-flash",
+                 "frontier_completeness": "COMPLETE",
+                 "mktapp_completeness": "COMPLETE",
+                 "frontier_finish_reason": "stop",
+                 "frontier_truncated": False,
+                 "mktapp_final_finish_reason": "stop",
+                 "mktapp_final_truncated": False}
                 for i in range(1, 5)
             ],
         }))

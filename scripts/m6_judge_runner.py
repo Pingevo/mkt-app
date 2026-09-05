@@ -502,7 +502,11 @@ def _persist_response_audit(
     return artifact_path
 
 
-def _call_judge_raw(messages: list[dict], api_key: str) -> dict[str, Any]:
+def _call_judge_raw(
+    messages: list[dict],
+    api_key: str,
+    budget_guard_fn: Any | None = None,
+) -> dict[str, Any]:
     """Make the paid API call and return the provider response + audit.
 
     This function ONLY makes the HTTP call and extracts audit fields via
@@ -510,7 +514,15 @@ def _call_judge_raw(messages: list[dict], api_key: str) -> dict[str, Any]:
     or validate the schema — all of that happens in run_judge AFTER the
     audit is captured and persisted, so a post-call failure can never
     discard a charged response.
+
+    If ``budget_guard_fn`` is provided, it is called BEFORE the HTTP
+    request.  It may raise (e.g. BudgetExceededError) to prevent the
+    paid call.  This is the real Judge budget interception seam.
     """
+    # Budget preflight — raises if denied, preventing the paid call
+    if budget_guard_fn is not None:
+        budget_guard_fn()
+
     client = httpx.Client(base_url="https://openrouter.ai/api/v1")
     payload = {
         "model": JUDGE_MODEL,
@@ -604,7 +616,21 @@ def _call_judge_raw(messages: list[dict], api_key: str) -> dict[str, Any]:
     }
 
 
-def run_judge(scenario: dict, run_dir: Path, api_key: str) -> JudgeResult:
+def run_judge(
+    scenario: dict,
+    run_dir: Path,
+    api_key: str,
+    budget_guard_fn: Any | None = None,
+    budget_commit_fn: Any | None = None,
+) -> JudgeResult:
+    """Run the Judge for one scenario.
+
+    If ``budget_guard_fn`` is provided, it is called before the paid
+    Judge LLM call.  It may raise to prevent the call.
+
+    If ``budget_commit_fn`` is provided, it is called AFTER the successful
+    Judge call with the actual cost, to commit spend to the budget hierarchy.
+    """
     sid = scenario["id"]
     try:
         source_pack = _get_source_pack(scenario)
@@ -613,7 +639,7 @@ def run_judge(scenario: dict, run_dir: Path, api_key: str) -> JudgeResult:
         messages = _build_messages(source_pack, x, y, scenario, image_paths)
 
         # --- Make the paid call and capture audit BEFORE any parsing ---
-        call_result = _call_judge_raw(messages, api_key)
+        call_result = _call_judge_raw(messages, api_key, budget_guard_fn=budget_guard_fn)
         raw_response = call_result["raw_provider_response"]
         raw_text = call_result.get("raw_text")
         actual_model = call_result["model"]
@@ -630,6 +656,13 @@ def run_judge(scenario: dict, run_dir: Path, api_key: str) -> JudgeResult:
         # At this point the response is charged. Any failure below MUST
         # preserve the cost and raw response.
         charged = True
+
+        # Commit actual Judge spend to budget hierarchy
+        if budget_commit_fn is not None and cost_usd is not None:
+            try:
+                budget_commit_fn(float(cost_usd))
+            except Exception:
+                pass  # don't let budget commit failure discard the charged response
 
         # --- Fix 2: Persist the audit to disk BEFORE any validation ---
         audit_for_persist = {
@@ -743,20 +776,22 @@ def _reveal(mapping_path: Path, raw_results: list[JudgeResult]) -> dict[str, Any
         m = mapping.get(sid, {})
         x_label = m.get("X", "X")
         y_label = m.get("Y", "Y")
-        # map X/Y to MKTApp/Frontier
+        # Auto-detect comparison side label from mapping
+        comp_label = "Baseline" if y_label == "Baseline" or x_label == "Baseline" else "Frontier"
+        # map X/Y to MKTApp/comparison
         scores = r.raw_judge_json.get("scores", {})
         mktapp: dict[str, float] = {}
-        frontier: dict[str, float] = {}
+        comparison: dict[str, float] = {}
         for dim, d in scores.items():
             x_score = float(d["X"])
             y_score = float(d["Y"])
             if x_label == "MKTApp":
                 mktapp[dim] = x_score
-                frontier[dim] = y_score
+                comparison[dim] = y_score
             else:
                 mktapp[dim] = y_score
-                frontier[dim] = x_score
-        delta = {dim: round(mktapp[dim] - frontier[dim], 2) for dim in mktapp}
+                comparison[dim] = x_score
+        delta = {dim: round(mktapp[dim] - comparison[dim], 2) for dim in mktapp}
         hard_pass = all(delta.get(d, 0.0) >= -0.5 for d in HARD_DIMENSIONS)
         if not hard_pass:
             hard_failures.append(sid)
@@ -767,11 +802,15 @@ def _reveal(mapping_path: Path, raw_results: list[JudgeResult]) -> dict[str, Any
         brand_passes.append(brand_pass)
         mean_delta = round(sum(delta.values()) / len(delta), 3) if delta else 0.0
         all_deltas.extend(delta.values())
+        # Use generic key names with the detected comparison label
+        comp_score_key = f"{comp_label.lower()}_score"
+        delta_key = f"delta_mktapp_minus_{comp_label.lower()}"
         scenarios.append({
             "scenario_id": sid,
+            "comparison_label": comp_label,
             "mktapp_score": mktapp,
-            "frontier_score": frontier,
-            "delta_mktapp_minus_frontier": delta,
+            comp_score_key: comparison,
+            delta_key: delta,
             "overall_mean_delta": mean_delta,
             "hard_gate_pass": hard_pass,
             "brand_asset_advantage_pass": brand_pass,
@@ -787,12 +826,17 @@ def _reveal(mapping_path: Path, raw_results: list[JudgeResult]) -> dict[str, Any
     brand_gate = attempted_brand > 0 and (sum(brand_passes) / attempted_brand) >= 0.5
     m6_pass = non_inferior and len(hard_failures) == 0 and brand_gate
 
+    # Detect comparison label from first scenario
+    comp_label = scenarios[0]["comparison_label"] if scenarios else "Frontier"
+    comp_key = comp_label.lower()
+
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "judge_model": JUDGE_MODEL,
+        "comparison_label": comp_label,
         "scenarios": scenarios,
         "overall": {
-            "overall_mean_delta_mktapp_minus_frontier": overall_mean,
+            f"overall_mean_delta_mktapp_minus_{comp_key}": overall_mean,
             "non_inferiority_pass": non_inferior,
             "hard_gate_failures": hard_failures,
             "hard_gate_pass": len(hard_failures) == 0,
@@ -840,6 +884,8 @@ def _write_artifacts(run_dir: Path, raw_results: list[JudgeResult], revealed: di
     lines = ["# M6 Judge Revealed Report", ""]
     lines.append(f"**Judge model:** {JUDGE_MODEL}")
     lines.append(f"**Timestamp:** {revealed['timestamp']}")
+    comp_label = revealed.get("comparison_label", "Frontier")
+    comp_key = comp_label.lower()
     lines.append("")
     o = revealed["overall"]
     lines.append("## Overall verdict")
@@ -847,7 +893,7 @@ def _write_artifacts(run_dir: Path, raw_results: list[JudgeResult], revealed: di
     lines.append(f"- **Non-inferiority pass:** {o['non_inferiority_pass']}")
     lines.append(f"- **Hard gate pass:** {o['hard_gate_pass']} ({o['hard_gate_failures']})")
     lines.append(f"- **Brand / asset gate pass:** {o['brand_asset_gate_pass']} ({o['brand_asset_passing_scenarios']}/{o['brand_asset_attempted_scenarios']})")
-    lines.append(f"- **Overall mean delta (MKTApp - Frontier):** {o['overall_mean_delta_mktapp_minus_frontier']}")
+    lines.append(f"- **Overall mean delta (MKTApp - {comp_label}):** {o[f'overall_mean_delta_mktapp_minus_{comp_key}']}")
     lines.append("")
     lines.append("## Per-scenario results")
     for s in revealed["scenarios"]:
@@ -858,7 +904,7 @@ def _write_artifacts(run_dir: Path, raw_results: list[JudgeResult], revealed: di
         lines.append(f"- **Cost:** ${s['cost_usd']:.6f}")
         lines.append(f"- **Actual model:** {s['actual_model']}")
         lines.append("")
-        for dim, d in s["delta_mktapp_minus_frontier"].items():
+        for dim, d in s[f"delta_mktapp_minus_{comp_key}"].items():
             lines.append(f"- {dim}: delta={d:+.2f}")
         lines.append("")
     (judge_dir / "m6_judge_revealed_report.md").write_text("\n".join(lines), encoding="utf-8")
@@ -877,15 +923,18 @@ def judge_preflight(run_dir: Path) -> tuple[bool, str]:
     - resume_link.json (for continuation runs)
 
     For every S1–S4:
-    1. Independent MKTApp and Frontier outputs must exist and be non-empty
+    1. Independent MKTApp and comparison (Frontier/Baseline) outputs must exist
     2. Their hashes must match output_hashes.json
     3. X and Y files must exist and be non-empty
-    4. Mapping must be an exact permutation of {MKTApp, Frontier}
+    4. Mapping must be an exact permutation of {MKTApp, Frontier} or {MKTApp, Baseline}
     5. X/Y bytes must correspond to the mapped independent outputs
     6. No stopped/errored/charged-invalid/unknown-model results
 
     Before the first judge call, verify cumulative budget availability:
     historical_sunk + continuation_actual + judge_absolute_reserve <= approved_ceiling
+
+    Supports both historical Frontier naming and new Baseline naming.
+    The comparison side name is auto-detected from the mapping.
     """
     import hashlib
 
@@ -1038,20 +1087,37 @@ def judge_preflight(run_dir: Path) -> tuple[bool, str]:
                 return False, f"partial judge artifact exists: {artifact}."
 
     # --- Per-scenario checks ---
+    # Detect comparison side: prefer explicit qualification_mode from evidence,
+    # fall back to auto-detection from mapping for historical compatibility.
+    qualification_mode = evidence.get("qualification_mode", "")
+    if qualification_mode == "same_model_uplift":
+        comparison_label = "Baseline"
+        comparison_dir = "baseline"
+    else:
+        # Historical fallback: auto-detect from mapping
+        first_mapping = next(iter(mapping.values()), {})
+        first_y = first_mapping.get("Y", "")
+        if first_y == "Baseline":
+            comparison_label = "Baseline"
+            comparison_dir = "baseline"
+        else:
+            comparison_label = "Frontier"
+            comparison_dir = "frontier"
+
     for sid in expected_sids:
         m_entry = mapping.get(sid, {})
 
-        # 4. Mapping must be exact permutation of {MKTApp, Frontier}
+        # 4. Mapping must be exact permutation of {MKTApp, comparison}
         x_side = m_entry.get("X")
         y_side = m_entry.get("Y")
         if not x_side or not y_side:
             return False, f"{sid} mapping incomplete: X={x_side}, Y={y_side}"
         sides = {x_side, y_side}
-        if sides != {"MKTApp", "Frontier"}:
-            return False, f"{sid} mapping must be {{MKTApp, Frontier}}, got {sides}"
+        if sides != {"MKTApp", comparison_label}:
+            return False, f"{sid} mapping must be {{MKTApp, {comparison_label}}}, got {sides}"
 
-        # 1. Independent MKTApp and Frontier outputs must exist
-        for side in ("mktapp", "frontier"):
+        # 1. Independent MKTApp and comparison outputs must exist
+        for side in ("mktapp", comparison_dir):
             side_path = outputs_dir / side / f"{sid}.txt"
             if not side_path.exists():
                 return False, f"missing independent output: {side}/{sid}.txt"
@@ -1060,7 +1126,7 @@ def judge_preflight(run_dir: Path) -> tuple[bool, str]:
                 return False, f"empty independent output: {side}/{sid}.txt"
 
         # 2. Hashes must match
-        for side in ("mktapp", "frontier"):
+        for side in ("mktapp", comparison_dir):
             if sid not in hashes.get(side, {}):
                 return False, f"no hash recorded for {side}/{sid}"
             side_path = outputs_dir / side / f"{sid}.txt"
@@ -1084,11 +1150,11 @@ def judge_preflight(run_dir: Path) -> tuple[bool, str]:
 
         # 5. X/Y bytes must correspond to mapped independent outputs
         mktapp_bytes = (outputs_dir / "mktapp" / f"{sid}.txt").read_bytes()
-        frontier_bytes = (outputs_dir / "frontier" / f"{sid}.txt").read_bytes()
+        comparison_bytes = (outputs_dir / comparison_dir / f"{sid}.txt").read_bytes()
         if x_side == "MKTApp":
-            expected_x, expected_y = mktapp_bytes, frontier_bytes
+            expected_x, expected_y = mktapp_bytes, comparison_bytes
         else:
-            expected_x, expected_y = frontier_bytes, mktapp_bytes
+            expected_x, expected_y = comparison_bytes, mktapp_bytes
         if x_content != expected_x:
             return False, f"{sid}_X.txt does not match mapped {x_side} independent output"
         if y_content != expected_y:
@@ -1096,12 +1162,71 @@ def judge_preflight(run_dir: Path) -> tuple[bool, str]:
 
         # 6. No stopped/errored/charged-invalid/unknown-model
         scenario_ev = next((sc for sc in evidence.get("scenarios", []) if sc.get("id") == sid), {})
-        if scenario_ev.get("frontier_charged_but_invalid"):
-            return False, f"{sid} has charged-but-invalid Frontier result"
-        if scenario_ev.get("frontier_model") in (None, "unknown"):
-            return False, f"{sid} has unknown Frontier model"
+        # Check comparison side (Frontier or Baseline naming)
+        comp_charged_invalid = (
+            scenario_ev.get("frontier_charged_but_invalid") or
+            scenario_ev.get("baseline_charged_but_invalid")
+        )
+        if comp_charged_invalid:
+            return False, f"{sid} has charged-but-invalid {comparison_label} result"
+        comp_model = (
+            scenario_ev.get("baseline_model") or
+            scenario_ev.get("frontier_model")
+        )
+        if comp_model in (None, "unknown"):
+            return False, f"{sid} has unknown {comparison_label} model"
         if scenario_ev.get("mktapp_model") in (None, "unknown"):
             return False, f"{sid} has unknown MKTApp model"
+
+        # 7. Candidate completeness — both sides must be COMPLETE
+        # UNKNOWN or INCOMPLETE candidates cannot be judged.
+        # Do NOT score as a loss or win — the scenario is INVALID / NOT JUDGED.
+        from src.candidate_completeness import CompletenessStatus, status_from_evidence_dict, evaluate_single_call_completeness
+
+        # Check comparison side completeness (Frontier or Baseline naming)
+        comp_completeness = (
+            scenario_ev.get("baseline_completeness") or
+            scenario_ev.get("frontier_completeness")
+        )
+        if comp_completeness is None:
+            # Fallback: evaluate from finish metadata if available
+            comp_fr = (
+                scenario_ev.get("baseline_finish_reason") or
+                scenario_ev.get("frontier_finish_reason")
+            )
+            comp_trunc = (
+                scenario_ev.get("baseline_truncated") if "baseline_truncated" in scenario_ev
+                else scenario_ev.get("frontier_truncated")
+            )
+            if comp_fr is None and comp_trunc is None:
+                comp_completeness = CompletenessStatus.UNKNOWN.value
+            else:
+                comp_completeness = evaluate_single_call_completeness(comp_fr, comp_trunc).value
+
+        if comp_completeness != CompletenessStatus.COMPLETE.value:
+            return False, (
+                f"{sid} {comparison_label} candidate completeness is {comp_completeness} — "
+                f"only COMPLETE candidates can be judged. Scenario is INVALID / NOT JUDGED."
+            )
+
+        # Check MKTApp completeness
+        mktapp_completeness = scenario_ev.get("mktapp_completeness")
+        if mktapp_completeness is None:
+            # Fallback: evaluate from finish records if available
+            mktapp_ev_dict = {
+                "scenario_id": sid,
+                "side": "mktapp",
+                "finish_records": scenario_ev.get("mktapp_finish_records", []),
+                "final_finish_reason": scenario_ev.get("mktapp_final_finish_reason"),
+                "final_truncated": scenario_ev.get("mktapp_final_truncated"),
+            }
+            mktapp_completeness = status_from_evidence_dict(mktapp_ev_dict).value
+
+        if mktapp_completeness != CompletenessStatus.COMPLETE.value:
+            return False, (
+                f"{sid} MKTApp candidate completeness is {mktapp_completeness} — "
+                f"only COMPLETE candidates can be judged. Scenario is INVALID / NOT JUDGED."
+            )
 
     # --- Cumulative budget verification ---
     historical_sunk = resume_link.get("historical_sunk_cost", 0.0)
