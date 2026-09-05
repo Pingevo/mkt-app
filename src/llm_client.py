@@ -6,7 +6,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 from rich.console import Console
@@ -80,6 +80,10 @@ class LLMClient:
         # Reset to None at the start of every chat() / chat_stream_yield() /
         # chat_with_tools() call so a failed or skipped call cannot leak stale data.
         self._last_finish_reason: str | None = None
+        # Per-call cost: actual USD cost from the provider's most recent response.
+        # Reset to None at the start of every call.  Used by budget guards to
+        # commit actual spend rather than conservative estimates.
+        self._last_cost_usd: float | None = None
 
     @property
     def last_finish_reason(self) -> str | None:
@@ -90,6 +94,15 @@ class LLMClient:
         ``"length"`` (truncated), ``"tool_calls"``.
         """
         return self._last_finish_reason
+
+    @property
+    def last_cost_usd(self) -> float | None:
+        """Actual USD cost from the provider's most recent successful response.
+
+        Returns ``None`` if no call has been made or the provider did not
+        report a cost.  Used by budget guards to commit actual spend.
+        """
+        return self._last_cost_usd
 
     @property
     def last_truncated(self) -> bool:
@@ -143,6 +156,7 @@ class LLMClient:
         # Reset per-call metadata so a failed or skipped call cannot leak stale data.
         self._last_raw_response = {}
         self._last_finish_reason = None
+        self._last_cost_usd = None
         # Structured Outputs ไม่รองรับ stream — บังคับ non-stream
         if response_format:
             stream = False
@@ -176,7 +190,7 @@ class LLMClient:
             try:
                 if stream:
                     text, usage, request_id = self._chat_stream(payload)
-                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
+                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id, finish_reason=self._last_finish_reason, truncated=self.last_truncated)
                 else:
                     resp = self._client.post("/chat/completions", json=payload)
                     resp.raise_for_status()
@@ -184,9 +198,14 @@ class LLMClient:
                     self._last_raw_response = data
                     request_id = data.get("id")
                     usage = data.get("usage")
-                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
                     choice0 = data["choices"][0]
                     self._last_finish_reason = choice0.get("finish_reason")
+                    # Extract actual cost from provider usage for budget commit
+                    if usage and isinstance(usage, dict):
+                        cost = usage.get("cost")
+                        if cost is not None:
+                            self._last_cost_usd = float(cost)
+                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id, finish_reason=self._last_finish_reason, truncated=self.last_truncated)
                     msg = choice0["message"]
                     text = msg.get("content", "")
                     self._last_raw_annotations_count = len(msg.get("annotations") or [])
@@ -282,6 +301,8 @@ class LLMClient:
         http_status: int | None = None,
         error_message: str | None = None,
         request_id: str | None = None,
+        finish_reason: str | None = None,
+        truncated: bool | None = None,
     ) -> None:
         """ยิง log ไป AI Usage Hub + เซฟ local — fire-and-forget.
 
@@ -300,6 +321,8 @@ class LLMClient:
                 http_status=http_status,
                 error_message=error_message,
                 raw_usage=usage,
+                finish_reason=finish_reason,
+                truncated=truncated,
             )
             if usage:
                 if usage.get("prompt_tokens") is not None:
@@ -531,6 +554,7 @@ class LLMClient:
         # Reset per-call metadata so a failed or skipped call cannot leak stale data.
         self._last_raw_response = {}
         self._last_finish_reason = None
+        self._last_cost_usd = None
         payload: dict[str, Any] = {
             "model": used_model,
             "messages": messages,
@@ -568,9 +592,7 @@ class LLMClient:
                         request_id = value
                     elif event_type == "finish":
                         self._last_finish_reason = value
-                self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id)
-                # Empty content = failed attempt — retry like chat() does
-                # (can only retry if nothing was yielded yet)
+                self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id, finish_reason=self._last_finish_reason, truncated=self.last_truncated)
                 if not yielded_any:
                     raise _EmptyResponseError("empty response (no content from stream)")
                 return
@@ -625,6 +647,9 @@ class LLMClient:
         max_retry_limit: int = 3,
         max_iterations: int = 10,
         source: str = "llm_client.chat_with_tools",
+        pre_model_hook: Callable[[int], None] | None = None,
+        pre_tool_hook: Callable[[str, dict[str, Any]], None] | None = None,
+        post_model_hook: Callable[[int, float | None, dict[str, Any] | None], None] | None = None,
     ) -> str:
         """Tool calling loop — LLM เรียก function เอง เรา execute แล้วส่งผลกลับ.
 
@@ -636,6 +661,14 @@ class LLMClient:
             tool_handlers: dict {tool_name: callable} — function จริงที่จะ execute
             max_iterations: จำกัดรอบ tool calling (กัน LLM วนไม่จบ)
             source: label สำหรับ log
+            pre_model_hook: optional callback invoked before each model turn
+                with the iteration index.  May raise to abort the loop (e.g.
+                BudgetExceededError).  None = no hook (normal production).
+            pre_tool_hook: optional callback invoked before each tool execution
+                with (tool_name, tool_args).  May raise to abort.  None = no hook.
+            post_model_hook: optional callback invoked after each model turn
+                with (iteration, actual_cost_usd, usage_dict).  Used by budget
+                guards to commit per-turn actual spend immediately.  None = no hook.
 
         Returns:
             ข้อความตอบสุดท้ายของ LLM (หลังใช้ tool จนจบ)
@@ -650,11 +683,15 @@ class LLMClient:
         used_model = model or self._default_model
         # Reset per-call metadata so a failed or skipped call cannot leak stale data.
         self._last_finish_reason = None
+        self._last_cost_usd = None
 
         # copy messages เพื่อไม่แก้ของเดิม
         convo = list(messages)
 
         for iteration in range(max_iterations):
+            # Budget/authorization hook before each model turn
+            if pre_model_hook is not None:
+                pre_model_hook(iteration)
             t0 = time.time()
             try:
                 response = client.chat.completions.create(
@@ -668,8 +705,22 @@ class LLMClient:
                 usage = response.usage
                 request_id = getattr(response, "id", None)
                 self._last_finish_reason = getattr(response.choices[0], "finish_reason", None)
+                # Extract actual cost from provider usage for budget commit
+                turn_cost: float | None = None
+                usage_dict_for_hook: dict[str, Any] | None = None
+                if usage:
+                    usage_dict_for_hook = usage.model_dump() if hasattr(usage, 'model_dump') else (usage if isinstance(usage, dict) else {})
+                    cost = usage_dict_for_hook.get("cost")
+                    if cost is not None:
+                        turn_cost = float(cost)
+                        self._last_cost_usd = turn_cost
                 self._log_usage(used_model, source, usage.model_dump() if usage else None,
-                                duration_ms=int((time.time() - t0) * 1000), attempt=iteration + 1, request_id=request_id)
+                                duration_ms=int((time.time() - t0) * 1000), attempt=iteration + 1, request_id=request_id,
+                                finish_reason=self._last_finish_reason, truncated=self.last_truncated)
+
+                # Post-turn hook: commit per-turn actual spend immediately
+                if post_model_hook is not None:
+                    post_model_hook(iteration, turn_cost, usage_dict_for_hook)
 
                 # ถ้า LLM ไม่ขอเรียก tool → ตอบจบ
                 if not msg.tool_calls:
@@ -703,6 +754,9 @@ class LLMClient:
                     else:
                         try:
                             args = json.loads(call.function.arguments)
+                            # Budget/authorization hook before each tool execution
+                            if pre_tool_hook is not None:
+                                pre_tool_hook(tool_name, args)
                             handler_result = handler(**args)
                             result = json.dumps(handler_result, ensure_ascii=False)
                         except Exception as e:

@@ -384,8 +384,15 @@ def make_entry(
     error_message: str | None = None,
     raw_usage: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
+    finish_reason: str | None = None,
+    truncated: bool | None = None,
 ) -> dict[str, Any]:
-    """สร้าง entry dict สำหรับส่งให้ ``record_ai_usage`` — กรอกเฉพาะที่มี."""
+    """สร้าง entry dict สำหรับส่งให้ ``record_ai_usage`` — กรอกเฉพาะที่มี.
+
+    ``finish_reason`` และ ``truncated`` เป็น per-call observational metadata
+    จาก provider response (เช่น ``"stop"``, ``"length"``, ``"tool_calls"``).
+    ไม่ใช่ semantic judgment — เป็น mechanically knowable fact จาก API response.
+    """
     entry: dict[str, Any] = {
         "provider": provider,
         "operation": operation,
@@ -420,4 +427,8 @@ def make_entry(
         entry["raw_usage"] = raw_usage
     if metadata:
         entry["metadata"] = metadata
+    if finish_reason is not None:
+        entry["finish_reason"] = finish_reason
+    if truncated is not None:
+        entry["truncated"] = truncated
     return entry
