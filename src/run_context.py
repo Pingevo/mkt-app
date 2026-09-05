@@ -249,6 +249,22 @@ def build_step_run_context(
     if missing:
         warnings.append(f"missing or invalid resource refs: {', '.join(missing)}")
 
+    # Preflight: detect explicitly referenced resources that exist but are
+    # not ready (rejected extension, parser error, extraction failure, etc.).
+    # These must NOT be silently dropped — the user explicitly attached them
+    # and the agent must not proceed as if the attachment was available.
+    non_ready: list[str] = []
+    for rec in records:
+        status = rec.get("status", "")
+        if status != "ready":
+            name = rec.get("name", rec.get("resource_id", ""))
+            non_ready.append(f"{name} (status: {status})")
+    if non_ready:
+        warnings.append(
+            f"referenced resource(s) not ready — cannot provide usable context: "
+            f"{', '.join(non_ready)}"
+        )
+
     # Build bounded resource text and image paths through the existing store
     if records:
         built = resource_store.build_resource_context(

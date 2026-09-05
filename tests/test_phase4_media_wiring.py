@@ -566,7 +566,7 @@ def test_generate_all_media_400_when_session_resource_expired(_client, tmp_path,
         "auto_video": False,
     })
     assert resp.status_code == 400
-    assert "resource resolution failed" in resp.text
+    assert "resource preflight failed" in resp.text
     assert not media_called, "media generator ต้องไม่ถูกเรียกเมื่อ resource resolve ไม่ได้"
 
 
@@ -613,3 +613,159 @@ def test_script_review_regenerates_video_prompts_with_inner_schema():
     finally:
         script_reviewer.review_script = original_review
         config_loader.get_agent_config = original_get_agent
+
+
+# ---------------------------------------------------------------------------
+# Media resource preflight — fatal on non-ready referenced resources
+#
+# The /api/generate_all_media endpoint must not silently proceed when a
+# user-referenced resource is not ready (rejected, parser error, missing).
+# This is the same product invariant as the agent execution seam: if the
+# user explicitly selects a resource, the system must not silently proceed
+# as though that resource were usable.
+# ---------------------------------------------------------------------------
+
+
+def test_media_preflight_accepts_ready_resource(_client, tmp_path, monkeypatch):
+    """A ready referenced image resource must be accepted — media generation
+    proceeds normally."""
+    import web_viewer
+    prod_img = tmp_path / "product.png"
+    prod_img.write_bytes(b"png")
+    res_img = tmp_path / "ready.png"
+    res_img.write_bytes(b"png")
+
+    content_file = tmp_path / "output" / "content.md"
+    content_file.parent.mkdir(parents=True)
+    content_file.write_text(json.dumps({"posts": [{"image_prompts": [{"prompt": "test"}]}]}, ensure_ascii=False), encoding="utf-8")
+
+    from src import product_db
+    monkeypatch.setattr(product_db, "get_product_image_paths", lambda pid: [str(prod_img)])
+
+    def _fake_build_step_run_context(*a, **k):
+        ctx = MagicMock()
+        ctx.warnings = ()
+        ctx.resource_image_paths = (str(res_img),)
+        return ctx
+    monkeypatch.setattr(web_viewer, "build_step_run_context", _fake_build_step_run_context)
+
+    media_called = []
+    monkeypatch.setattr(web_viewer.media_gen, "generate_image", lambda *a, **k: media_called.append(True) or {"ok": True, "path": str(res_img)})
+    monkeypatch.setattr(web_viewer.media_gen, "save_retry_history", lambda *a, **k: None)
+    monkeypatch.setattr(web_viewer, "_get_brand_visual", lambda: {})
+
+    resp = _client.post("/api/generate_all_media", json={
+        "file": str(content_file),
+        "auto_image": True,
+        "auto_video": False,
+        "resource_refs": ["resource:res_ready"],
+        "upload_session_id": "session1",
+    })
+    assert resp.status_code in (200, 202)
+
+
+def test_media_preflight_blocks_non_ready_resource(_client, tmp_path, monkeypatch):
+    """A non-ready referenced resource must block media generation before
+    any media call. The media generator mock must not be called."""
+    import web_viewer
+    prod_img = tmp_path / "product.png"
+    prod_img.write_bytes(b"png")
+
+    content_file = tmp_path / "output" / "content.md"
+    content_file.parent.mkdir(parents=True)
+    content_file.write_text(json.dumps({"posts": [{"image_prompts": [{"prompt": "test"}]}]}, ensure_ascii=False), encoding="utf-8")
+
+    from src import product_db
+    monkeypatch.setattr(product_db, "get_product_image_paths", lambda pid: [str(prod_img)])
+
+    def _fake_build_step_run_context(*a, **k):
+        ctx = MagicMock()
+        ctx.warnings = ("referenced resource(s) not ready: resource:res_bad",)
+        ctx.resource_image_paths = ()
+        return ctx
+    monkeypatch.setattr(web_viewer, "build_step_run_context", _fake_build_step_run_context)
+
+    media_called = []
+    monkeypatch.setattr(web_viewer.media_gen, "generate_image", lambda *a, **k: media_called.append(True) or {"ok": True})
+    monkeypatch.setattr(web_viewer.media_gen, "save_retry_history", lambda *a, **k: None)
+    monkeypatch.setattr(web_viewer, "_get_brand_visual", lambda: {})
+
+    resp = _client.post("/api/generate_all_media", json={
+        "file": str(content_file),
+        "auto_image": True,
+        "auto_video": False,
+        "resource_refs": ["resource:res_bad"],
+        "upload_session_id": "session1",
+    })
+    assert resp.status_code == 400
+    assert "resource preflight failed" in resp.text
+    assert not media_called, "media generator must not be called after fatal resource preflight"
+
+
+def test_media_preflight_blocks_non_ready_session_meta_resource(_client, tmp_path, monkeypatch):
+    """When recovering resource refs from session metadata, a non-ready
+    resource must also block media generation."""
+    import web_viewer
+    prod_img = tmp_path / "product.png"
+    prod_img.write_bytes(b"png")
+
+    output_dir = tmp_path / "output"
+    content_file = output_dir / "content.md"
+    output_dir.mkdir(parents=True)
+    content_file.write_text(json.dumps({"posts": [{"image_prompts": [{"prompt": "test"}]}]}, ensure_ascii=False), encoding="utf-8")
+    # Session metadata with resource refs
+    (output_dir / "_session_meta.json").write_text(json.dumps({
+        "resource_refs": ["resource:res_bad"],
+        "upload_session_id": "session1",
+    }, ensure_ascii=False), encoding="utf-8")
+
+    from src import product_db
+    monkeypatch.setattr(product_db, "get_product_image_paths", lambda pid: [str(prod_img)])
+
+    def _fake_build_step_run_context(*a, **k):
+        ctx = MagicMock()
+        ctx.warnings = ("referenced resource(s) not ready: resource:res_bad",)
+        ctx.resource_image_paths = ()
+        return ctx
+    monkeypatch.setattr(web_viewer, "build_step_run_context", _fake_build_step_run_context)
+
+    media_called = []
+    monkeypatch.setattr(web_viewer.media_gen, "generate_image", lambda *a, **k: media_called.append(True) or {"ok": True})
+    monkeypatch.setattr(web_viewer.media_gen, "save_retry_history", lambda *a, **k: None)
+    monkeypatch.setattr(web_viewer, "_get_brand_visual", lambda: {})
+
+    resp = _client.post("/api/generate_all_media", json={
+        "file": str(content_file),
+        "auto_image": True,
+        "auto_video": False,
+    })
+    assert resp.status_code == 400
+    assert "resource preflight failed" in resp.text
+    assert not media_called
+
+
+def test_media_preflight_zero_resources_remains_valid(_client, tmp_path, monkeypatch):
+    """Zero referenced resources must remain a valid path — media generation
+    proceeds with product images only."""
+    import web_viewer
+    prod_img = tmp_path / "product.png"
+    prod_img.write_bytes(b"png")
+
+    content_file = tmp_path / "output" / "content.md"
+    content_file.parent.mkdir(parents=True)
+    content_file.write_text(json.dumps({"posts": [{"image_prompts": [{"prompt": "test"}]}]}, ensure_ascii=False), encoding="utf-8")
+
+    from src import product_db
+    monkeypatch.setattr(product_db, "get_product_image_paths", lambda pid: [str(prod_img)])
+
+    media_called = []
+    monkeypatch.setattr(web_viewer.media_gen, "generate_image", lambda *a, **k: media_called.append(True) or {"ok": True, "path": str(prod_img)})
+    monkeypatch.setattr(web_viewer.media_gen, "save_retry_history", lambda *a, **k: None)
+    monkeypatch.setattr(web_viewer, "_get_brand_visual", lambda: {})
+
+    resp = _client.post("/api/generate_all_media", json={
+        "file": str(content_file),
+        "auto_image": True,
+        "auto_video": False,
+    })
+    assert resp.status_code in (200, 202)

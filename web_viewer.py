@@ -679,8 +679,8 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
             resource_refs=request_resource_refs,
             upload_session_id=request_upload_session_id,
         )
-        if any("missing" in w or "invalid" in w or "unsupported" in w for w in ctx.warnings):
-            return JSONResponse({"error": f"resource resolution failed: {list(ctx.warnings)}"}, status_code=400)
+        if ctx.warnings:
+            return JSONResponse({"error": f"resource preflight failed: {list(ctx.warnings)}"}, status_code=400)
         resource_image_paths = list(ctx.resource_image_paths)
     else:
         # recover from session metadata: source of truth = resource_refs + upload_session_id
@@ -703,8 +703,8 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                         resource_refs=meta_resource_refs,
                         upload_session_id=meta_upload_session_id,
                     )
-                    if any("missing" in w or "invalid" in w or "unsupported" in w for w in ctx.warnings):
-                        return JSONResponse({"error": f"session resource resolution failed: {list(ctx.warnings)}"}, status_code=400)
+                    if ctx.warnings:
+                        return JSONResponse({"error": f"resource preflight failed: {list(ctx.warnings)}"}, status_code=400)
                     resource_image_paths = list(ctx.resource_image_paths)
                 # if the original output had no resource refs, proceed without resources
             except json.JSONDecodeError as e:

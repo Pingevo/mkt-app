@@ -439,6 +439,15 @@ class BaseAgent:
 
         # Use StepRunContext as the single source of truth when provided.
         if step_context is not None:
+            # Fatal resource preflight — if the user explicitly referenced an
+            # attachment that cannot provide usable context (rejected, parser
+            # error, missing, etc.), halt before any prompt construction or
+            # model call. This is the single shared seam that guarantees no
+            # agent execution can silently proceed without a required resource.
+            if step_context.warnings:
+                raise ValueError(
+                    f"resource preflight failed: {'; '.join(step_context.warnings)}"
+                )
             quick_brief = step_context.quick_brief
             resource_context = step_context.resource_text
             extra_image_paths = list(step_context.resource_image_paths)
