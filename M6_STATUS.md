@@ -554,3 +554,82 @@ Testing Layers.
 `M6_QUALIFICATION_PLAN.md` is now the canonical forward qualification
 plan. This document (`M6_STATUS.md`) remains the factual current-state
 record.
+
+---
+
+## Strategy Pivot — Same-Model Product Uplift (2026-09-05)
+
+**The primary qualification question has changed.**
+
+- **Old primary question:** Is MKTApp competitive with external Frontier systems?
+- **New primary question:** Does MKTApp produce materially better marketing work than using the exact same underlying model directly?
+
+External Frontier / different-model comparison is **deferred to a future phase** because of budget and time constraints. Historical M6.1 Frontier results remain historical evidence and do not define the new baseline.
+
+### Same-model uplift harness — implementation status
+
+**Status: Offline implementation v6 complete. Awaits Product Owner review.**
+
+The harness implements per-turn actual-cost accounting through
+`post_model_hook` in `LLMClient.chat_with_tools()`.  Every model turn
+commits its actual provider-reported cost immediately after the turn,
+before the next turn is authorized.  Cumulative spend is accurate.
+
+The new same-model uplift harness is implemented in
+`scripts/m6_uplift_harness.py` with full offline test coverage in
+`tests/test_m6_uplift_harness.py` (124 tests).
+
+What was implemented (v6 corrections):
+- **Per-turn actual cost commit**: `LLMClient.chat_with_tools()` now
+  accepts `post_model_hook(iteration, actual_cost, usage_dict)`.
+  `BudgetGuardedLLMClient` passes a hook that commits actual cost (or
+  conservative reserve fallback) after every model turn, before the
+  next turn is authorized.
+- **Reserve fallback**: When actual cost is unavailable, the
+  pre-authorized reserve is committed (fail conservative, never zero).
+  Audit metadata records `cost_source: "actual"` or `"reserve_fallback"`.
+- **No double-counting**: Server-side web search cost is included in
+  the model call's `usage.cost` (option B).  No separate tool commit.
+  Client-side tools in `chat_with_tools()` are authorized via
+  `pre_tool_hook` but only committed if separately billed.
+- **S4 baseline cap raised**: From $0.08 to $0.10 (conservative $0.078,
+  margin 28%).  Previous 8% margin was too tight.
+- **Cumulative spend tests**: 3-turn test proves 0.03+0.04+0.05=0.12
+  committed cumulatively, not just last turn.  Turn-3 denial test
+  proves provider not called, spend = turn1+turn2.  Resume test
+  proves cumulative spend persists.
+
+What was NOT done:
+- No paid/model/web/media calls.
+- No Judge execution.
+- No commit or push.
+- No historical reports altered.
+- Qualification not marked as passed.
+
+### Configured underlying models per Agent
+
+| Scenario | Agent | Model | Temperature | Max tokens | Web search |
+|----------|-------|-------|-------------|------------|------------|
+| S1 | product_spec | `google/gemini-3.7-flash` | 0.3 | 4096 | No |
+| S2 | competitor_analysis | `google/gemini-3.5-flash` | 0.4 | 8192 | Yes |
+| S3 | campaign_strategy | `google/gemini-3.7-flash` | 0.8 | 4096 | Yes |
+| S4 | content_creator | `google/gemini-3.7-flash` | 0.9 | 8192 | No |
+
+**S2 uses a different model** (`gemini-3.5-flash`) than S1/S3/S4 (`gemini-3.7-flash`).
+The same-model baseline must use the exact corresponding agent model per scenario.
+Models are read dynamically from `config/agents.yaml` — no hardcoded model strings in the harness.
+
+### Historical actual paid spend (corrected)
+
+Historical actual paid spend: **$2.683325** (not ~$2.86).
+- Historical sunk cost: $1.104836
+- Continuation incremental cost: $1.410830
+- Judge incremental actual: $0.167659
+- Total: $2.683325
+- Previously approved ceiling: $2.86
+
+Historical spend remains separate from any new same-model authorization.
+
+### True offline suite status
+
+**1302 passed, 0 failed** — this is the complete suite with no exclusions.
