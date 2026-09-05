@@ -1,7 +1,7 @@
 # M6 Status
 
-**Canonical current-state document for M6.1 qualification and remediation.**
-Last updated: 2026-09-04 (Round 10 — selected-Pillar state scope, fatal attachment preflight at shared seam, pillar_keywords characterization correction, competitor Stage 3 design-only proposal, testing-layer distinction).
+**Canonical current-state document for M6 qualification and remediation.**
+Last updated: 2026-09-05 (Same-model uplift qualification result recorded; benchmark levels defined; S3 root-cause investigation completed; Web/Browser E2E implemented and passing with Playwright).
 
 ---
 
@@ -632,4 +632,466 @@ Historical spend remains separate from any new same-model authorization.
 
 ### True offline suite status
 
-**1302 passed, 0 failed** — this is the complete suite with no exclusions.
+**1372 passed, 0 failed** — this is the complete suite with no exclusions,
+including 16 API/integration E2E smoke tests and 14 Web/Browser E2E tests
+(see § Web E2E / Browser Smoke-Test Status below).
+
+---
+
+## Same-Model Uplift Qualification Result (2026-09-05)
+
+**This is the current valid qualification result.** It supersedes the
+historical M6.1 Frontier-parity result for forward-planning purposes.
+
+### Result: FAIL (valid)
+
+| Field | Value |
+|-------|-------|
+| **Overall** | **FAIL** |
+| Qualification type | Same-model product uplift (Level 1) |
+| Recovery run | `data/m6_uplift/runs/20260905_074945_recovery/` |
+| Original invalid run | `data/m6_uplift/runs/20260905_072432/` (harness defect, INVALID) |
+| Recovery HEAD | `36f6f9bbf862ade1bf792119886428847412ec92` |
+| Gate version | v1 |
+| MKTApp generation during recovery | **ZERO** (preserved from original run) |
+
+### Per-scenario uplift
+
+| Scenario | Agent | Model | Uplift | Status |
+|----------|-------|-------|--------|--------|
+| S1 | product_spec | google/gemini-3.7-flash | **+1.333** | PASS — MKTApp outperformed same-model direct baseline |
+| S2 | competitor_analysis | google/gemini-3.5-flash | **+1.000** | PASS — MKTApp outperformed same-model direct baseline |
+| S3 | campaign_strategy | google/gemini-3.7-flash | **−1.167** | FAIL — MKTApp underperformed same-model direct baseline |
+| S4 | content_creator | google/gemini-3.7-flash | **+0.667** | PASS — MKTApp outperformed same-model direct baseline |
+
+- Aggregate mean uplift: **+0.4583**
+- Nonnegative scenarios: **3/4**
+
+### Gate v1 conditions
+
+| Condition | Requirement | Result | Value |
+|-----------|-------------|--------|-------|
+| A — Aggregate mean uplift | ≥ +0.25 | **PASS** | +0.4583 |
+| B — Scenario consistency | ≥ 3 of 4 ≥ 0 | **PASS** | 3/4 |
+| C — No scenario regression | No scenario < −0.5 | **FAIL** | S3 = −1.167 |
+| D — No core dimension regression | No core dim < −0.5 | **FAIL** | S3 Instruction following = −2.0, S3 Brand/asset fit = −1.0 |
+
+**Overall: FAIL** (requires all 4 conditions to pass)
+
+### S3 failure detail
+
+S3 (campaign_strategy) is the sole driver of the FAIL verdict:
+
+- S3 overall delta: −1.167 (violates Gate C: < −0.5)
+- S3 Instruction following delta: −2.0 (violates Gate D: < −0.5)
+- S3 Brand/asset fit delta: −1.0 (violates Gate D: < −0.5)
+
+Root cause: `resource_context` containing user budget constraints
+(`budget_max=5000`) is not promoted into the structured context/instruction
+fields consumed by the Campaign Strategy validator and system prompt.
+This causes: budget present from user → MKTApp structured context says
+no budget → validator rejects concrete allocation → repair loop forces
+hedging → S3 becomes materially worse than same-model baseline.
+
+See § S3 Root-Cause Investigation below for full analysis.
+
+### Cumulative spend reconciliation
+
+| Category | Calls | Spend |
+|----------|-------|-------|
+| Original qualification (invalid — harness defect) | 14 | $0.496511 |
+| Diagnostic call after STOP (governance deviation) | 1 | $0.009494 |
+| Recovery — Baseline S1–S4 | 4 | $0.138968 |
+| Recovery — MKTApp S1–S4 | 0 | $0.000000 (preserved) |
+| Recovery — Judge S1–S4 | 4 | $0.165532 |
+| **Cumulative grand total** | **23** | **$0.810043** |
+| Budget cap | | $1.410000 |
+| Remaining | | $0.599957 |
+
+Note: Judge costs are recorded in `judge/m6_judge_raw.json`, not in
+`logs/llm_usage.jsonl` (Judge uses a separate API client path).
+
+### Evidence paths
+
+Recovery run: `data/m6_uplift/runs/20260905_074945_recovery/`
+- `m6_uplift_verdict.json` — final verdict
+- `m6_evidence.json` — full evidence
+- `m6_mapping_secret.json` — blind mapping
+- `judge/m6_judge_raw.json` — Judge raw results
+- `outputs/baseline/S{1-4}.txt` — Baseline outputs
+- `outputs/mktapp/S{1-4}.txt` — MKTApp outputs (preserved from original run)
+- `recovery_meta.json` — recovery metadata
+
+Original run: `data/m6_uplift/runs/20260905_072432/`
+- `preserved/mktapp_evidence_manifest.json` — MKTApp preservation manifest
+
+All MKTApp output hashes verified to match between original and recovery runs.
+
+---
+
+## Benchmark Levels
+
+The M6 qualification uses two distinct benchmark levels. **Level 1
+results must NOT be interpreted as Level 2 results.**
+
+### Level 1 — Same-model API qualification
+
+**Purpose:** Determine whether MKTApp adds value over using the same
+underlying model through a neutral/direct API baseline.
+
+**What it measures:** MKTApp architecture uplift (grounding, brand
+handling, review/repair, orchestration, deterministic safety/validation)
+versus a direct API call to the same model with equivalent user/source
+information.
+
+**Current status:**
+
+| Scenario | Agent | Uplift | Level 1 status |
+|----------|-------|--------|----------------|
+| S1 | product_spec | +1.333 | PASS |
+| S2 | competitor_analysis | +1.000 | PASS |
+| S3 | campaign_strategy | −1.167 | FAIL |
+| S4 | content_creator | +0.667 | PASS |
+| **Overall** | | +0.4583 | **FAIL** (S3 regression) |
+
+**Important limitation:** This result does NOT prove MKTApp is better
+than Gemini, ChatGPT, Claude, or another provider's consumer web UI.
+It only measures MKTApp architecture value over the same model via
+direct API.
+
+### Level 2 — Provider UI benchmark
+
+**Status: Future milestone.** Not yet executed. Do NOT infer from
+Level 1 results.
+
+**Purpose:** Answer the product/business question:
+
+> Does a user get an equal or better result from MKTApp than by taking
+> the same task directly to the provider's own web product?
+
+**Comparison:**
+
+| Side | What |
+|------|------|
+| Candidate A | MKTApp real UI |
+| Candidate B | Provider real UI (e.g., Gemini web, ChatGPT web) |
+
+**Controlled equivalents:**
+- Same task
+- Same input text
+- Same uploaded files/context
+- Comparable available tools/search
+- Fresh sessions
+- First completed answer
+- No manual prompt rescue on only one side
+- Blind judging
+- Multiple scenarios
+
+**Provider UI capabilities not present in raw API access:** Provider web
+products may include hidden system behavior, retrieval/search, tool
+orchestration, context management, routing, post-processing, memory, and
+other provider product layers that are NOT available through API access.
+
+**Therefore Level 2 must be treated as a separate benchmark, not
+inferred from Level 1.** A Level 1 PASS does not imply Level 2 PASS.
+
+### Web E2E / Browser smoke-test
+
+**Status: Required before Beta/Release closure.** Separate from both
+benchmark levels.
+
+**Flow:** UI → API/Orchestrator → Agent → Result/Renderer → UI
+
+**Purpose:** Verify the full production delivery path works end-to-end
+through the web UI, including rendering, file handling, and user
+interaction. This is a smoke-test, not a model-quality benchmark.
+
+### Web E2E / Browser Smoke-Test Status (2026-09-05)
+
+**Status: Web/Browser E2E PASS — 14/14 browser tests passing.**
+
+Two distinct E2E test layers exist:
+
+1. **API/integration E2E smoke tests** — `tests/test_beta_e2e_smoke.py`
+   (16 tests). Uses FastAPI `TestClient`. Exercises HTTP routing, SSE
+   streaming, file I/O, session management with mocked LLM. Does NOT
+   execute real browser DOM/JavaScript.
+
+2. **Web/Browser E2E** — `tests/test_browser_e2e.py` (14 tests). Uses
+   **Playwright** with real Chromium browser. Exercises the full chain:
+   browser → real frontend JavaScript → HTTP/SSE → backend →
+   orchestrator → agent seam → renderer → DOM. The LLM/Orchestrator is
+   mocked so no paid calls are made.
+
+**Browser E2E coverage:**
+
+| Test class | What it verifies | Status |
+|------------|------------------|--------|
+| `TestApplicationBoot` | Page renders, wizard JS loads, no fatal console errors, no critical failed network requests | PASS (4 tests) |
+| `TestAgent1ProductSpec` | Select product → select agent → run → result link appears in DOM | PASS |
+| `TestAgent2CompetitorAnalysis` | Full UI flow → result renders | PASS |
+| `TestAgent3CampaignStrategy` | Settings saved via API → run → settings reach backend; settings modal opens via UI | PASS (2 tests) |
+| `TestAgent4ContentCreator` | Full UI flow including content options step → text result renders | PASS |
+| `TestUploadContext` | Real file upload through DOM file input → UI acknowledges file | PASS |
+| `TestRepeatedUse` | Second run in same browser session → no state corruption | PASS |
+| `TestErrorBehavior` | Controlled backend error → UI shows error state, no infinite loading | PASS |
+| `TestNavigationState` | UI operable after run (step dots clickable, add-flow button present); sessions sidebar populated | PASS (2 tests) |
+
+**What the browser E2E proves that API tests cannot:**
+- The page HTML renders in a real browser
+- `wizard_ui.js` executes and builds the wizard DOM
+- Click-to-select product/agent chips work through real DOM events
+- Wizard stepper navigation (Step 1 → 2 → 3 → 4) works
+- SSE events are parsed by frontend JS and update the DOM
+- Result links appear and are clickable
+- Agent settings modal opens through the real UI
+- File upload control works through the real DOM
+- Console has no fatal errors on happy paths
+- The UI remains operable after a completed run
+
+**Agent 3 settings path proven:** The browser E2E test for
+`campaign_strategy` saves `budget_max=5000`, `discount_max=0`,
+`forbid_tactics=[heavy_discount,flash,bogo]` via the settings API,
+verifies they reach `config/agent_instructions.json`, then runs the
+agent through the real UI. This proves the production settings path
+works — the same path that the benchmark harness defect bypassed.
+
+---
+
+## Benchmark Roadmap
+
+The progression from current state to Beta/Release decision:
+
+1. **Same-model API capability qualification** (Level 1) — current state: FAIL
+2. **Fix any failing Agent(s)** — S3 campaign_strategy root cause identified (harness defect, deferred benchmark work)
+3. **Re-run same-model qualification** — deferred; not required before user Beta
+4. **Web E2E / Browser flow validation** — Web/Browser E2E PASS (14/14 with Playwright); API/integration E2E PASS (16/16)
+5. **Provider UI benchmark** (Level 2) — separate paid benchmark, future milestone
+6. **Beta/Release decision** — ready for small real-user Beta (see Beta Readiness Report)
+
+Do NOT claim provider-UI parity or superiority until Level 2 has been
+actually executed.
+
+---
+
+## S3 Root-Cause Investigation (2026-09-05)
+
+**Status: Investigation complete. Fix not yet implemented.**
+
+### Summary
+
+The same underlying model (`google/gemini-3.7-flash`) produced a
+materially better Baseline result than the MKTApp Agent 3 path for S3
+(campaign_strategy). The root cause is a **harness asymmetry**, not a
+production code defect.
+
+### Corrected root cause (updated after pre-fix investigation)
+
+**The production code is correct.** In the production web UI, user
+settings (`budget_max`, `discount_max`, `forbid_tactics`) flow through
+the persistent `instructions` dict loaded from
+`config/agent_instructions.json`, which the user saves via the UI
+settings modal (`POST /api/agent_instructions/campaign_strategy`).
+The orchestrator loads these at agent creation time
+(`_load_agent_instructions`), and both the system prompt formatter
+(`BaseAgent._format_instructions`) and the validator
+(`campaign_validator.audit_campaign_output`) read them correctly.
+
+**The uplift harness does not simulate this step.**
+
+The M6 frontier UAT harness (`scripts/m6_frontier_uat.py`) correctly
+parses `Agent settings:` from `resource_context` via
+`_parse_agent_settings_override()`, applies them via
+`qual_runner._apply_agent_settings()` (which writes to
+`config/agent_instructions.json`), and strips the block from the
+prompt text before passing it to MKTApp.
+
+The M6 uplift harness (`scripts/m6_uplift_harness.py`) does NOT do
+this. `run_mktapp_candidate()` passes `scenario.resource_context` as a
+raw string to `qr.run_case()` without `agent_settings_override`. The
+`Agent settings: budget_max=5000...` string is appended raw to the
+user prompt but never reaches `agent_instructions.json` or
+`agent.instructions`.
+
+### Effect chain (harness defect)
+
+1. S3 `resource_context` = `"Agent settings: budget_max=5000, discount_max=0, forbid_tactics=[heavy_discount,flash,bogo]."`
+2. Uplift harness `run_mktapp_candidate` passes it as raw string (no `agent_settings_override`)
+3. `qual_runner.run_case` does not call `_apply_agent_settings`
+4. `config/agent_instructions.json` retains defaults: `budget_max=""`, `forbid_tactics=[]`
+5. Orchestrator loads empty instructions → `agent.instructions["budget_max"]=""`
+6. System prompt: `_format_instructions` skips "งบประมาณสูงสุด: 5000" (empty value)
+7. Validator: `instructions.get("budget_max")` = empty → `budget_max_enforced` not enforced
+8. `extract_context_flags`: `context.business` = empty → `has_budget=False`
+9. `budget_allocation_grounded`: rejects ANY budget percentage when `has_budget=False`
+10. Repair prompt forces hedging: "ถ้าข้อมูลไม่พอ ให้ใช้คำว่า 'ไม่สามารถเสนอได้เนื่องจากไม่มีข้อมูลทางการเสินและต้นทุนสินค้า'"
+11. Model removes budget percentages and hedges on all concrete numbers
+12. Judge penalizes: "Y ไม่จัดสรรงบตามเพดานที่ให้มา"
+
+Evidence: 3 LLM calls for S3 MKTApp (1 generation + 2 repairs),
+confirming validation rejection occurred.
+
+### Asymmetry summary
+
+| Path | Parses `Agent settings:`? | Applies to `agent_instructions.json`? | `budget_max` reaches agent? |
+|------|--------------------------|---------------------------------------|----------------------------|
+| Production web UI | N/A (UI modal saves directly) | Yes (via `/api/agent_instructions`) | Yes |
+| Frontier UAT harness | Yes (`_parse_agent_settings_override`) | Yes (`_apply_agent_settings`) | Yes |
+| Uplift harness — Baseline | Yes (`_parse_user_visible_constraints`) | N/A (goes into neutral task spec) | Yes (in prompt) |
+| **Uplift harness — MKTApp** | **NO** | **NO** | **NO** |
+
+### Failure category
+
+**B (runtime/context/orchestration) — harness-only**
+
+The root cause is in `scripts/m6_uplift_harness.py:run_mktapp_candidate`,
+not in production code. The harness does not simulate the production
+UI's agent-settings save step before running MKTApp.
+
+### What MKTApp S3 did well (must preserve)
+
+1. Correct product specs (AMOLED, 5MP, SpO2, GPS, IP68)
+2. Correct competitor identification and comparison
+3. Good campaign concept and brand tone
+4. Good target audience definition
+5. Good content pillars structure
+6. Honest pricing framework (acknowledged missing COGS)
+7. Practical next-steps section
+
+### Proposed fix (not yet implemented)
+
+**Fix the harness, not the production code.**
+
+In `scripts/m6_uplift_harness.py:run_mktapp_candidate`, parse
+`Agent settings:` from `scenario.resource_context` and pass them as
+`agent_settings_override` to `qr.run_case`, exactly like
+`m6_frontier_uat._run_mktapp_scenario` does. Strip the `Agent settings:`
+block from `resource_context` before passing it to MKTApp (so it's not
+duplicated in the user prompt).
+
+This is a harness fix that restores parity with the frontier UAT
+harness and the production web UI. No production code changes needed.
+
+See § S3 Pre-Fix Investigation below for the exact implementation plan.
+
+---
+
+## S3 Pre-Fix Investigation (2026-09-05)
+
+**Status: Complete. Fix not yet implemented. Awaiting Product Owner approval.**
+
+### 1. Production UI context-flow findings
+
+The production web UI path for Campaign Strategy was traced end-to-end.
+
+**User settings flow (production):**
+1. User opens settings modal in web UI → saves via
+   `POST /api/agent_instructions/campaign_strategy`
+   (`web_viewer.py:2179-2210`)
+2. Settings written to `config/agent_instructions.json`
+3. At run time, `Orchestrator._make_agent` loads instructions via
+   `_load_agent_instructions` (`src/orchestrator.py:134-146`)
+4. `CampaignStrategyAgent.__init__` stores as `self.instructions`
+5. `BaseAgent._format_instructions` renders `budget_max`,
+   `discount_max`, `forbid_tactics` into system prompt
+   (`src/agents/base_agent.py:191-203`)
+6. `campaign_validator.audit_campaign_output` reads same
+   `instructions` dict for enforcement
+   (`src/campaign_validator.py:1031-1049, 1084-1116, 1118-1134`)
+
+**`resource_context` in production:**
+- `StepRunContext.resource_text` contains ONLY uploaded attachment text
+  (`src/run_context.py:268-274`)
+- It NEVER contains `"Agent settings: ..."` formatted text
+- The production web UI does not parse `"Agent settings:"` anywhere
+
+**Conclusion:** Production code is correct. User settings reach the
+agent through `agent_instructions.json`, not through `resource_context`.
+
+### 2. Harness asymmetry confirmed
+
+| Harness | Parses `Agent settings:`? | Applies to `agent_instructions.json`? |
+|---------|--------------------------|---------------------------------------|
+| `m6_frontier_uat.py` | Yes (`_parse_agent_settings_override` at line 89) | Yes (`_apply_agent_settings` via `qual_runner`) |
+| `m6_uplift_harness.py` (Baseline) | Yes (`_parse_user_visible_constraints` at line 219) | N/A (goes into neutral task spec text) |
+| **`m6_uplift_harness.py` (MKTApp)** | **NO** | **NO** |
+
+The uplift harness `run_mktapp_candidate` at line 2047 calls
+`qr.run_case(...)` without `agent_settings_override`, passing
+`resource_context` as a raw string. This means MKTApp never receives
+the user's budget constraint in its structured `instructions` dict.
+
+### 3. Precedence rules
+
+If the same setting exists in multiple sources, the precedence is:
+
+1. **Explicit user-entered structured settings** (UI modal →
+   `agent_instructions.json`) — **HIGHEST**
+2. **Structured UI fields** (per-run API body, if any) — not currently
+   implemented for campaign settings
+3. **`resource_context` parsed fallback** (harness-only,
+   `Agent settings:` format) — harness simulation of source 1
+4. **Defaults** (`config/agent_instructions.json` default values) —
+   **LOWEST**
+
+**Rule:** Explicit user-entered structured settings must NOT be
+silently overwritten by parsed fallback text. The harness fix must
+merge parsed values only when the explicit value is empty/default.
+
+### 4. Exact files/functions that would change for the S3 fix
+
+**Only one file changes: `scripts/m6_uplift_harness.py`**
+
+| Function | Change |
+|----------|--------|
+| `run_mktapp_candidate` (line 1991) | Add: parse `Agent settings:` from `scenario.resource_context` using existing `_parse_user_visible_constraints()` or equivalent; pass parsed dict as `agent_settings_override` to `qr.run_case`; strip `Agent settings:` block from `resource_context` string before passing it |
+
+**No production code changes.** No changes to:
+- `src/orchestrator.py`
+- `src/agents/base_agent.py`
+- `src/agents/campaign_strategy.py`
+- `src/campaign_validator.py`
+- `config/agents.yaml`
+- `config/agent_instructions.json`
+- `scripts/qual_runner.py`
+- `scripts/m6_judge_runner.py`
+
+**Implementation pattern:** Mirror what
+`m6_frontier_uat._run_mktapp_scenario` (line 608-617) already does:
+```python
+agent_settings_override = _parse_user_visible_constraints(scenario.resource_context)
+resource_context = re.sub(r"Agent settings:.*?(\n\n|\n---|$)", "", scenario.resource_context, flags=re.DOTALL).strip()
+```
+Then pass `agent_settings_override` to `qr.run_case`.
+
+### 5. Regression-test plan
+
+**New tests:**
+1. Test that `run_mktapp_candidate` parses `Agent settings:` from
+   `resource_context` and passes `agent_settings_override` to
+   `qr.run_case`
+2. Test that `Agent settings:` block is stripped from `resource_context`
+   before passing to MKTApp
+3. Test that empty `resource_context` produces empty
+   `agent_settings_override` (no regression for scenarios without
+   settings)
+4. Test that settings already in `agent_instructions.json` are not
+   overwritten when `resource_context` has no `Agent settings:` block
+
+**Existing tests to verify pass:**
+- `tests/test_m6_uplift_harness.py` — all 124 tests
+- `tests/test_m6_uplift_runner.py` — all tests
+- `tests/test_campaign_strategy.py` — all tests
+- `tests/test_campaign_strategy_semantic.py` — all tests
+- `tests/test_campaign_strategy_hardening.py` — all tests
+- `tests/test_campaign_validator.py` — all tests
+- `tests/test_campaign_real_eval.py` — all tests
+- `tests/test_resource_context_delivery.py` — all tests
+
+**Full offline suite must pass before any re-qualification.**
+
+### 6. Confirmation of zero paid calls
+
+No paid/model/web/media calls were made during this investigation.
+All work was offline file inspection, code tracing, and documentation
+updates. No qualification rerun was executed.

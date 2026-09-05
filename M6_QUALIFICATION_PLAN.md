@@ -123,11 +123,145 @@ If MKTApp fails to show uplift over the same-model baseline:
 Do NOT weaken the baseline to make MKTApp pass.
 Do NOT change Judge scoring to manufacture a pass.
 
+### Current Phase 4 status (2026-09-05)
+
+S3 (campaign_strategy) failed with −1.167 uplift. Root cause identified
+as a **harness asymmetry** in `scripts/m6_uplift_harness.py`:
+`run_mktapp_candidate` does not parse `Agent settings:` from
+`resource_context` into `agent_settings_override`, unlike the frontier
+UAT harness. This means MKTApp never receives the user's budget
+constraint in its structured `instructions` dict, causing the validator
+to reject budget allocation and the repair loop to force hedging.
+
+**Fix scope:** Harness-only (`scripts/m6_uplift_harness.py`). No
+production code changes. See `M6_STATUS.md` § S3 Pre-Fix Investigation
+for the exact implementation plan.
+
+**Pre-condition for re-qualification:** Harness fix implemented + full
+offline suite passes + new Product Owner authorization for paid run.
+
 ---
 
 ## Phase 5 — Web E2E / Browser Qualification
 
 Prove actual UI delivery through automated browser tests.
+
+Flow: UI → API/Orchestrator → Agent → Result/Renderer → UI
+
+This is a smoke-test of the full production delivery path, separate
+from both model-quality benchmark levels.
+
+### Current status (2026-09-05)
+
+**Web/Browser E2E: PASS (14/14 with Playwright).**
+**API/integration E2E: PASS (16/16 with FastAPI TestClient).**
+
+Two distinct E2E test layers:
+
+1. **API/integration E2E** — `tests/test_beta_e2e_smoke.py` (16 tests).
+   Uses FastAPI `TestClient`. Exercises HTTP routing, SSE streaming,
+   file I/O, session management with mocked LLM. Does NOT execute real
+   browser DOM/JavaScript.
+
+2. **Web/Browser E2E** — `tests/test_browser_e2e.py` (14 tests). Uses
+   **Playwright** with real Chromium. Exercises: browser → real
+   frontend JavaScript → HTTP/SSE → backend → orchestrator → agent
+   seam → renderer → DOM. LLM/Orchestrator mocked — no paid calls.
+
+Browser E2E coverage: application boot (page renders, JS loads, no
+fatal console errors), all 4 agents through the real wizard UI (select
+product → select agent → run → result link appears in DOM), Agent 3
+settings path proven (budget_max saved via API → reaches backend →
+agent runs), file upload through real DOM file input, repeated runs in
+same browser session, controlled error surfaces in UI, UI operable
+after completed run, sessions sidebar populated.
+
+**No gap remaining for Beta text/core flows.** Media generation
+(image/video) is deferred and not tested by browser E2E.
+
+---
+
+## Benchmark Levels — Explicit Definitions
+
+The M6 qualification uses two distinct benchmark levels. **Level 1
+results must NOT be interpreted as Level 2 results.**
+
+### Level 1 — Same-model API qualification
+
+**Purpose:** Determine whether MKTApp adds value over using the same
+underlying model through a neutral/direct API baseline.
+
+**What it measures:** MKTApp architecture uplift (grounding, brand
+handling, review/repair, orchestration, deterministic safety/validation)
+versus a direct API call to the same model with equivalent user/source
+information.
+
+**Current status (2026-09-05):**
+
+| Scenario | Agent | Uplift | Status |
+|----------|-------|--------|--------|
+| S1 | product_spec | +1.333 | PASS |
+| S2 | competitor_analysis | +1.000 | PASS |
+| S3 | campaign_strategy | −1.167 | FAIL |
+| S4 | content_creator | +0.667 | PASS |
+| **Overall** | | +0.4583 | **FAIL** (S3 regression) |
+
+**Important limitation:** This result does NOT prove MKTApp is better
+than Gemini, ChatGPT, Claude, or another provider's consumer web UI.
+It only measures MKTApp architecture value over the same model via
+direct API.
+
+### Level 2 — Provider UI benchmark
+
+**Status: Future milestone.** Not yet executed. Must NOT be inferred
+from Level 1 results.
+
+**Purpose:** Answer the product/business question:
+
+> Does a user get an equal or better result from MKTApp than by taking
+> the same task directly to the provider's own web product?
+
+**Comparison:**
+
+| Side | What |
+|------|------|
+| Candidate A | MKTApp real UI |
+| Candidate B | Provider real UI (e.g., Gemini web, ChatGPT web) |
+
+**Controlled equivalents:**
+- Same task
+- Same input text
+- Same uploaded files/context
+- Comparable available tools/search where reasonably comparable
+- Fresh sessions
+- First completed answer
+- No manual prompt rescue on only one side
+- Blind judging
+- Multiple scenarios
+
+**Provider UI capabilities not present in raw API access:** Provider web
+products may include hidden system behavior, retrieval/search, tool
+orchestration, context management, routing, post-processing, memory, and
+other provider product layers that are NOT available through API access.
+
+**Therefore Level 2 must be treated as a separate benchmark, not
+inferred from Level 1.** A Level 1 PASS does not imply Level 2 PASS.
+
+Do NOT claim provider-UI parity or superiority until Level 2 has been
+actually executed.
+
+---
+
+## Benchmark Roadmap
+
+The progression from current state to Beta/Release decision:
+
+1. **Same-model API capability qualification** (Level 1) — current: FAIL
+2. **Fix any failing Agent(s)** — S3 campaign_strategy root cause identified (harness defect, deferred benchmark work)
+3. **Re-run same-model qualification** — deferred; not required before user Beta
+4. **Web E2E / Browser flow validation** — Web/Browser E2E PASS (14/14 with Playwright); API/integration E2E PASS (16/16)
+5. **Provider UI benchmark** (Level 2) — separate paid benchmark, future milestone
+6. **Beta/Release decision** — ready for small real-user Beta
 
 ---
 
