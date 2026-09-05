@@ -1024,3 +1024,154 @@ def test_table_with_all_no_evidence_fails_full_analysis():
     outcome = _check_outcome(result)
     assert not outcome["passed"]
     assert "insufficient competitor evidence" in outcome["defects"]
+
+
+# ---------------------------------------------------------------------------
+# Stage A vs Stage 3 brand isolation — durable product contracts
+#
+# These tests verify durable invariants that must hold regardless of
+# future Stage 3 architecture changes:
+#
+# 1. Stage A evidence prompt is brand-independent
+# 2. Stage A evidence schema contains no brand-derived fields
+# 3. Evidence records are unchanged by rendering/brand configuration
+# 4. Internal brand reference is not dumped into output merely because it exists
+# 5. No current deterministic renderer fabricates brand-aware recommendations
+#
+# The current deterministic Stage 3 renderer has no semantic brand-reasoning
+# seam. This is a known gap pending a separately approved semantic design.
+# These tests do NOT encode the current architectural limitation as a
+# permanent contract — they verify that what the renderer DOES produce
+# is brand-objective and evidence-preserving.
+# ---------------------------------------------------------------------------
+
+def test_stage_a_evidence_system_prompt_excludes_brand_reference():
+    """Stage A system prompt (EVIDENCE_SYSTEM_PROMPT) must NOT contain
+    brand_reference content — evidence research stays brand-objective."""
+    from src.agents.competitor_evidence import EVIDENCE_SYSTEM_PROMPT
+    assert "brand_reference" not in EVIDENCE_SYSTEM_PROMPT.lower()
+    assert "ข้อมูลแบรนด์อ้างอิง" not in EVIDENCE_SYSTEM_PROMPT
+    assert "audience" not in EVIDENCE_SYSTEM_PROMPT.lower()
+    assert "positioning" not in EVIDENCE_SYSTEM_PROMPT.lower()
+
+
+def test_stage_a_build_system_prompt_bypasses_brand_in_evidence_mode():
+    """When evidence_mode is true, _build_system_prompt must return
+    EVIDENCE_SYSTEM_PROMPT — NOT the BaseAgent prompt with brand_reference.
+    Stage A evidence research is brand-independent."""
+    cfg = _competitor_config()
+    cfg["evidence_mode"] = True
+    cfg["use_brand_reference"] = True
+    llm = FakeLLM()
+    brand_ref = "### Target Audience\nparents age 30-45\n### Product Positioning\npremium"
+    agent = CompetitorAnalysisAgent(cfg, llm, brand_reference=brand_ref)
+    system = agent._build_system_prompt()
+    assert "Competitor Analyst" in system
+    assert "parents age 30-45" not in system
+    assert "ข้อมูลแบรนด์อ้างอิง" not in system
+
+
+def test_stage_a_research_schema_has_no_brand_fields():
+    """The ResearchResponse schema must not include brand fields —
+    evidence records are brand-objective by schema contract."""
+    from src.agents.competitor_evidence import RESEARCH_RESPONSE_SCHEMA
+    inner = RESEARCH_RESPONSE_SCHEMA.get("json_schema", {}).get("schema", {})
+    properties = inner.get("properties", {})
+    assert "target_model" in properties
+    assert "evidence" in properties
+    assert "brand" not in properties
+    assert "brand_reference" not in properties
+    assert "audience" not in properties
+    assert "positioning" not in properties
+
+
+def test_stage_3_renderer_does_not_dump_brand_reference():
+    """The rendered report must NOT contain raw brand_reference content.
+    Internal brand context must not be echoed into the final output
+    merely because it exists on the agent. This is a durable provenance
+    contract: brand context is internal and must not leak into the
+    competitor analysis report as a raw appendix."""
+    from src.agents.competitor_evidence import CompetitorReportRenderer, ResearchResponse
+    research = ResearchResponse(
+        target_model="TestProduct",
+        competitor_names=["CompA"],
+        evidence=[],
+        evidence_based_recommendations=[],
+        strategic_hypotheses=[],
+        uncertainty=["no evidence found"],
+    )
+    renderer = CompetitorReportRenderer(
+        research,
+        relevant_annotations=[],
+        quick_brief="",
+    )
+    markdown = renderer.render("TestProduct spec")
+    # The rendered output must not contain raw brand-reference framing
+    assert "ข้อมูลแบรนด์อ้างอิง" not in markdown
+    assert "brand reference" not in markdown.lower()
+
+
+def test_stage_3_evidence_records_unchanged_by_render():
+    """Rendering must NOT alter evidence records — the renderer is
+    deterministic and must preserve evidence data integrity regardless
+    of any brand context that may exist on the agent."""
+    from src.agents.competitor_evidence import CompetitorReportRenderer, ResearchResponse, CompetitorEvidence
+    evidence = [
+        CompetitorEvidence(
+            competitor="CompA",
+            field="price",
+            claim="5,000 THB",
+            url="https://example.com/compa",
+            geography="thailand",
+        ),
+    ]
+    research = ResearchResponse(
+        target_model="TestProduct",
+        competitor_names=["CompA"],
+        evidence=evidence,
+        evidence_based_recommendations=[],
+        strategic_hypotheses=[],
+        uncertainty=[],
+    )
+    renderer = CompetitorReportRenderer(
+        research,
+        relevant_annotations=[{"url": "https://example.com/compa", "title": "CompA", "content": "price"}],
+        quick_brief="",
+    )
+    claim_before = research.evidence[0].claim
+    competitor_before = research.evidence[0].competitor
+    url_before = research.evidence[0].url
+    renderer.render("TestProduct spec")
+    assert research.evidence[0].claim == claim_before
+    assert research.evidence[0].competitor == competitor_before
+    assert research.evidence[0].url == url_before
+
+
+def test_stage_3_renderer_does_not_fabricate_brand_aware_recommendations():
+    """The current deterministic renderer must NOT fabricate brand-aware
+    recommendations. If the renderer has no semantic reasoning capability,
+    it must not inject deterministic brand-term selection, keyword rules,
+    or template-based brand framing into the output.
+
+    This test verifies that the rendered output contains only
+    evidence-derived content, not fabricated brand-aware reasoning."""
+    from src.agents.competitor_evidence import CompetitorReportRenderer, ResearchResponse
+    research = ResearchResponse(
+        target_model="TestProduct",
+        competitor_names=["CompA"],
+        evidence=[],
+        evidence_based_recommendations=[],
+        strategic_hypotheses=[],
+        uncertainty=["no evidence found"],
+    )
+    renderer = CompetitorReportRenderer(
+        research,
+        relevant_annotations=[],
+        quick_brief="",
+    )
+    markdown = renderer.render("TestProduct spec")
+    # The renderer must not inject deterministic brand-aware sections
+    # that would fake semantic brand reasoning
+    assert "brand differentiator" not in markdown.lower()
+    assert "brand-aware" not in markdown.lower()
+    assert "brand framing" not in markdown.lower()
