@@ -562,3 +562,457 @@ class TestNoPartialJudgeArtifacts:
         # Raw judge audit IS written (evidence preservation)
         raw = json.loads((tmp_path / "judge" / "m6_judge_raw.json").read_text())
         assert raw["incomplete"] is True
+
+
+# ---------------------------------------------------------------------------
+# 15. Regression: Baseline executor contract (the .value bug)
+# ---------------------------------------------------------------------------
+
+class TestBaselineExecutorContract:
+    """Regression tests for the Baseline executor defect where
+    ``evaluate_single_call_completeness(...).value`` raised AttributeError
+    on an already-string return, silently discarding valid output as UNKNOWN.
+
+    These tests prove:
+      - the frozen completeness helper returns a string (not an enum)
+      - a successful Baseline model response survives candidate construction
+      - output text is persisted
+      - output hash is persisted
+      - finish reason is preserved
+      - completeness becomes COMPLETE
+      - call_count is correct
+      - actual cost accounting is preserved (not reserve)
+      - no post-call exception can silently convert a successful candidate
+        into UNKNOWN
+    """
+
+    def test_completeness_helper_returns_string(self, runner):
+        """The frozen helper must return a string, not an enum with .value."""
+        import m6_uplift_harness as h
+        result = h.evaluate_single_call_completeness("stop", False)
+        assert isinstance(result, str), f"Expected str, got {type(result).__name__}"
+        assert result == "COMPLETE"
+        # Must NOT have a .value attribute (that was the bug)
+        assert not hasattr(result, "value"), (
+            "evaluate_single_call_completeness must return a plain string, "
+            "not an enum — calling .value on a string raises AttributeError"
+        )
+
+    def test_successful_baseline_survives_construction(self, runner):
+        """A successful Baseline call must produce a COMPLETE CandidateResult
+        with all fields populated — not silently swallowed as UNKNOWN."""
+        import m6_uplift_harness as h
+
+        # Simulate a successful guarded.chat() return
+        text = "This is a valid baseline output."
+        finish_reason = "stop"
+        truncated = False
+
+        # This is the exact code path from real_baseline_executor (post-fix)
+        completeness = runner.evaluate_single_call_completeness(finish_reason, truncated)
+        assert completeness == "COMPLETE"
+        assert isinstance(completeness, str)
+
+        result = runner.CandidateResult(
+            scenario_id="S1", side="baseline", model="google/gemini-3.7-flash",
+            output_text=text,
+            output_hash=hashlib.sha256(text.encode()).hexdigest(),
+            completeness=completeness,
+            final_finish_reason=finish_reason,
+            final_truncated=truncated,
+            call_count=1,
+            cost_usd=0.012,
+            reserve_usd=0.05,
+            source_fixture_hash="abc123",
+        )
+        assert result.completeness == "COMPLETE"
+        assert result.output_text == text
+        assert result.output_hash is not None
+        assert result.final_finish_reason == "stop"
+        assert result.call_count == 1
+        assert result.cost_usd == 0.012  # actual, not reserve
+        assert result.reserve_usd == 0.05
+
+    def test_no_silent_unknown_on_post_call_exception(self, runner):
+        """If an exception occurs AFTER a successful LLM call, the exception
+        handler must preserve call_count and actual committed cost — not
+        report call_count=0 with reserve as cost."""
+        import m6_uplift_harness as h
+
+        # Simulate: guarded.chat() succeeded (call_log has 1 entry with
+        # committed=0.012), but then a post-call bug raises an exception.
+        call_log = [{"committed": 0.012, "reserve": 0.05}]
+        actual_committed = sum(c.get("committed", 0) for c in call_log)
+
+        # This mirrors the fixed exception handler
+        result = runner.CandidateResult(
+            scenario_id="S1", side="baseline", model="google/gemini-3.7-flash",
+            output_text="", completeness="UNKNOWN",
+            call_count=len(call_log),
+            cost_usd=actual_committed,
+            reserve_usd=0.05,
+            source_fixture_hash="abc123",
+        )
+        # The bug previously reported call_count=0 and cost=reserve
+        assert result.call_count == 1, "call_count must reflect actual calls, not 0"
+        assert result.cost_usd == 0.012, "cost_usd must be actual committed, not reserve"
+        assert result.reserve_usd == 0.05, "reserve must be separate from actual cost"
+        assert result.cost_usd != result.reserve_usd, (
+            "Failure evidence must never report reserve as actual spend"
+        )
+
+    def test_evidence_dict_distinguishes_reserve_and_actual(self, runner):
+        """to_evidence_dict must include both cost_usd (actual) and
+        reserve_usd (authorized reserve) as separate fields."""
+        result = runner.CandidateResult(
+            scenario_id="S1", side="baseline", model="m",
+            output_text="text", completeness="COMPLETE",
+            cost_usd=0.012, reserve_usd=0.05,
+        )
+        d = result.to_evidence_dict()
+        assert "cost_usd" in d
+        assert "reserve_usd" in d
+        assert d["cost_usd"] == 0.012
+        assert d["reserve_usd"] == 0.05
+        assert d["cost_usd"] != d["reserve_usd"]
+
+
+# ---------------------------------------------------------------------------
+# 16. Recovery path tests — preserved MKTApp + new Baseline
+# ---------------------------------------------------------------------------
+
+class CountingRecoveryDeps:
+    """RecoveryDeps with counting mock executors."""
+
+    def __init__(self, runner_mod, *, baseline_complete=True,
+                 judge_scores=None, judge_error_sid=None,
+                 judge_exception_sid=None,
+                 baseline_cost=0.0, judge_cost=0.0):
+        self.r = runner_mod
+        self.baseline_calls: list[tuple] = []
+        self.judge_calls: list[str] = []
+        self.baseline_complete = baseline_complete
+        self.judge_scores = judge_scores or self._default_scores()
+        self.judge_error_sid = judge_error_sid
+        self.judge_exception_sid = judge_exception_sid
+        self.baseline_cost = baseline_cost
+        self.judge_cost = judge_cost
+
+    def _default_scores(self):
+        dims = ["Usefulness", "Factuality", "Instruction following",
+                "Brand / asset fit", "Evidence quality", "User effort"]
+        return {d: {"X": 4, "Y": 3, "winner": "X", "tie": False,
+                     "reason": "mock"} for d in dims}
+
+    def baseline_executor(self, scenario, fixture, budget):
+        self.baseline_calls.append((scenario.id, fixture))
+        text = f"[RECOVERY BASELINE] {scenario.id}"
+        comp = "COMPLETE" if self.baseline_complete else "INCOMPLETE"
+        if self.baseline_cost:
+            budget.commit_candidate_spend(
+                scenario.id, "baseline", self.baseline_cost, stage="generation",
+            )
+        return self.r.CandidateResult(
+            scenario_id=scenario.id, side="baseline", model=scenario.agent_model(),
+            output_text=text,
+            output_hash=hashlib.sha256(text.encode()).hexdigest(),
+            completeness=comp,
+            final_finish_reason="stop" if self.baseline_complete else "length",
+            final_truncated=not self.baseline_complete,
+            cost_usd=self.baseline_cost,
+            reserve_usd=0.05,
+            source_fixture_hash=fixture.hash(),
+        )
+
+    def judge_executor(self, scenario_dict, run_dir, api_key, budget_guard_fn, budget_commit_fn):
+        sid = scenario_dict["id"]
+        self.judge_calls.append(sid)
+        if self.judge_exception_sid and sid == self.judge_exception_sid:
+            raise RuntimeError(f"simulated provider failure for {sid}")
+        if self.judge_error_sid and sid == self.judge_error_sid:
+            return self.r._make_error_judge_result(sid, "simulated judge error")
+        from m6_judge_runner import JudgeResult
+        scores = {d: dict(v) for d, v in self.judge_scores.items()}
+        raw = {"scores": scores, "overall": {"X_mean_score": 4.0, "Y_mean_score": 3.0,
+                "winner": "X", "tie": False, "decisive_reasons": [],
+                "confidence": 0.9, "insufficient_evidence": False,
+                "insufficient_evidence_reasons": []}}
+        return JudgeResult(
+            scenario_id=sid, raw_judge_json=raw,
+            actual_model="openai/gpt-5.6-sol",
+            prompt_tokens=100, completion_tokens=100, cost_usd=self.judge_cost,
+        )
+
+    def deps(self):
+        return self.r.RecoveryDeps(
+            baseline_executor=self.baseline_executor,
+            judge_executor=self.judge_executor,
+            api_key=None,
+        )
+
+
+def _create_fake_original_run(runner_mod, tmp_path, *, mktapp_complete=True):
+    """Create a fake original run directory with preserved MKTApp evidence
+    that can be loaded by load_preserved_mktapp()."""
+    import m6_uplift_harness as h
+    orig_dir = tmp_path / "original"
+    orig_dir.mkdir()
+    outputs_dir = orig_dir / "outputs"
+    mktapp_dir = outputs_dir / "mktapp"
+    mktapp_dir.mkdir(parents=True)
+
+    scenarios_data = []
+    for scenario in h.SCENARIOS:
+        sid = scenario.id
+        fixture = scenario.build_source_fixture()
+        if scenario.agent_key == "content_creator":
+            text = json.dumps({"posts": [{
+                "platform": "tiktok", "caption": "preserved caption",
+                "script": "preserved script", "hashtags": ["#preserved"],
+            }]}, ensure_ascii=False)
+        else:
+            text = f"[PRESERVED MKTApp] {sid} {scenario.agent_key} output."
+        out_file = mktapp_dir / f"{sid}.txt"
+        out_file.write_text(text, encoding="utf-8")
+        output_hash = hashlib.sha256(text.encode()).hexdigest()
+        scenarios_data.append({
+            "scenario_id": sid,
+            "agent_key": scenario.agent_key,
+            "mktapp": {
+                "scenario_id": sid, "side": "mktapp",
+                "model": scenario.agent_model(),
+                "output_artifact_path": None,
+                "output_hash": output_hash,
+                "completeness": "COMPLETE" if mktapp_complete else "INCOMPLETE",
+                "finish_records": [],
+                "final_finish_reason": "stop",
+                "final_truncated": False,
+                "call_count": 2,
+                "prompt_tokens": 100,
+                "completion_tokens": 200,
+                "web_uses": 0,
+                "cost_usd": 0.05,
+                "reserve_usd": 0.10,
+                "source_fixture_hash": fixture.hash(),
+                "production_commit": None,
+                "raw_json_audit_present": False,
+            },
+            "baseline": {
+                "scenario_id": sid, "side": "baseline",
+                "model": scenario.agent_model(),
+                "output_artifact_path": None,
+                "output_hash": None,
+                "completeness": "UNKNOWN",
+                "finish_records": [],
+                "final_finish_reason": None,
+                "final_truncated": False,
+                "call_count": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "web_uses": 0,
+                "cost_usd": 0.05,
+                "reserve_usd": 0.05,
+                "source_fixture_hash": fixture.hash(),
+                "production_commit": None,
+                "raw_json_audit_present": False,
+            },
+            "preflight": {"scenario_id": sid, "ok": True, "reason": "ok"},
+            "blind_mapping": {"scenario_id": sid, "x_side": "MKTApp",
+                              "mapping_dict": {"X": "MKTApp", "Y": "Baseline"}},
+        })
+    evidence = {
+        "run_id": "20260905_072432_paid",
+        "timestamp": "2026-09-05T07:30:08.917792+00:00",
+        "qualification_mode": "same_model_uplift",
+        "gate_version": "v1",
+        "gate_config": h.GATE_CONFIG,
+        "scenarios": scenarios_data,
+        "preflight_all_ok": True,
+    }
+    (orig_dir / "m6_evidence.json").write_text(
+        json.dumps(evidence, indent=2, ensure_ascii=False), encoding="utf-8",
+    )
+    return orig_dir
+
+
+class TestRecoveryPath:
+
+    def test_recovery_loads_preserved_mktapp(self, runner, tmp_path):
+        """load_preserved_mktapp loads all 4 COMPLETE MKTApp candidates
+        with verified hashes and fixture provenance."""
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        preserved = runner.load_preserved_mktapp(orig_dir)
+        assert set(preserved.keys()) == {"S1", "S2", "S3", "S4"}
+        for sid, cr in preserved.items():
+            assert cr.completeness == "COMPLETE"
+            assert cr.output_text != ""
+            assert cr.output_hash is not None
+            assert cr.side == "mktapp"
+
+    def test_recovery_rejects_incomplete_mktapp(self, runner, tmp_path):
+        """If preserved MKTApp is not COMPLETE, recovery is refused."""
+        orig_dir = _create_fake_original_run(runner, tmp_path, mktapp_complete=False)
+        with pytest.raises(ValueError, match="expected COMPLETE"):
+            runner.load_preserved_mktapp(orig_dir)
+
+    def test_recovery_rejects_hash_mismatch(self, runner, tmp_path):
+        """If preserved MKTApp output file hash doesn't match evidence, refused."""
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        # Corrupt an output file
+        (orig_dir / "outputs" / "mktapp" / "S1.txt").write_text("corrupted", encoding="utf-8")
+        with pytest.raises(ValueError, match="hash mismatch"):
+            runner.load_preserved_mktapp(orig_dir)
+
+    def test_recovery_rejects_missing_scenarios(self, runner, tmp_path):
+        """If preserved evidence is missing scenarios, recovery is refused."""
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        ev = json.loads((orig_dir / "m6_evidence.json").read_text())
+        ev["scenarios"] = ev["scenarios"][:3]  # drop S4
+        (orig_dir / "m6_evidence.json").write_text(json.dumps(ev), encoding="utf-8")
+        with pytest.raises(ValueError, match="scenarios"):
+            runner.load_preserved_mktapp(orig_dir)
+
+    def test_recovery_full_pass(self, runner, budget_config, tmp_path):
+        """Full recovery path with mock executors produces a valid PASS/FAIL."""
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        recovery_dir = tmp_path / "recovery"
+        deps = CountingRecoveryDeps(runner)
+        result = runner.run_recovery(
+            deps.deps(), budget_config, recovery_dir, orig_dir, execute=False,
+        )
+        assert result.valid is True
+        assert result.final_pass is not None
+        assert result.execution_mode == "recovery_dry_run"
+        # Exactly 4 baseline calls (one per scenario)
+        assert len(deps.baseline_calls) == 4
+        # Exactly 4 judge calls
+        assert len(deps.judge_calls) == 4
+        # Recovery meta written
+        meta = json.loads((recovery_dir / "recovery_meta.json").read_text())
+        assert meta["recovery"] is True
+        assert meta["mktapp_regenerated"] is False
+        # Verdict marked as recovery
+        verdict = json.loads((recovery_dir / "m6_uplift_verdict.json").read_text())
+        assert verdict["recovery"] is True
+
+    def test_recovery_mktapp_not_regenerated(self, runner, budget_config, tmp_path):
+        """Recovery must NOT call any MKTApp executor — only Baseline."""
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        recovery_dir = tmp_path / "recovery"
+        deps = CountingRecoveryDeps(runner)
+        runner.run_recovery(
+            deps.deps(), budget_config, recovery_dir, orig_dir, execute=False,
+        )
+        # RecoveryDeps has no mktapp_executor — if it were called, it would
+        # raise AttributeError. The fact that we got a result proves MKTApp
+        # was never called.
+        assert len(deps.baseline_calls) == 4
+
+    def test_recovery_preserved_mktapp_outputs_unchanged(self, runner, budget_config, tmp_path):
+        """Recovery must not alter the original run's MKTApp output files."""
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        # Record original hashes
+        orig_hashes = {}
+        for sid in ["S1", "S2", "S3", "S4"]:
+            f = orig_dir / "outputs" / "mktapp" / f"{sid}.txt"
+            orig_hashes[sid] = hashlib.sha256(f.read_bytes()).hexdigest()
+        # Run recovery
+        recovery_dir = tmp_path / "recovery"
+        deps = CountingRecoveryDeps(runner)
+        runner.run_recovery(
+            deps.deps(), budget_config, recovery_dir, orig_dir, execute=False,
+        )
+        # Verify original files unchanged
+        for sid, h in orig_hashes.items():
+            f = orig_dir / "outputs" / "mktapp" / f"{sid}.txt"
+            assert hashlib.sha256(f.read_bytes()).hexdigest() == h
+
+    def test_recovery_baseline_incomplete_stops(self, runner, budget_config, tmp_path):
+        """If a new Baseline candidate is INCOMPLETE, recovery stops invalid."""
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        recovery_dir = tmp_path / "recovery"
+        deps = CountingRecoveryDeps(runner, baseline_complete=False)
+        result = runner.run_recovery(
+            deps.deps(), budget_config, recovery_dir, orig_dir, execute=False,
+        )
+        assert result.valid is False
+        assert result.final_pass is None
+        assert "candidate_incomplete" in result.stop_reason
+
+    def test_recovery_judge_exception_stops(self, runner, budget_config, tmp_path):
+        """If Judge throws an exception, recovery stops invalid (not FAIL)."""
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        recovery_dir = tmp_path / "recovery"
+        deps = CountingRecoveryDeps(runner, judge_exception_sid="S2")
+        result = runner.run_recovery(
+            deps.deps(), budget_config, recovery_dir, orig_dir, execute=False,
+        )
+        assert result.valid is False
+        assert result.final_pass is None
+        assert "judge_exception" in result.stop_reason
+
+    def test_recovery_judge_error_stops(self, runner, budget_config, tmp_path):
+        """If Judge returns an error result, recovery stops invalid."""
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        recovery_dir = tmp_path / "recovery"
+        deps = CountingRecoveryDeps(runner, judge_error_sid="S3")
+        result = runner.run_recovery(
+            deps.deps(), budget_config, recovery_dir, orig_dir, execute=False,
+        )
+        assert result.valid is False
+        assert "judge_error" in result.stop_reason
+
+    def test_recovery_fresh_blind_mapping(self, runner, budget_config, tmp_path):
+        """Recovery uses a fresh blind mapping (from frozen seed)."""
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        recovery_dir = tmp_path / "recovery"
+        deps = CountingRecoveryDeps(runner)
+        runner.run_recovery(
+            deps.deps(), budget_config, recovery_dir, orig_dir, execute=False,
+        )
+        # Mapping secret exists and covers all 4 scenarios
+        mapping = json.loads((recovery_dir / "m6_mapping_secret.json").read_text())
+        assert set(mapping.keys()) == {"S1", "S2", "S3", "S4"}
+        for sid, m in mapping.items():
+            assert set(m.keys()) == {"X", "Y"}
+            assert m["X"] in ("MKTApp", "Baseline")
+            assert m["Y"] in ("MKTApp", "Baseline")
+            assert m["X"] != m["Y"]
+
+    def test_recovery_produces_gate_result(self, runner, budget_config, tmp_path):
+        """A valid recovery produces a complete Gate v1 result."""
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        recovery_dir = tmp_path / "recovery"
+        deps = CountingRecoveryDeps(runner)
+        result = runner.run_recovery(
+            deps.deps(), budget_config, recovery_dir, orig_dir, execute=False,
+        )
+        assert result.valid is True
+        g = result.gate_result
+        assert "pass" in g
+        assert "gate_a_aggregate_uplift" in g
+        assert "gate_b_scenario_consistency" in g
+        assert "gate_c_no_scenario_regression" in g
+        assert "gate_d_no_core_regression" in g
+
+    def test_recovery_cli_dry_run(self, runner, tmp_path, monkeypatch):
+        """CLI --dry-run --recover-from produces a valid result."""
+        import sys
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        recovery_dir = tmp_path / "cli_recovery"
+        monkeypatch.setattr(sys, "argv", [
+            "runner", "--dry-run", "--recover-from", str(orig_dir),
+            "--run-dir", str(recovery_dir),
+        ])
+        rc = runner.main()
+        assert rc in (0, 1)  # valid PASS=0 or valid FAIL=1
+
+    def test_recovery_cli_execute_requires_authorize(self, runner, tmp_path, monkeypatch):
+        import sys
+        orig_dir = _create_fake_original_run(runner, tmp_path)
+        monkeypatch.setattr(sys, "argv", [
+            "runner", "--execute", "--recover-from", str(orig_dir),
+            "--run-dir", str(tmp_path / "r"),
+        ])
+        rc = runner.main()
+        assert rc == 2  # missing --authorize

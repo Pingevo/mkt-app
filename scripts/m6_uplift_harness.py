@@ -1084,6 +1084,11 @@ class CandidateResult:
     completion_tokens: int = 0
     web_uses: int = 0
     cost_usd: float = 0.0
+    # Budget accounting: distinguish authorized reserve from actual committed spend.
+    # ``cost_usd`` is the ACTUAL committed spend (from provider-reported usage).
+    # ``reserve_usd`` is the conservative pre-call reserve that was authorized.
+    # Failure evidence must NEVER report reserve as actual spend.
+    reserve_usd: float = 0.0
     # Provenance
     source_fixture_hash: str | None = None
     production_commit: str | None = None
@@ -1106,6 +1111,7 @@ class CandidateResult:
             "completion_tokens": self.completion_tokens,
             "web_uses": self.web_uses,
             "cost_usd": self.cost_usd,
+            "reserve_usd": self.reserve_usd,
             "source_fixture_hash": self.source_fixture_hash,
             "production_commit": self.production_commit,
             "raw_json_audit_present": self.raw_json_audit is not None,

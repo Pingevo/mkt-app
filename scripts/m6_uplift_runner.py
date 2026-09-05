@@ -518,6 +518,386 @@ def run_qualification(
 
 
 # ---------------------------------------------------------------------------
+# Recovery path — consume preserved MKTApp evidence + generate only Baseline
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RecoveryDeps:
+    """Injectable dependencies for recovery execution.
+
+    Only ``baseline_executor`` and ``judge_executor`` are used — MKTApp
+    candidates are loaded from preserved evidence, never regenerated.
+    """
+    baseline_executor: BaselineExecutor
+    judge_executor: JudgeExecutor
+    api_key: str | None = None
+
+
+def load_preserved_mktapp(
+    original_run_dir: Path,
+) -> dict[str, CandidateResult]:
+    """Load preserved MKTApp S1-S4 evidence from a prior failed run.
+
+    Validates:
+      - all 4 scenarios present
+      - all 4 COMPLETE
+      - output files exist and hashes match evidence
+      - source fixture hashes match frozen canonical fixtures
+
+    Returns a dict {sid: CandidateResult} for the preserved MKTApp candidates.
+    Raises ValueError if any validation fails.
+    """
+    evidence_path = original_run_dir / "m6_evidence.json"
+    if not evidence_path.exists():
+        raise ValueError(f"No m6_evidence.json in {original_run_dir}")
+
+    ev = json.loads(evidence_path.read_text(encoding="utf-8"))
+    expected_sids = {s.id for s in SCENARIOS}
+    found_sids = {s["scenario_id"] for s in ev.get("scenarios", [])}
+    if found_sids != expected_sids:
+        raise ValueError(
+            f"Preserved evidence scenarios {found_sids} != expected {expected_sids}"
+        )
+
+    preserved: dict[str, CandidateResult] = {}
+    for s in ev["scenarios"]:
+        sid = s["scenario_id"]
+        m = s["mktapp"]
+
+        # Completeness check
+        if m["completeness"] != "COMPLETE":
+            raise ValueError(
+                f"Preserved MKTApp {sid} completeness={m['completeness']}, "
+                f"expected COMPLETE — cannot recover from incomplete MKTApp"
+            )
+
+        # Output file exists and hash matches
+        out_file = original_run_dir / "outputs" / "mktapp" / f"{sid}.txt"
+        if not out_file.exists():
+            raise ValueError(f"Preserved MKTApp {sid} output file missing: {out_file}")
+        actual_hash = hashlib.sha256(out_file.read_bytes()).hexdigest()
+        if actual_hash != m["output_hash"]:
+            raise ValueError(
+                f"Preserved MKTApp {sid} hash mismatch: "
+                f"file={actual_hash[:16]}... evidence={m['output_hash'][:16]}..."
+            )
+
+        # Source fixture hash matches frozen canonical
+        scenario = next(sc for sc in SCENARIOS if sc.id == sid)
+        canonical_fixture_hash = scenario.build_source_fixture().hash()
+        if m["source_fixture_hash"] != canonical_fixture_hash:
+            raise ValueError(
+                f"Preserved MKTApp {sid} fixture hash mismatch — "
+                f"canonical fixtures may have changed since the original run"
+            )
+
+        text = out_file.read_text(encoding="utf-8")
+        preserved[sid] = CandidateResult(
+            scenario_id=sid, side="mktapp", model=m["model"],
+            output_text=text,
+            output_hash=m["output_hash"],
+            completeness=m["completeness"],
+            final_finish_reason=m["final_finish_reason"],
+            final_truncated=m["final_truncated"],
+            call_count=m["call_count"],
+            prompt_tokens=m.get("prompt_tokens", 0),
+            completion_tokens=m.get("completion_tokens", 0),
+            cost_usd=m["cost_usd"],
+            reserve_usd=m.get("reserve_usd", 0.0),
+            source_fixture_hash=m["source_fixture_hash"],
+        )
+
+    return preserved
+
+
+def run_recovery(
+    deps: RecoveryDeps,
+    budget_config: BudgetConfig,
+    run_dir: Path,
+    original_run_dir: Path,
+    *,
+    execute: bool = False,
+) -> QualificationResult:
+    """Run a recovery qualification using preserved MKTApp evidence.
+
+    This function:
+      1. Loads preserved MKTApp S1-S4 from original_run_dir (no paid MKTApp calls)
+      2. Validates provenance (hashes, completeness, fixture hashes)
+      3. Generates ONLY new Baseline S1-S4 (one call each)
+      4. Creates a FRESH blind mapping for the recovered complete set
+      5. Proceeds through Judge → uplift → Gate v1 → PASS/FAIL
+      6. Marks evidence explicitly as recovery from harness failure
+
+    MKTApp candidates are NEVER regenerated.  Baseline candidates execute
+    exactly once each.  No rerun based on quality or score.
+    """
+    execution_mode = "recovery_paid" if execute else "recovery_dry_run"
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + (
+        "_recovery" if execute else "_recovery_dryrun"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # 0. Record recovery provenance
+    recovery_meta = {
+        "recovery": True,
+        "original_run_dir": str(original_run_dir),
+        "original_run_id": "20260905_072432_paid",
+        "recovery_reason": "harness_failure_baseline_value_bug",
+        "mktapp_regenerated": False,
+        "baseline_regenerated": True,
+    }
+    (run_dir / "recovery_meta.json").write_text(
+        json.dumps(recovery_meta, indent=2, ensure_ascii=False), encoding="utf-8",
+    )
+
+    # 1. Generation preflight (frozen)
+    preflight_ok, preflight_results = uplift_preflight_all()
+    if not preflight_ok:
+        reasons = [f"{r.scenario_id}: {r.reason}" for r in preflight_results if not r.ok]
+        return _stop_invalid(run_id, run_dir, execution_mode,
+                             stop_reason="generation_preflight_failed: " + "; ".join(reasons),
+                             budget_summary=_budget_summary(None))
+
+    # 2. Load preserved MKTApp evidence (no paid calls)
+    try:
+        preserved_mktapp = load_preserved_mktapp(original_run_dir)
+    except ValueError as e:
+        return _stop_invalid(run_id, run_dir, execution_mode,
+                             stop_reason=f"preserved_evidence_invalid: {e}",
+                             budget_summary=_budget_summary(None))
+
+    # 3. Budget — explicit config, no hidden default
+    budget = build_budget_caps(
+        total_cap=budget_config.total_cap,
+        generation_cap=budget_config.generation_cap,
+        judge_cap=budget_config.judge_cap,
+    )
+
+    # 4. FRESH blind mapping (different seed from original if desired,
+    #    but frozen seed from config for determinism)
+    blind_mappings = create_all_blind_mappings(seed=budget_config.blind_mapping_seed)
+
+    # 5. Generate ONLY new Baseline candidates + assemble comparisons
+    comparisons: list[ScenarioComparison] = []
+    invalid_scenarios: list[str] = []
+    candidate_outputs: dict[str, dict[str, str]] = {}
+    raw_json_audits: dict[str, str | None] = {}
+
+    for scenario in SCENARIOS:
+        sid = scenario.id
+        fixture = scenario.build_source_fixture()
+
+        # --- Candidate A: NEW baseline (one paid call each) ---
+        baseline_result = deps.baseline_executor(scenario, fixture, budget)
+
+        # --- Candidate B: PRESERVED MKTApp (no paid call) ---
+        mktapp_result = preserved_mktapp[sid]
+
+        # --- Completeness (frozen rules) ---
+        if baseline_result.completeness != "COMPLETE" or mktapp_result.completeness != "COMPLETE":
+            invalid_scenarios.append(sid)
+
+        # --- S4 rendering (same logic as run_qualification) ---
+        mktapp_judge_text = mktapp_result.output_text
+        raw_json_audit: str | None = None
+        if scenario.agent_key == "content_creator" and mktapp_result.completeness == "COMPLETE":
+            output_stripped = mktapp_result.output_text.strip()
+            if output_stripped.startswith("{") and '"posts"' in output_stripped:
+                rendered, err = render_s4_for_judge(mktapp_result.output_text)
+                if err is not None:
+                    invalid_scenarios.append(sid)
+                    mktapp_judge_text = ""
+                else:
+                    mktapp_judge_text = rendered
+                    raw_json_audit = mktapp_result.output_text
+            else:
+                raw_json_audit = None
+        raw_json_audits[sid] = raw_json_audit
+
+        candidate_outputs[sid] = {
+            "mktapp": mktapp_judge_text,
+            "baseline": baseline_result.output_text,
+        }
+
+        mktapp_result.raw_json_audit = raw_json_audit
+        if mktapp_judge_text:
+            mktapp_result.output_hash = hashlib.sha256(
+                mktapp_judge_text.encode("utf-8"),
+            ).hexdigest()
+
+        pf = next((r for r in preflight_results if r.scenario_id == sid), preflight_results[0])
+
+        comparisons.append(ScenarioComparison(
+            scenario_id=sid,
+            agent_key=scenario.agent_key,
+            baseline=baseline_result,
+            mktapp=mktapp_result,
+            preflight=pf,
+            blind_mapping=blind_mappings[sid],
+        ))
+
+    # 6. Write candidate outputs + evidence
+    _write_candidate_outputs(run_dir, comparisons, candidate_outputs, blind_mappings)
+    write_evidence(run_dir, comparisons, run_id, blind_mappings)
+
+    # 7. If any scenario invalid, STOP
+    if invalid_scenarios:
+        return _stop_invalid(
+            run_id, run_dir, execution_mode,
+            stop_reason=f"candidate_incomplete: {invalid_scenarios}",
+            budget_summary=_budget_summary(budget),
+            invalid_scenarios=invalid_scenarios,
+            scenario_results=[c.to_evidence_dict() for c in comparisons],
+        )
+
+    # 8. Judge preflight
+    jp_ok, jp_reason = _uplift_judge_preflight(run_dir, comparisons)
+    if not jp_ok:
+        return _stop_invalid(run_id, run_dir, execution_mode,
+                             stop_reason=f"judge_preflight_failed: {jp_reason}",
+                             budget_summary=_budget_summary(budget),
+                             scenario_results=[c.to_evidence_dict() for c in comparisons])
+
+    # 9. Judge execution (same as run_qualification)
+    judge_results: list[Any] = []
+    judge_completed = True
+    judge_stopped_reason: str | None = None
+    for scenario in SCENARIOS:
+        sid = scenario.id
+        judge_scenario_dict = _get_judge_scenario_dict(sid)
+        reserve = budget_config.judge_per_call_reserve
+
+        def _guard(_sid=sid, _reserve=reserve) -> None:
+            budget.hierarchy.check_call(
+                _sid, _reserve, stage="judge", label=f"{_sid}/judge",
+            )
+
+        try:
+            jr = deps.judge_executor(
+                judge_scenario_dict, run_dir, deps.api_key,
+                _guard, None,
+            )
+        except Exception as e:
+            judge_results.append(_make_error_judge_result(sid, str(e)))
+            judge_completed = False
+            judge_stopped_reason = f"judge_exception_{sid}: {e}"
+            break
+
+        actual_cost = getattr(jr, "cost_usd", None)
+        if actual_cost is not None:
+            budget.hierarchy.commit_spend(sid, float(actual_cost), stage="judge")
+
+        judge_results.append(jr)
+        if getattr(jr, "error", None) or getattr(jr, "stopped", False):
+            judge_completed = False
+            judge_stopped_reason = f"judge_error_{sid}: {getattr(jr, 'error', '?')}"
+            break
+
+        if scenario is not SCENARIOS[-1]:
+            try:
+                next_sid = SCENARIOS[SCENARIOS.index(scenario) + 1].id
+                budget.hierarchy.check_call(
+                    next_sid, reserve, stage="judge",
+                    label=f"{next_sid}/judge/precheck",
+                )
+            except Exception:
+                judge_completed = False
+                judge_stopped_reason = (
+                    f"judge_budget_exhausted_after_{sid}: "
+                    f"cannot cover next call reserve"
+                )
+                break
+
+    if not judge_completed or len(judge_results) < len(SCENARIOS):
+        _write_judge_raw(run_dir, judge_results, incomplete=True)
+        return _stop_invalid(
+            run_id, run_dir, execution_mode,
+            stop_reason=judge_stopped_reason or "judge_incomplete",
+            budget_summary=_budget_summary(budget),
+            scenario_results=[c.to_evidence_dict() for c in comparisons],
+            judge_completed=False,
+        )
+
+    # 10. Score extraction + mapping reveal (same as run_qualification)
+    scenario_uplifts: list[dict[str, float]] = []
+    scenario_overall_uplifts: list[float] = []
+    scenario_score_records: list[dict[str, Any]] = []
+
+    for i, scenario in enumerate(SCENARIOS):
+        sid = scenario.id
+        jr = judge_results[i]
+        mapping = blind_mappings[sid].mapping_dict
+        scores = _extract_scores(jr)
+        mktapp_scores: dict[str, float] = {}
+        baseline_scores: dict[str, float] = {}
+        for dim, ds in scores.items():
+            x_score = ds.get("X")
+            y_score = ds.get("Y")
+            if x_score is None or y_score is None:
+                continue
+            if mapping["X"] == "MKTApp":
+                mktapp_scores[dim] = float(x_score)
+                baseline_scores[dim] = float(y_score)
+            else:
+                mktapp_scores[dim] = float(y_score)
+                baseline_scores[dim] = float(x_score)
+
+        uplift = calculate_uplift(mktapp_scores, baseline_scores)
+        overall = calculate_overall_uplift(uplift)
+        scenario_uplifts.append(uplift)
+        scenario_overall_uplifts.append(overall)
+        scenario_score_records.append({
+            "scenario_id": sid,
+            "mktapp_scores": mktapp_scores,
+            "baseline_scores": baseline_scores,
+            "uplift": uplift,
+            "overall_uplift": overall,
+            "judge_cost_usd": getattr(jr, "cost_usd", 0.0),
+        })
+
+        comparisons[i].judge_scores = {
+            "mktapp": mktapp_scores, "baseline": baseline_scores,
+        }
+        comparisons[i].uplift = uplift
+        comparisons[i].overall_uplift = overall
+
+    # 11. Gate v1 evaluation (frozen — LOCKED thresholds)
+    gate_result = evaluate_uplift_gate(scenario_uplifts, scenario_overall_uplifts)
+    final_pass = bool(gate_result["pass"])
+
+    # 12. Persist final evidence + judge artifacts + recovery marker
+    write_evidence(run_dir, comparisons, run_id, blind_mappings)
+    _write_judge_raw(run_dir, judge_results, incomplete=False)
+    _write_uplift_verdict(run_dir, run_id, execution_mode, gate_result,
+                          scenario_score_records, budget, comparisons)
+
+    # Mark verdict as recovery
+    verdict_path = run_dir / "m6_uplift_verdict.json"
+    if verdict_path.exists():
+        verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+        verdict["recovery"] = True
+        verdict["original_run_dir"] = str(original_run_dir)
+        verdict["recovery_reason"] = "harness_failure_baseline_value_bug"
+        verdict_path.write_text(
+            json.dumps(verdict, indent=2, ensure_ascii=False), encoding="utf-8",
+        )
+
+    return QualificationResult(
+        run_id=run_id,
+        run_dir=run_dir,
+        valid=True,
+        final_pass=final_pass,
+        gate_result=gate_result,
+        scenario_results=scenario_score_records,
+        invalid_scenarios=[],
+        stop_reason=None,
+        budget_summary=_budget_summary(budget),
+        judge_completed=True,
+        execution_mode=execution_mode,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Helpers — output layout, preflight, score extraction
 # ---------------------------------------------------------------------------
 
@@ -813,8 +1193,14 @@ def real_baseline_executor(
         )
         finish_reason = guarded.last_finish_reason
         truncated = guarded.last_truncated
-        completeness = evaluate_single_call_completeness(finish_reason, truncated).value
+        # BUG FIX: evaluate_single_call_completeness already returns a string
+        # (the harness helper calls .value internally).  The previous code
+        # called .value on a string, raising AttributeError AFTER the LLM
+        # call succeeded, silently discarding valid output as UNKNOWN.
+        completeness = evaluate_single_call_completeness(finish_reason, truncated)
         call_log = guarded.call_log
+        # Actual cost = sum of committed spend from call_log (provider-reported).
+        # Reserve = the pre-call authorized reserve (conservative, not actual).
         cost = sum(c.get("committed", 0) for c in call_log)
         return CandidateResult(
             scenario_id=scenario.id, side="baseline", model=model,
@@ -824,18 +1210,22 @@ def real_baseline_executor(
             final_finish_reason=finish_reason, final_truncated=truncated,
             call_count=len(call_log),
             cost_usd=cost,
+            reserve_usd=reserve,
             source_fixture_hash=fixture.hash(),
         )
     except Exception as e:
         # Provider/infra failure — NOT a product-quality FAIL.  Mark UNKNOWN.
+        # Preserve call_log data so failure evidence shows actual committed
+        # spend (not the reserve) and the actual call_count.
         from src.budget_hierarchy import BudgetExceededError
-        completeness = "UNKNOWN"
-        if isinstance(e, BudgetExceededError):
-            completeness = "UNKNOWN"
+        call_log = guarded.call_log
+        actual_committed = sum(c.get("committed", 0) for c in call_log)
         return CandidateResult(
             scenario_id=scenario.id, side="baseline", model=model,
-            output_text="", completeness=completeness,
-            cost_usd=sum(c.get("committed", 0) for c in guarded.call_log),
+            output_text="", completeness="UNKNOWN",
+            call_count=len(call_log),
+            cost_usd=actual_committed,
+            reserve_usd=reserve,
             source_fixture_hash=fixture.hash(),
         )
     finally:
@@ -862,6 +1252,7 @@ def real_mktapp_executor(
         final_finish_reason=finish_reason,
         call_count=len(call_log),
         cost_usd=cost,
+        reserve_usd=scenario.mktapp_reserve,
         source_fixture_hash=fixture.hash(),
     )
 
@@ -924,11 +1315,23 @@ def main() -> int:
              "Required with --execute.  One authorization = one attempt; "
              "no automatic rerun.",
     )
+    parser.add_argument(
+        "--recover-from", type=Path, default=None,
+        help="Recovery mode: load preserved MKTApp S1-S4 evidence from this "
+             "prior run directory and generate ONLY new Baseline candidates. "
+             "MKTApp candidates are NEVER regenerated.  Requires --execute "
+             "and --authorize for paid recovery (Baseline + Judge calls only).",
+    )
     args = parser.parse_args()
 
     if args.execute and not args.authorize:
         print("ERROR: --execute requires --authorize (explicit Product Owner "
               "authorization for one paid attempt).", file=sys.stderr)
+        return 2
+
+    if args.recover_from and not args.execute and not args.dry_run:
+        print("ERROR: --recover-from requires --execute (paid recovery) or "
+              "--dry-run (offline mock recovery).", file=sys.stderr)
         return 2
 
     if not args.execute and not args.dry_run:
@@ -939,7 +1342,8 @@ def main() -> int:
     # _uplift_judge_preflight (which rejects partial judge artifacts).
     if args.run_dir is None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        args.run_dir = PROJECT_ROOT / "data" / "m6_uplift" / "runs" / ts
+        suffix = "_recovery" if args.recover_from else ""
+        args.run_dir = PROJECT_ROOT / "data" / "m6_uplift" / "runs" / (ts + suffix)
 
     # Load explicit budget config
     try:
@@ -956,13 +1360,39 @@ def main() -> int:
         if not api_key:
             print("ERROR: OPENROUTER_API_KEY not set for paid execution.", file=sys.stderr)
             return 2
+
+    if args.recover_from:
+        # Recovery mode: preserved MKTApp + new Baseline only
+        if args.execute:
+            recovery_deps = RecoveryDeps(
+                baseline_executor=real_baseline_executor,
+                judge_executor=real_judge_executor,
+                api_key=api_key,
+            )
+            print(f"=== PAID RECOVERY (preserved MKTApp + new Baseline only) ===",
+                  flush=True)
+            print(f"    Original run: {args.recover_from}", flush=True)
+        else:
+            recovery_deps = RecoveryDeps(
+                baseline_executor=_mock_baseline_executor,
+                judge_executor=_mock_judge_executor,
+                api_key=None,
+            )
+            print(f"=== DRY RUN RECOVERY (mock Baseline + preserved MKTApp) ===",
+                  flush=True)
+            print(f"    Original run: {args.recover_from}", flush=True)
+        result = run_recovery(
+            recovery_deps, budget_config, args.run_dir,
+            args.recover_from, execute=args.execute,
+        )
+    elif args.execute:
         deps = make_real_deps(api_key)
         print("=== PAID EXECUTION (one authorized attempt) ===", flush=True)
+        result = run_qualification(deps, budget_config, args.run_dir, execute=args.execute)
     else:
         deps = _make_dry_run_deps()
         print("=== DRY RUN (zero paid calls) ===", flush=True)
-
-    result = run_qualification(deps, budget_config, args.run_dir, execute=args.execute)
+        result = run_qualification(deps, budget_config, args.run_dir, execute=args.execute)
 
     # Print final result
     print(f"Run ID: {result.run_id}", flush=True)
