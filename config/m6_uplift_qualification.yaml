@@ -1,0 +1,29 @@
+# M6 Same-Model Uplift Qualification — execution budget configuration.
+#
+# This is the EXPLICIT, Product-Owner-approved budget configuration for the
+# frozen same-model uplift qualification.  The runner reads these values; it
+# never invents a hidden default authorization.
+#
+# Values mirror M6_QUALIFICATION_PLAN.md §"Same-model paid budget proposal":
+#   generation = baseline cap ($0.46) + mktapp cap ($0.75) = $1.21
+#   judge      = $0.20
+#   total      = $1.41
+#
+# Per-candidate inner caps are defined on the frozen SCENARIOS in
+# scripts/m6_uplift_harness.py (baseline_reserve / mktapp_reserve) and are
+# NOT duplicated here.
+#
+# No paid call is authorized by this file alone.  The runner requires an
+# explicit --authorize flag at the CLI to enter paid execution mode.
+m6_uplift_qualification:
+  total_cap: 1.41
+  generation_cap: 1.21
+  judge_cap: 0.20
+  # Conservative per-judge-call reserve (4 scenarios).  The judge stage cap
+  # ($0.20) is the hard limit; this reserve is the pre-call conservative set-aside.
+  judge_per_call_reserve: 0.05
+  # Fixed seed for deterministic blind X/Y mapping (reproducibility).
+  blind_mapping_seed: 20260905
+  # Conservative per-generation-call reserve used as the pre-call set-aside
+  # when the candidate's own reserve is not otherwise specified.
+  generation_per_call_reserve: 0.05

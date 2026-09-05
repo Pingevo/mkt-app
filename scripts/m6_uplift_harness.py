@@ -1627,6 +1627,19 @@ class BudgetGuardedLLMClient:
     def call_log(self) -> list[dict[str, Any]]:
         return list(self._call_log)
 
+    def close(self) -> None:
+        """Forward close() to the wrapped LLM client.
+
+        ``qual_runner.run_case`` calls ``llm.close()`` in its finally block.
+        Without this forwarder, the guarded wrapper raises ``AttributeError``
+        which prevents the real MKTApp paid path from returning a result.
+        This is a compatibility forwarder — it does NOT change any candidate
+        semantics, gate, scoring, or completeness behavior.
+        """
+        close_fn = getattr(self._llm, "close", None)
+        if callable(close_fn):
+            close_fn()
+
 
 class BaselineToolLoopExecutor:
     """Direct-baseline tool-loop for S2/S3 (web search scenarios).
