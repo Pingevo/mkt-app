@@ -30,7 +30,21 @@ class _FakeLLM:
         # ถ้าเป็น segmentation call (มี response_format และ source บอก) → คืน seg JSON
         if "segment" in (source or ""):
             return json.dumps(self._seg, ensure_ascii=False)
-        # ถ้าเป็น summary/profile call → คืน text สั้น
+        # ถ้าเป็น product profile call → คืน JSON ที่ valid ตาม schema
+        if "positioning" in (source or "") or "profile" in (source or ""):
+            return json.dumps({
+                "audience": {
+                    "primary": {"age": "adult", "role": "user"},
+                    "end_user": {"age": "adult", "desc": "user"},
+                },
+                "competitors": [],
+                "differentiators": [],
+                "use_cases": [],
+                "price_tier": "mid",
+                "tone_adjustment": "",
+                "visual_override": {},
+            })
+        # ถ้าเป็น summary call → คืน text สั้น
         return self._summary
 
     def close(self):
@@ -235,6 +249,46 @@ def test_ingest_single_product_unchanged_behavior(_ingest, tmp_path, monkeypatch
     assert len(all_products) == 1
     assert all_products[0]["product_id"] == product_id
     assert all_products[0]["status"] == product_db.STATUS_READY
+
+
+def test_ingest_multi_product_propagates_extracted_media(_ingest, tmp_path, monkeypatch):
+    """เมื่อแยกสินค้าจาก catalog ต้องคัดลอกสื่อที่ extract ได้ และเก็บ full text_extracts
+    เพื่อให้ scope/image-path ทำงานได้หลังลบ temp folder."""
+    ingestion = _ingest
+    import src.product_db as product_db
+
+    temp_name = "catalog"
+    data_dir = tmp_path / "data" / temp_name
+    data_dir.mkdir(parents=True)
+    (data_dir / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
+
+    # จำลองรูปที่ extract ได้จาก document (generic — ไม่ผูกชื่อไฟล์/รุ่นสินค้า)
+    img_path = tmp_path / "cache" / temp_name / "extracted_images" / "img.png"
+    img_path.parent.mkdir(parents=True, exist_ok=True)
+    img_path.write_bytes(b"png")
+
+    def fake_extract_text(file_path, config, llm=None):
+        ingestion._extracted_images = [{"path": str(img_path), "page": 1, "y0": 0.0}]
+        return _make_catalog_text()
+
+    monkeypatch.setitem(ingestion.PREPROCESSORS, "text", fake_extract_text)
+    llm = _FakeLLM(_make_seg_response())
+    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
+
+    result = ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+
+    for name in result["split_products"]:
+        rec = product_db.load(name)
+        # รูปต้องถูกคัดลอกไปยัง cache ของสินค้าแยก และ path ต้องมีอยู่จริง
+        assert rec["image_descriptions"], f"{name} ไม่ได้รับรูปที่ extract ได้"
+        for img in rec["image_descriptions"]:
+            p = Path(img["path"])
+            assert p.exists(), f"{name}: image path {p} ไม่มีอยู่จริง"
+            assert str(tmp_path / "cache" / name) in str(p), f"{name}: image path ไม่อยู่ใน cache ของตัวเอง"
+        assert rec["metadata"]["has_images"] is True
+        assert rec["metadata"]["image_count"] == len(rec["image_descriptions"])
+        # text_extracts ต้องเป็น full document text เพื่อให้ re-ingest/image-path ทำงาน
+        assert rec["text_extracts"][0]["text"] == _make_catalog_text()
 
 
 def test_ingest_multi_product_no_llm_uses_single_flow(_ingest, tmp_path, monkeypatch):

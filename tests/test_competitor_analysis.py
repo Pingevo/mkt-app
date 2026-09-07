@@ -1055,20 +1055,31 @@ def test_stage_a_evidence_system_prompt_excludes_brand_reference():
     assert "positioning" not in EVIDENCE_SYSTEM_PROMPT.lower()
 
 
-def test_stage_a_build_system_prompt_bypasses_brand_in_evidence_mode():
-    """When evidence_mode is true, _build_system_prompt must return
-    EVIDENCE_SYSTEM_PROMPT — NOT the BaseAgent prompt with brand_reference.
-    Stage A evidence research is brand-independent."""
+def test_stage_a_build_system_prompt_excludes_brand_reference_in_evidence_mode():
+    """When evidence_mode is true, _build_system_prompt must compose the
+    EVIDENCE_SYSTEM_PROMPT core with shared BaseAgent additions (brand
+    priority, instructions, grounding policy) BUT must NOT inject
+    brand_reference.  Stage A evidence research is brand-objective;
+    brand interpretation happens in a separate BrandInterpretationPass
+    after evidence is finalized."""
     cfg = _competitor_config()
     cfg["evidence_mode"] = True
     cfg["use_brand_reference"] = True
     llm = FakeLLM()
     brand_ref = "### Target Audience\nparents age 30-45\n### Product Positioning\npremium"
     agent = CompetitorAnalysisAgent(cfg, llm, brand_reference=brand_ref)
+    agent._evidence_mode = True
     system = agent._build_system_prompt()
+    # Evidence core must be present
     assert "Competitor Analyst" in system
+    # Brand reference must NOT be present in Stage A
     assert "parents age 30-45" not in system
     assert "ข้อมูลแบรนด์อ้างอิง" not in system
+    # Shared grounding policy IS present
+    assert "ห้าม invent URL" in system
+    assert "ห้ามเดา factual claim" in system
+    # Shared grounding policy block is present
+    assert "นโยบายข้อมูลต้นทาง" in system or "Grounding Policy" in system
 
 
 def test_stage_a_research_schema_has_no_brand_fields():

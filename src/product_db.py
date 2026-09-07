@@ -542,13 +542,105 @@ def get_product_image_paths(product_id: str) -> list[str]:
 
     คืน list ของ absolute path ของรูปจริงที่ user upload ไว้
     ลำดับตามที่เก็บใน image_descriptions
+
+    สำหรับสินค้าที่มี scope (แยกจาก catalog): คัดเฉพาะรูปที่อยู่บนหน้าเดียวกัน
+    กับข้อความของสินค้านั้น (infer page จาก scope.source_refs line range)
+    แล้วเลือกรูปที่ y-position ใกล้ product row ที่สุด (product image มักอยู่
+    ในแถวเดียวกับ product)
     """
     record = load(product_id)
+    descs = record.get("image_descriptions", [])
     paths: list[str] = []
-    for desc in record.get("image_descriptions", []):
+    for desc in descs:
+        # Unassigned source media (e.g. catalog images without deterministic
+        # per-product association) must remain persisted with provenance but
+        # must NOT be returned as product-specific multimodal input or
+        # media-generation reference.  This preserves a future reconciliation
+        # path without polluting agent input.
+        if desc.get("unassigned_source_media"):
+            continue
         p = desc.get("path")
         if p and Path(p).exists():
             paths.append(p)
+
+    # For scoped products, filter images to the page containing the product's text
+    scope = record.get("scope")
+    if scope and paths:
+        import re as _re
+        source_refs = scope.get("source_refs", [])
+        if source_refs:
+            # Find which page contains the product's line range
+            full_text = ""
+            for te in record.get("text_extracts", []):
+                if te.get("file") == source_refs[0].get("file"):
+                    full_text = te.get("text", "")
+                    break
+            if full_text:
+                pages = full_text.split("\n\n")
+                cumulative = 0
+                target_page = None
+                for i, page_text in enumerate(pages):
+                    page_lines = page_text.split("\n")
+                    start = cumulative + 1
+                    end = cumulative + len(page_lines)
+                    cumulative = end + 1  # +1 for \n\n separator
+                    for ref in source_refs:
+                        if start <= ref.get("line_start", 0) <= end:
+                            target_page = i + 1
+                            break
+                    if target_page:
+                        break
+                if target_page:
+                    # Get all images on that page
+                    page_images = []
+                    for desc in descs:
+                        if desc.get("unassigned_source_media"):
+                            continue
+                        p = desc.get("path", "")
+                        if not p or not Path(p).exists():
+                            continue
+                        if desc.get("page") == target_page:
+                            page_images.append({
+                                "path": p,
+                                "y0": desc.get("y0", 0),
+                                "width": desc.get("width", 0),
+                                "height": desc.get("height", 0),
+                            })
+                    if page_images:
+                        # Estimate product's y-position on page from line position
+                        # product line_start relative to page's total lines
+                        product_line = source_refs[0].get("line_start", 0)
+                        page_start_line = None
+                        page_total_lines = 0
+                        cumulative = 0
+                        for i, page_text in enumerate(pages):
+                            page_lines = page_text.split("\n")
+                            start = cumulative + 1
+                            end = cumulative + len(page_lines)
+                            cumulative = end + 1
+                            if i + 1 == target_page:
+                                page_start_line = start
+                                page_total_lines = len(page_lines)
+                                break
+                        if page_start_line and page_total_lines > 0:
+                            # Estimate product's y position (0 = top of page)
+                            rel_pos = (product_line - page_start_line) / max(1, page_total_lines)
+                            # Find image with y0 closest to estimated position
+                            # Scale relative position to page height (assume ~800px per page)
+                            est_y = rel_pos * 800
+                            best_img = min(
+                                page_images,
+                                key=lambda img: abs(img["y0"] - est_y)
+                            )
+                            return [best_img["path"]]
+                        # Fallback: return largest image on page
+                        return [max(page_images, key=lambda img: img["width"] * img["height"])["path"]]
+                    else:
+                        # No images on product's page — keep non-PDF images
+                        non_pdf = [p for p in paths if not _re.search(r'pdf_p\d+_x\d+', p)]
+                        if non_pdf:
+                            return non_pdf
+
     return paths
 
 

@@ -364,3 +364,57 @@ def test_segment_llm_returns_bad_json_falls_back(_seg):
     assert result["mode"] == "single"
     assert "error" in result
     assert "some content" in result["products"][0]["text"]
+
+
+def test_segment_enriches_missing_page_header_from_source_refs(_seg):
+    """ถ้า LLM ลืมใส่ table header ใน common_refs ระบบต้องเติมให้เอง
+    โดยไม่พึ่ง keyword/line number ของสินค้าใดสินค้าหนึ่ง."""
+    lines = [
+        "Model",          # 1 — table header
+        "Description",    # 2 — table header
+        "Price",          # 3 — table header
+        "1 Pro-A CPU X",  # 4 — product A start
+        "US$10",          # 5 — product A end
+        "2 Pro-B CPU Y",  # 6 — product B start
+        "US$20",          # 7 — product B end
+        "Notes: MOQ 10",  # 8 — footer (not required for this test)
+    ]
+    text = "\n".join(lines)
+    files = [_file("catalog.txt", text)]
+
+    llm = _FakeLLM({
+        "products": [
+            {
+                "product_key": "Pro-A",
+                "suggested_name": "Pro A",
+                "category": "test",
+                "summary": "product A",
+                "source_refs": [{"file": "catalog.txt", "line_start": 4, "line_end": 5}],
+                "common_refs": [],  # LLM ลืม header
+            },
+            {
+                "product_key": "Pro-B",
+                "suggested_name": "Pro B",
+                "category": "test",
+                "summary": "product B",
+                "source_refs": [{"file": "catalog.txt", "line_start": 6, "line_end": 7}],
+                "common_refs": [],
+            },
+        ]
+    })
+
+    result = _seg.segment_products(files, llm)
+    assert result["mode"] == "multi"
+    assert len(result["products"]) == 2
+
+    pa, pb = result["products"]
+    # ทุกสินค้าต้องได้รับ table header
+    assert "Model" in pa["text"]
+    assert "Price" in pa["text"]
+    assert "Model" in pb["text"]
+    assert "Price" in pb["text"]
+    # ข้อมูลของแต่ละสินค้าต้องไม่ปน
+    assert "Pro-A" in pa["text"]
+    assert "Pro-B" not in pa["text"]
+    assert "Pro-B" in pb["text"]
+    assert "Pro-A" not in pb["text"]

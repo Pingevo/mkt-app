@@ -29,12 +29,34 @@ class CompetitorAnalysisAgent(BaseAgent):
     # System prompt split: legacy report vs evidence-mode Stage A
     # ------------------------------------------------------------------
 
-    def _build_system_prompt(self) -> str:
-        """Return the evidence-only Stage A prompt in evidence mode, otherwise legacy."""
+    def _core_system_prompt(self) -> str:
+        """Return the evidence-mode Stage A core prompt when in evidence mode.
+
+        In evidence mode, ``EVIDENCE_SYSTEM_PROMPT`` replaces the legacy
+        competitor core prompt.  Shared additions that are compatible with
+        objective evidence research (brand priority hard/soft rules,
+        agent instructions, grounding policy) are still applied by
+        ``BaseAgent._build_system_prompt``.
+
+        Brand reference (audience/positioning) is NOT injected into Stage A
+        — it is applied in a separate ``BrandInterpretationPass`` that runs
+        AFTER evidence is finalized, so brand context can never steer
+        which evidence is collected or how claims are written.
+        """
         evidence = getattr(self, "_evidence_mode", False) or self.config.get("evidence_mode", False)
         if evidence:
             return EVIDENCE_SYSTEM_PROMPT
-        return super()._build_system_prompt()
+        return super()._core_system_prompt()
+
+    def _include_brand_reference_in_prompt(self) -> bool:
+        """Evidence mode excludes brand_reference from the Stage A system
+        prompt to preserve hard evidence isolation.  Brand interpretation
+        is applied in a separate ``BrandInterpretationPass`` after evidence
+        is finalized."""
+        evidence = getattr(self, "_evidence_mode", False) or self.config.get("evidence_mode", False)
+        if evidence:
+            return False
+        return super()._include_brand_reference_in_prompt()
 
     def build_prompt(self, product_spec: str, competitor_data: str) -> str:
         self._relevance_context = self._build_relevance_context(product_spec, competitor_data)

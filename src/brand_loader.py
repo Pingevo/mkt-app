@@ -306,6 +306,70 @@ _POSITIONING_LIST_FIELDS = [
 ]
 
 
+def build_multi_product_profile_context(product_ids: list[str]) -> str:
+    """Build labeled per-product profile context for multi-product runs.
+
+    Each product's profile (audience, positioning, tone_adjustment,
+    visual_override) is rendered as a separately labeled identity envelope.
+    The model composes an appropriate combined presentation from all labeled
+    constraints — no deterministic merge, no last-write-wins, no precedence
+    by load order.
+
+    Visual overrides are rendered as text constraints for the model, not
+    applied as dict merges to brand_visual.  Media generation continues to
+    use brand-level visual config for multi-product runs.
+
+    Returns "" if no product has a profile.
+    """
+    parts: list[str] = []
+    for pid in product_ids:
+        profile = load_product_profile(pid)
+        if not profile:
+            continue
+        sections: list[str] = []
+        audience = profile.get("audience")
+        if audience:
+            audience_text = _format_audience(audience)
+            if audience_text:
+                sections.append(f"กลุ่มเป้าหมาย:\n{audience_text}")
+        positioning = _format_positioning(profile, pid)
+        if positioning:
+            sections.append(positioning)
+        tone_adj = (profile.get("tone_adjustment") or "").strip()
+        if tone_adj:
+            sections.append(f"ปรับโทน: {tone_adj}")
+        visual_override = profile.get("visual_override") or {}
+        if isinstance(visual_override, dict) and visual_override:
+            visual_lines = []
+            for k, v in visual_override.items():
+                if isinstance(v, dict):
+                    sub = ", ".join(f"{sk}: {sv}" for sk, sv in v.items() if sv)
+                    if sub:
+                        visual_lines.append(f"  {k}: {sub}")
+                elif v:
+                    visual_lines.append(f"  {k}: {v}")
+            if visual_lines:
+                sections.append("แนวทางภาพ:\n" + "\n".join(visual_lines))
+        if not sections:
+            continue
+        label = (pid or "").strip().replace("\n", " ").replace("\r", " ")
+        parts.append(
+            f"--- โปรไฟล์สินค้า: {label} ---\n"
+            f"{chr(10).join(sections)}\n"
+            f"--- สิ้นสุดโปรไฟล์สินค้า: {label} ---"
+        )
+    if not parts:
+        return ""
+    return (
+        "--- โปรไฟล์สินค้าแยกตามรุ่น (แต่ละรุ่นเป็นอิสระต่อกัน) ---\n"
+        "ข้อมูลนี้เป็นข้อจำกัดเฉพาะของแต่ละสินค้า ใช้เฉพาะกับสินค้าที่ระบุ\n"
+        "ถ้าสินค้าหลายตัวมี profile ขัดแย้งกัน ให้ compose presentation ที่เหมาะสม\n"
+        "โดยเคารพข้อจำกัดของแต่ละตัว ไม่ละเลยสินค้าใดสินค้าหนึ่ง\n\n"
+        + "\n\n".join(parts)
+        + "\n\n--- สิ้นสุดโปรไฟล์สินค้าแยกตามรุ่น ---"
+    )
+
+
 def _format_positioning(profile: dict[str, Any], product_id: str) -> str:
     """แปลง product_profile → positioning section string สำหรับ reference.
 

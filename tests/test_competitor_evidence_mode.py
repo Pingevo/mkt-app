@@ -275,18 +275,25 @@ def test_thai_evidence_with_global_source_is_accepted():
 
 
 def test_evidence_prompt_is_stage_a_not_legacy():
-    """Evidence mode uses the dedicated Stage A JSON-only system prompt."""
+    """Evidence mode uses the dedicated Stage A JSON-only core prompt while
+    still receiving shared additions (brand reference, instructions,
+    grounding policy) from BaseAgent composition."""
     cfg = _evidence_config()
     agent = CompetitorAnalysisAgent(cfg, FakeLLM())
     agent._evidence_mode = True
     prompt = agent._build_system_prompt()
 
-    assert prompt == EVIDENCE_SYSTEM_PROMPT
+    # The evidence core must be present
+    assert EVIDENCE_SYSTEM_PROMPT in prompt
     assert "competitor_research" in prompt
     assert "Stage B" in prompt
+    # The legacy competitor core must NOT be present
     assert "Final output ต้องเป็นรายงานวิเคราะห์มืออาชีพ" not in prompt
     assert "เขียนเป็นรายงานวิเคราะห์มืออาชีพ" not in prompt
     assert "ตารางเปรียบเทียบ" not in prompt
+    # Shared additions from BaseAgent must also be present
+    # Grounding policy is configured for competitor_analysis
+    assert "Grounding Policy" in prompt or "นโยบายข้อมูลต้นทาง" in prompt
 
 
 def test_revise_receives_canonical_manifest():

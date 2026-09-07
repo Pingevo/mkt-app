@@ -84,8 +84,8 @@ def extract_text(file_path: Path, config: dict, llm: LLMClient | None = None) ->
 
     สถาปัตยกรรมใหม่ (retrieve-then-read):
       - text: ดึงออกมาเก็บใน DB (lossless — text คือ text)
-      - รูปใน xlsx/docx: ดึงออกเก็บเป็นไฟล์ + path ใน DB (lossless)
-      - PDF: เก็บ path ดิบไว้ ส่งให้ OpenRouter ตอน agent ทำงาน (ไม่ extract text ด้วย OCR)
+      - รูปใน xlsx/docx/pdf: ดึงออกเก็บเป็นไฟล์ + path ใน DB (lossless)
+      - PDF text: ใช้ table-aware extraction เพื่อ preserve column header/value association
 
     คืนค่า: text ที่ดึงได้ (string)
     ผลข้างเคียง: รูปที่ดึงได้เก็บใน _extracted_images (ใช้โดย ingest_product)
@@ -96,11 +96,13 @@ def extract_text(file_path: Path, config: dict, llm: LLMClient | None = None) ->
     suffix = file_path.suffix.lower()
     text = load_file(str(file_path))
 
-    # ดึงรูปที่ฝังใน xlsx/docx ออกมาเก็บเป็นไฟล์ (lossless)
+    # ดึงรูปที่ฝังใน xlsx/docx/pdf ออกมาเก็บเป็นไฟล์ (lossless)
     if suffix in {".xlsx", ".xls"}:
         _extracted_images = _extract_images_from_xlsx(file_path)
     elif suffix == ".docx":
         _extracted_images = _extract_images_from_docx(file_path)
+    elif suffix == ".pdf":
+        _extracted_images = _extract_images_from_pdf(file_path)
 
     return text
 
@@ -109,7 +111,7 @@ def extract_text(file_path: Path, config: dict, llm: LLMClient | None = None) ->
 _extracted_images: list[str] = []
 
 
-def _extract_images_from_xlsx(file_path: Path) -> list[str]:
+def _extract_images_from_xlsx(file_path: Path, out_dir: Path | None = None) -> list[str]:
     """ดึงรูปที่ฝังใน xlsx ออกมาเก็บเป็นไฟล์ — คืน list ของ path รูปที่บันทึกแล้ว.
 
     วิธีสากล (ตาม VOYAGER-Inc/excel-vision-mcp):
@@ -119,7 +121,9 @@ def _extract_images_from_xlsx(file_path: Path) -> list[str]:
     import zipfile
 
     saved_paths: list[str] = []
-    out_dir = _extracted_images_dir(file_path)
+    if out_dir is None:
+        out_dir = _extracted_images_dir(file_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         with zipfile.ZipFile(file_path, "r") as zf:
@@ -143,7 +147,7 @@ def _extract_images_from_xlsx(file_path: Path) -> list[str]:
     return saved_paths
 
 
-def _extract_images_from_docx(file_path: Path) -> list[str]:
+def _extract_images_from_docx(file_path: Path, out_dir: Path | None = None) -> list[str]:
     """ดึงรูปที่ฝังใน docx ออกมาเก็บเป็นไฟล์ — คืน list ของ path รูป.
 
     วิธี: docx = zip archive, รูปอยู่ใน word/media/
@@ -151,7 +155,9 @@ def _extract_images_from_docx(file_path: Path) -> list[str]:
     import zipfile
 
     saved_paths: list[str] = []
-    out_dir = _extracted_images_dir(file_path)
+    if out_dir is None:
+        out_dir = _extracted_images_dir(file_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         with zipfile.ZipFile(file_path, "r") as zf:
@@ -173,6 +179,96 @@ def _extract_images_from_docx(file_path: Path) -> list[str]:
         pass
 
     return saved_paths
+
+
+def _extract_images_from_pdf(file_path: Path, out_dir: Path | None = None) -> list[dict]:
+    """ดึงรูปที่ฝังใน PDF ออกมาเก็บเป็นไฟล์ — คืน list ของ dict {path, page, y0}.
+
+    วิธี: PyMuPDF (fitz)
+      - สแกน ``page.get_images(full=True)`` ทุกหน้า
+      - ดึง raw image bytes ผ่าน ``doc.extract_image(xref)``
+      - บันทึกแต่ละรูปเป็นไฟล์ใน cache/{product_id}/extracted_images/
+      - เก็บ page number + y-position ใน metadata เพื่อ associate กับ product
+        ตอน segmentation (product image มักอยู่ใกล้ product row)
+
+    Returns: list of {"path": str, "page": int, "y0": float}
+    """
+    results: list[dict] = []
+    if out_dir is None:
+        out_dir = _extracted_images_dir(file_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import fitz
+    except ImportError:
+        return results
+
+    MIN_WIDTH = 50
+    MIN_HEIGHT = 50
+
+    try:
+        with fitz.open(str(file_path)) as doc:
+            for page_num, page in enumerate(doc):
+                images = page.get_images(full=True)
+                for img in images:
+                    xref = img[0]
+                    width = img[2]
+                    height = img[3]
+                    # ข้ามรูปเล็กที่ไม่ใช่ product image (logo, icon)
+                    if width < MIN_WIDTH or height < MIN_HEIGHT:
+                        continue
+                    try:
+                        # Get y-position on page for product association
+                        rects = page.get_image_rects(xref)
+                        y0 = rects[0].y0 if rects else 0.0
+
+                        extracted = doc.extract_image(xref)
+                        raw = extracted["image"]
+                        ext = f".{extracted.get('ext', 'png')}"
+                        if ext not in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}:
+                            ext = ".png"
+                        out_file = out_dir / f"pdf_p{page_num + 1:03d}_x{xref:04d}{ext}"
+                        out_file.write_bytes(raw)
+                        results.append({
+                            "path": str(out_file),
+                            "page": page_num + 1,
+                            "y0": y0,
+                            "width": width,
+                            "height": height,
+                        })
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    return results
+
+
+def extract_embedded_media(file_path: Path, dest_cache_dir: Path) -> list[dict]:
+    """Extract embedded images from a document into a specific cache directory.
+
+    Shared extraction contract used by both ``ingest_product`` (via
+    ``_extracted_images_dir``) and ``staging.commit_batch``.  Returns a
+    list of ``image_descriptions``-compatible dicts (``{"path", "file"}``
+    for xlsx/docx; ``{"path", "file", "page", "y0", "width", "height"}``
+    for PDF).  Returns ``[]`` for file types without embedded media.
+
+    Does NOT associate images with a particular segment — that remains
+    a model/segmentation responsibility.
+    """
+    suffix = file_path.suffix.lower()
+    if suffix in {".xlsx", ".xls"}:
+        paths = _extract_images_from_xlsx(file_path, dest_cache_dir)
+        return [{"path": p, "file": file_path.name} for p in paths]
+    elif suffix == ".docx":
+        paths = _extract_images_from_docx(file_path, dest_cache_dir)
+        return [{"path": p, "file": file_path.name} for p in paths]
+    elif suffix == ".pdf":
+        results = _extract_images_from_pdf(file_path, dest_cache_dir)
+        for r in results:
+            r.setdefault("file", file_path.name)
+        return results
+    return []
 
 
 def _extracted_images_dir(file_path: Path) -> Path:
@@ -510,6 +606,25 @@ def _materialize_split_products(
             record["product_id"] = name
             record["status"] = product_db.STATUS_PROCESSING
 
+            # 4.1 คัดลอกสื่อที่ extract ได้จาก temp product มายังสินค้าแยก (lossless)
+            temp_record = product_db.load(temp_product_id)
+            new_img_dir = new_cache_dir / "extracted_images"
+            new_img_dir.mkdir(parents=True, exist_ok=True)
+
+            copied_images: list[dict] = []
+            for img in temp_record.get("image_descriptions", []):
+                new_img = dict(img)
+                old_path = Path(new_img.get("path", ""))
+                if old_path.exists() and str(temp_cache_dir) in str(old_path):
+                    dest = new_img_dir / old_path.name
+                    shutil.copy2(str(old_path), str(dest))
+                    new_img["path"] = str(dest)
+                copied_images.append(new_img)
+
+            record["image_descriptions"] = copied_images
+            record["video_transcripts"] = list(temp_record.get("video_transcripts", []))
+            record["audio_transcripts"] = list(temp_record.get("audio_transcripts", []))
+
             # source files — สแกนโฟลเดอร์สินค้า (create: โฟลเดอร์ใหม่, update: โฟลเดอร์เดิม)
             files_list: list[dict] = []
             for f in sorted(data_dir.iterdir()):
@@ -527,9 +642,13 @@ def _materialize_split_products(
                 })
             record["files"] = files_list
 
-            # text เฉพาะรุ่น (จาก segmentation — คัดจากต้นฉบับแล้ว)
-            record["text_extracts"] = [{"file": "segmented", "text": new_text}]
+            # text สำหรับ agent = scoped text (header + สินค้าตัวนี้)
             record["raw_text"] = new_text
+
+            # text_extracts ต้องเก็บเอกสารต้นฉบับเต็มๆ (full text) เพื่อให้
+            # re-ingest / get_product_image_paths หาหน้าและบรรทัดต้นฉบับได้
+            # — raw_text ที่เป็น scoped อยู่ด้านบนอยู่แล้ว
+            record["text_extracts"] = temp_record.get("text_extracts", [])
 
             # scope — บอกขอบเขตสินค้า (ใช้ตอน re-ingest)
             record["scope"] = {
@@ -544,8 +663,8 @@ def _materialize_split_products(
                 "summary": seg.get("summary", ""),
                 "category": seg.get("category", ""),
                 "file_count": len(files_list),
-                "has_images": any(f.get("type") == "image" for f in files_list),
-                "image_count": sum(1 for f in files_list if f.get("type") == "image"),
+                "has_images": len(copied_images) > 0 or any(f.get("type") == "image" for f in files_list),
+                "image_count": len(copied_images) + sum(1 for f in files_list if f.get("type") == "image"),
             }
 
             product_db.save(name, record)
@@ -771,15 +890,29 @@ def ingest_product(
                     "text": extracted_text,
                 })
 
-                # รูปที่ดึงจาก document (xlsx/docx) → เก็บ path ใน image_descriptions
+                # รูปที่ดึงจาก document (xlsx/docx/pdf) → เก็บ path ใน image_descriptions
                 global _extracted_images
-                for img_path in _extracted_images:
-                    product_db.append_extracted(product_id, "image_descriptions", {
-                        "file": Path(img_path).name,
-                        "path": img_path,
-                        "description": "",
-                        "source": f["name"],  # บอกว่ารูปนี้มาจากไฟล์ไหน
-                    })
+                for img in _extracted_images:
+                    # PDF returns dict with path/page/y0 metadata; xlsx/docx return str path
+                    if isinstance(img, dict):
+                        img_path = img["path"]
+                        entry = {
+                            "file": Path(img_path).name,
+                            "path": img_path,
+                            "description": "",
+                            "source": f["name"],  # บอกว่ารูปนี้มาจากไฟล์ไหน
+                            "page": img.get("page"),
+                            "y0": img.get("y0"),
+                        }
+                    else:
+                        img_path = img
+                        entry = {
+                            "file": Path(img_path).name,
+                            "path": img_path,
+                            "description": "",
+                            "source": f["name"],  # บอกว่ารูปนี้มาจากไฟล์ไหน
+                        }
+                    product_db.append_extracted(product_id, "image_descriptions", entry)
 
             # บันทึกสถานะไฟล์
             product_db.add_file(product_id, {
@@ -828,7 +961,14 @@ def ingest_product(
         text_by_file = {t.get("file", ""): t.get("text", "") for t in record.get("text_extracts", [])}
         own_text = _slice_refs(text_by_file, scope.get("source_refs", []))
         common_text = _slice_refs(text_by_file, scope.get("common_refs", []))
-        record["raw_text"] = "\n".join(t for t in [common_text, own_text] if t).strip()
+        new_raw = "\n".join(t for t in [common_text, own_text] if t).strip()
+        # Safety: if re-sliced text is empty or doesn't contain the product_key,
+        # the scope line refs are stale/wrong.  Fall back to existing raw_text
+        # rather than overwriting with empty or wrong-product text.
+        product_key = (scope.get("product_key") or "").strip()
+        if new_raw and (not product_key or product_key in new_raw):
+            record["raw_text"] = new_raw
+        # else: keep existing record["raw_text"] unchanged
     else:
         text_parts = [t.get("text", "") for t in record.get("text_extracts", []) if t.get("text")]
         record["raw_text"] = "\n\n".join(text_parts).strip()

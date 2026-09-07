@@ -146,6 +146,63 @@ def test_preset_change_in_ui_affects_agent_output():
         _restore_instructions(original)
 
 
+def test_orchestrator_wires_product_images_to_all_agents(monkeypatch, tmp_path):
+    """product_db.get_product_image_paths ต้องถูกส่งถึงทุก Agent ผ่าน agent.run(image_paths=...)
+    และ product_spec prompt ต้องไม่บอกว่าไม่มีรูปเมื่อสินค้ามีรูปจริง."""
+    import os
+    from src import product_db
+    from src.agents import base_agent
+
+    os.environ.setdefault("OPENROUTER_API_KEY", "dummy")
+
+    # สร้างรูปจริงสำหรับสินค้า
+    prod_img = tmp_path / "product.png"
+    prod_img.write_bytes(b"png")
+
+    # จำลองสินค้าพร้อมรูป — ไม่พึ่ง DB จริง
+    monkeypatch.setattr(product_db, "is_ready", lambda pid: True)
+    monkeypatch.setattr(product_db, "get_product_image_paths", lambda pid: [str(prod_img)])
+
+    captured_images: dict[str, list[str]] = {}
+    captured_prompts: dict[str, str] = {}
+
+    orig_run = base_agent.BaseAgent.run
+
+    def _capture_run(self, user_prompt, **kwargs):
+        captured_images[self.agent_name] = list(kwargs.get("image_paths") or [])
+        captured_prompts[self.agent_name] = user_prompt
+        if self.agent_name == "content_creator":
+            return '{"posts":[]}'
+        return f"[{self.agent_name} result]"
+
+    monkeypatch.setattr(base_agent.BaseAgent, "run", _capture_run)
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.config = load_config()
+    orch.brand_context = ""
+    orch.brand_reference = ""
+    orch.brand_visual = ""
+    orch.brand_rules = None
+    orch.product_images = []
+    orch.product_id = "TEST-PRODUCT"
+    orch.results = {}
+
+    llm = FakeLLM()
+
+    orch.run_product_spec("raw data", llm=llm)
+    orch.run_competitor_analysis("spec", "", llm=llm)
+    orch.run_campaign_strategy("spec", "", llm=llm)
+    orch.run_content_creator("spec", "", "", llm=llm)
+
+    expected = [str(prod_img)]
+    for key in ("product_spec", "competitor_analysis", "campaign_strategy", "content_creator"):
+        assert captured_images.get(key) == expected, f"{key} did not receive product image paths"
+
+    # product_spec prompt ต้องไม่สร้างข้อความ "ไม่มีรูป" เมื่อมีรูปจริง
+    product_prompt = captured_prompts.get("product_spec", "")
+    assert "ไม่มีรูปภาพสินค้าส่งมาในรอบนี้" not in product_prompt
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

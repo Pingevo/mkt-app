@@ -257,10 +257,30 @@ class BaseAgent:
             return ""
         return "--- คำแนะนำการทำงานจากผู้ใช้ ---\n" + "\n".join(parts) + "\n--- สิ้นสุดคำแนะนำการทำงาน ---"
 
+    def _core_system_prompt(self) -> str:
+        """Return the agent's core system prompt.
+
+        Subclasses may override this to provide an alternative core prompt
+        (e.g. evidence mode) while still receiving all shared additions
+        (brand priority, brand reference, instructions, grounding policy)
+        from ``_build_system_prompt``.
+        """
+        return self.config.get("system_prompt", "")
+
+    def _include_brand_reference_in_prompt(self) -> bool:
+        """Whether ``_build_system_prompt`` should inject ``brand_reference``.
+
+        Default: True (injected when ``use_brand_reference`` config is true).
+        Evidence mode overrides this to return False so that Stage A
+        evidence research stays brand-objective — brand interpretation
+        is applied in a separate ``BrandInterpretationPass`` that runs
+        AFTER evidence is finalized, never during research.
+        """
+        return True
+
     def _build_system_prompt(self) -> str:
         """Combine the agent's system prompt with brand rules, reference, and user instructions."""
-        system_prompt = self.config.get("system_prompt", "")
-        sections = [system_prompt]
+        sections = [self._core_system_prompt()]
 
         use_brand = self.config.get("use_brand_context", True)
         priority_text = ""
@@ -289,6 +309,9 @@ class BaseAgent:
                 )
 
         # brand_reference (profile + audience) — ใส่เฉพาะ agent ที่เปิด use_brand_reference
+        # AND the agent has not opted out of brand_reference injection
+        # (evidence mode opts out — brand interpretation happens in a
+        # separate BrandInterpretationPass after evidence is finalized).
         # use_brand_differentiator (Item 4): reframe as task-decision context
         # (active) instead of passive background. The flag is a modifier on
         # use_brand_reference — it only takes effect when use_brand_reference
@@ -296,7 +319,7 @@ class BaseAgent:
         # BrandRules; positioning is NOT merged into BrandRules.
         use_ref = self.config.get("use_brand_reference", False)
         use_diff = self.config.get("use_brand_differentiator", False)
-        if self.brand_reference and use_ref:
+        if self.brand_reference and use_ref and self._include_brand_reference_in_prompt():
             if use_diff:
                 sections.append(
                     f"--- ข้อมูลแบรนด์อ้างอิง (ใช้เป็นบริบทตัดสินใจ — audience + positioning) ---\n"

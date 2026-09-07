@@ -27,7 +27,7 @@ from .agents import (
     ManagerAgent,
     ProductSpecAgent,
 )
-from .brand_loader import load_brand_rules, load_brand_reference, load_brand_visual, load_product_profile
+from .brand_loader import load_brand_rules, load_brand_reference, load_brand_visual, load_product_profile, build_multi_product_profile_context
 from .brand_priority import load_brand_priority
 from .config_loader import get_agent_config, load_config
 from .data_loader import detect_data_files, get_agent_data
@@ -102,6 +102,45 @@ class Orchestrator:
         self.product_images = product_images or []
         self.product_id = product_id
         self.results: dict[str, str] = {}
+
+    def bind_product(
+        self,
+        product_id: str | None,
+        *,
+        product_images: list[str] | None = None,
+    ) -> None:
+        """Atomically bind the selected product identity and refresh all
+        product-dependent runtime context before any agent is constructed.
+
+        Single product (product_id is a real folder name):
+            Refreshes brand_context, brand_reference, and brand_visual with
+            that product's profile overrides so the system prompt and media
+            generation receive product-specific tone/audience/positioning/visual.
+
+        Multi-product or None (product_id is None or a combined label):
+            Keeps brand-level context only — no product profile overrides
+            are applied to the system prompt.  Per-product profile context
+            must be supplied separately as labeled identity envelopes in the
+            user prompt via ``build_multi_product_profile_context`` so the
+            model can compose a presentation that respects every product's
+            constraints without deterministic merge or last-write-wins.
+
+        Reuses the existing loaders in ``brand_loader.py`` — no new source
+        of truth.
+        """
+        self.product_id = product_id
+        if product_images is not None:
+            self.product_images = product_images
+        if product_id and " + " not in product_id:
+            self.brand_context = load_brand_rules(self.brand_dir, product_id=product_id)
+            self.brand_reference = load_brand_reference(self.brand_dir, product_id=product_id)
+            self.brand_visual = load_brand_visual(self.brand_dir, product_id=product_id)
+            self.brand_rules = load_brand_priority(self.brand_dir, product_id=product_id)
+        else:
+            self.brand_context = load_brand_rules(self.brand_dir)
+            self.brand_reference = load_brand_reference(self.brand_dir)
+            self.brand_visual = load_brand_visual(self.brand_dir)
+            self.brand_rules = load_brand_priority(self.brand_dir)
 
     def make_client(self) -> LLMClient:
         defaults = self.config.get("defaults", {})
@@ -231,9 +270,9 @@ class Orchestrator:
             llm = self.make_client()
         try:
             agent = self._make_agent("product_spec", ProductSpecAgent, llm)
-            prompt = agent.build_prompt(raw_data, product_images or self.product_images)
-            # ส่งรูปจริงให้ agent (retrieve-then-read — agent เห็นรูปเหมือนมนุษย์)
+            # ส่งรูปจริงของสินค้าเหมือนกับที่จะส่งเป็น multimodal ให้ agent
             image_paths = self._get_product_image_paths() if self.product_id else (product_images or [])
+            prompt = agent.build_prompt(raw_data, image_paths)
             result = agent.run(
                 prompt, quick_brief=quick_brief, image_paths=image_paths,
                 resource_context=resource_context, extra_image_paths=extra_image_paths,
@@ -254,19 +293,23 @@ class Orchestrator:
 
         กรณี multi-product (product_id = "K5 + K2"): ดึงแต่ละสินค้าจาก DB มารวมกัน
         เพราะ DB เก็บแยก per-product ไม่มี combined ID
+        แปะ per-product profile context เป็น labeled envelopes ด้วย
+        เพื่อให้ model compose presentation ที่เคารพทุกสินค้า
         """
         if self.product_id:
             # กรณี multi-product: product_id = "Lagenio K5 + Lagenio K2"
             if " + " in self.product_id:
-                parts = self.product_id.split(" + ")
+                parts = [p.strip() for p in self.product_id.split(" + ")]
                 combined = []
                 for pid in parts:
-                    pid = pid.strip()
                     if product_db.is_ready(pid):
                         data = get_agent_data(pid)
                         if data:
                             combined.append(f"=== สินค้า: {pid} ===\n{data}")
                 if combined:
+                    profile_ctx = build_multi_product_profile_context(parts)
+                    if profile_ctx:
+                        return f"{profile_ctx}\n\n" + "\n\n".join(combined)
                     return "\n\n".join(combined)
             # กรณี single product
             elif product_db.is_ready(self.product_id):

@@ -448,6 +448,8 @@ async def api_parse_media_prompts(request: Request) -> JSONResponse:
         filepath = body.get("file", "")
         if filepath:
             p = Path(filepath)
+            if not p.exists():
+                p = PROJECT_ROOT / filepath
             # ถ้าเป็น .md → ลองหา .json ที่ชื่อเดียวกันก่อน (structured output)
             if p.suffix == ".md":
                 json_p = p.with_suffix(".json")
@@ -621,8 +623,8 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
         return JSONResponse({"error": "missing file"})
     p = Path(filepath)
     if not p.exists():
-        # ลอง relative to OUTPUT_DIR
-        p = OUTPUT_DIR / filepath
+        # ลอง relative to PROJECT_ROOT (filepath may be "output/session/file.json")
+        p = PROJECT_ROOT / filepath
     if not p.exists():
         return JSONResponse({"error": f"file not found: {filepath}"})
 
@@ -2337,6 +2339,11 @@ async def api_run_agent(request: Request) -> StreamingResponse:
     resource_refs = body.get("resource_refs", [])
     brand_dir = body.get("brand_dir", "") or "brand"
 
+    # --- Quick Brief input validation (guardrail) ---
+    guard_err = _validate_quick_brief(quick_brief)
+    if guard_err:
+        return guard_err
+
     if not agent_key or not folder:
         return JSONResponse({"error": "missing agent or folder"})
 
@@ -2597,19 +2604,85 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
     if extra_image_paths is None:
         extra_image_paths = []
 
-    # Set product_id for ALL agents so _save_to_ready and save_result use the correct folder
-    orch.product_id = folder
-    orch.product_images = image_paths
+    # Bind the selected product identity and refresh all product-dependent
+    # runtime context (brand_context, brand_reference, brand_visual) BEFORE
+    # any agent is constructed.  Single product → product-specific profile.
+    # Multi-product → brand-level context (no single-product profile
+    # overrides) BUT product_id is set to a combined "A + B" label so
+    # _get_product_data() and _get_product_image_paths() can iterate over
+    # every selected product and deliver scoped text + images for all.
+    # Per-product profile context is injected as labeled identity envelopes
+    # via build_multi_product_profile_context in the user prompt.
+    effective_folders = list(folders) if folders else [folder]
+    if len(effective_folders) == 1:
+        orch.bind_product(effective_folders[0], product_images=image_paths)
+    else:
+        combined_id = " + ".join(effective_folders)
+        orch.bind_product(combined_id, product_images=image_paths)
 
     if agent_key == "product_spec":
         # ดึง scoped context จาก product DB — เคารพ scope ที่ตัดเฉพาะรุ่นจาก catalog
         # ไม่ใช้ raw_contents (ไฟล์ดิบทั้งไฟล์) เพราะอาจเป็น catalog หลายรุ่น → LLM เขียนสเปคทั้งซีรีส์
-        # ถ้า product DB ยังไม่มี scoped text (เช่น สินค้ายังไม่ ingest) → ใช้ raw_contents แทน
         raw_data = ""
         if folders:
             from src import product_db
             raw_data = product_db.get_scoped_context_text(folders)
-        if not raw_data.strip():
+        # Multi-product: inject per-product profile context as labeled envelopes
+        if folders and len(folders) > 1:
+            from src.brand_loader import build_multi_product_profile_context
+            profile_ctx = build_multi_product_profile_context(folders)
+            if profile_ctx:
+                raw_data = f"{profile_ctx}\n\n{raw_data}" if raw_data else profile_ctx
+        # Safe fallback: determine usability from the product record's actual
+        # scoped payload, NOT from the rendered envelope string.  The rendered
+        # string can be non-empty (scope header) even when raw_text is empty.
+        #
+        # For a scoped product:
+        #   - text facts available → use scoped context
+        #   - no text but valid product images available → allow image-only
+        #   - neither usable text nor images → fail before Agent/model
+        #   - never fall back to the full catalog
+        # For an unscoped/standalone product:
+        #   - backward-compatible raw_contents fallback
+        from src import product_db as _pdb
+        _check_folders = list(folders) if folders else [folder]
+        _any_unscoped_without_db = False
+        for _f in _check_folders:
+            _rec = _pdb.load(_f)
+            _is_scoped = bool(_rec.get("scope", {}).get("product_key"))
+            # Check actual raw_text, not the rendered envelope
+            _has_text = bool((_rec.get("raw_text") or "").strip())
+            # Check actual image_descriptions with valid paths (exclude unassigned)
+            _has_db_image = False
+            for _img in _rec.get("image_descriptions", []):
+                if _img.get("unassigned_source_media"):
+                    continue
+                _p = _img.get("path", "")
+                if _p and Path(_p).exists():
+                    _has_db_image = True
+                    break
+            # Check direct product images supplied by the current route
+            # (image_paths that belong to this product's cache/data directory)
+            _has_direct_image = False
+            if image_paths:
+                _prod_cache = f"/cache/{_f}/"
+                _prod_data = f"/data/{_f}/"
+                for _ip in image_paths:
+                    if _prod_cache in _ip or _prod_data in _ip:
+                        _has_direct_image = True
+                        break
+            if _is_scoped:
+                if not _has_text and not _has_db_image and not _has_direct_image:
+                    raise ValueError(
+                        f"สินค้า {_f} มี scope (แยกจาก catalog) แต่ไม่มี usable text หรือ images "
+                        f"ใน product DB — ต้อง re-ingest ก่อนรัน agent ห้ามใช้ไฟล์ดิบทั้ง catalog"
+                    )
+            else:
+                # Unscoped product — if no DB data, use raw_contents fallback
+                if not _has_text and not _has_db_image and not _has_direct_image:
+                    _any_unscoped_without_db = True
+        if _any_unscoped_without_db and not raw_data.strip():
+            # Standalone/unscoped product with no DB data — backward-compatible raw fallback
             raw_data = "\n\n".join(raw_contents) if raw_contents else ""
         # ถ้าไม่มี text แต่มีรูป → ใช้รูปเป็นข้อมูลหลัก (agent เห็นรูปจริงผ่าน multimodal)
         if not raw_data and not image_paths:
@@ -3599,6 +3672,11 @@ async def api_run_auto(request: Request) -> StreamingResponse:
     agents = agents[:1]
     brand_dir = body.get("brand_dir", "") or "brand"
 
+    # --- Quick Brief input validation (guardrail) ---
+    guard_err = _validate_quick_brief(quick_brief)
+    if guard_err:
+        return guard_err
+
     global _cancel_requested
     _cancel_requested = False
 
@@ -3856,7 +3934,9 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                             # ดึง image_paths ของสินค้าที่เลือก
                             from src import product_db as _pdb
                             from src import asset_library as _al
-                            orch.product_id = chosen_pid
+                            # Bind single product so brand_visual reflects
+                            # product-specific visual_override for media gen
+                            orch.bind_product(chosen_pid)
                             product_img_paths = _pdb.get_product_image_paths(chosen_pid) if _pdb.is_ready(chosen_pid) else []
                             if auto_image:
                                 for j, img in enumerate(parsed_media.get("images", [])):

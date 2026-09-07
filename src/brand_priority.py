@@ -134,10 +134,12 @@ def _format_soft(voice: dict, terms: dict = None) -> tuple[str, dict]:
     return "\n".join(parts), soft_dict
 
 
-def load_brand_priority(brand_dir: str | Path | None = None) -> BrandRules:
+def load_brand_priority(brand_dir: str | Path | None = None, *, product_id: str | None = None) -> BrandRules:
     """อ่าน voice.json + terms.json → แยกเป็น hard/soft BrandRules.
 
     ถ้าไม่มีไฟล์ → คืน BrandRules ว่าง (agent ยังทำงานได้ แค่ไม่มี brand rules)
+    ถ้ามี product_id และ product_profile.tone_adjustment → แป๊ะท้าย soft rules
+    (เหมือน load_brand_rules เพื่อให้ tone_adjustment ไปถึง prompt แม้ใช้ BrandRules)
     """
     brand_dir = _resolve_brand_dir(brand_dir)
     if not brand_dir:
@@ -148,6 +150,15 @@ def load_brand_priority(brand_dir: str | Path | None = None) -> BrandRules:
 
     hard_text, hard_dict = _format_hard(voice, terms)
     soft_text, soft_dict = _format_soft(voice, terms)
+
+    # Product profile — tone_adjustment แป๊ะท้าย soft (ปรับโทนภายใน voice เดิม)
+    if product_id:
+        from .brand_loader import load_product_profile
+        profile = load_product_profile(product_id)
+        tone_adj = (profile.get("tone_adjustment") or "").strip()
+        if tone_adj:
+            label = f"\n--- ปรับโทนสำหรับสินค้านี้ ({product_id}) ---\n{tone_adj}"
+            soft_text = (soft_text + "\n" + label) if soft_text else label
 
     return BrandRules(hard=hard_text, soft=soft_text, hard_dict=hard_dict, soft_dict=soft_dict)
 

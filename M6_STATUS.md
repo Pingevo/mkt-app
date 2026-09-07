@@ -865,9 +865,20 @@ The progression from current state to Beta/Release decision:
 1. **Same-model API capability qualification** (Level 1) — current state: FAIL
 2. **Fix any failing Agent(s)** — S3 campaign_strategy root cause identified (harness defect, deferred benchmark work)
 3. **Re-run same-model qualification** — deferred; not required before user Beta
-4. **Web E2E / Browser flow validation** — Web/Browser E2E PASS (14/14 with Playwright); API/integration E2E PASS (16/16)
-5. **Provider UI benchmark** (Level 2) — separate paid benchmark, future milestone
-6. **Beta/Release decision** — ready for small real-user Beta (see Beta Readiness Report)
+4. **Web E2E / Browser flow validation (text/core)** — Web/Browser E2E PASS (14/14 with Playwright); API/integration E2E PASS (16/16)
+5. **Image Generation Browser E2E** — IN PROGRESS (required for Beta)
+6. **Video Generation Browser E2E** — IN PROGRESS (required for Beta)
+7. **Real Image + Video smoke** — REQUIRED (one real image + one real video generation)
+8. **Full Beta regression/readiness** — REQUIRED
+9. **Provider UI benchmark** (Level 2) — separate paid benchmark, future milestone
+10. **Beta/Release decision** — pending completion of items 5-8
+
+### Beta scope correction (2026-09-05)
+
+Image generation and video generation are **REQUIRED Beta capabilities**,
+not deferred. The prior report incorrectly listed them as deferred.
+Deployment/Docker/server rollout is owned externally and is NOT part of
+this project's critical path.
 
 Do NOT claim provider-UI parity or superiority until Level 2 has been
 actually executed.

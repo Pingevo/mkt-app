@@ -68,6 +68,35 @@ data/CACGO*/
 cache/CACGO*/
 data/.staging/
 
+# Runtime test/fixture product directories (not source of truth)
+cache/DirectImageProduct/
+cache/ImageOnly/
+cache/ImageScoped/
+cache/LegacyProduct/
+cache/OneProduct/
+cache/ProductA/
+cache/ProductB/
+cache/ProfileOnlyProduct/
+cache/ScopedProduct/
+cache/TestProduct/
+cache/ValidA/
+cache/ValidB/
+cache/m6_frontier_uat/
+cache/m6_uplift/
+cache/run_resources/
+data/m6_frontier_uat/
+data/m6_uplift/
+
+# Evaluation artifacts (preserved M6 harnesses, not production code)
+evaluation_artifacts/
+
+# Pre-freeze review bundles (evidence ZIPs, not source of truth)
+mktapp_*_review.zip
+mktapp_*_delta_review.zip
+
+# HTML evidence reports (not source of truth — markdown docs are tracked)
+BETA_QUALIFICATION_EXECUTIVE_EVIDENCE.html
+
 # Runtime evaluation / preflight / dryrun artifacts (not source of truth)
 data/campaign_*_report.md
 data/campaign_*_state.json
@@ -85,6 +114,10 @@ consult_*.md
 
 # IDE
 .windsurf/
+.devin/
+AGENTS.md
+AGENTS.local.md
+AGENT.md
 
 # Temporary mockups
 staging_preview_mockup.html

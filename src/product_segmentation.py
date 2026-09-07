@@ -231,6 +231,144 @@ def _merge_segments(segments: list[dict]) -> list[dict]:
     return [seen[k] for k in order]
 
 
+def _page_boundaries(text: str) -> list[tuple[int, int, int]]:
+    """Return (page_num, start_line, end_line) for a text file.
+
+    PDF text is split by ``\\n\\n`` page separators; other files are treated as
+    one page. Line numbers are 1-indexed and match the numbered prompt sent to
+    the segmentation LLM.
+    """
+    pages = text.split("\n\n")
+    boundaries: list[tuple[int, int, int]] = []
+    cumulative = 0
+    for i, page in enumerate(pages, 1):
+        lines = page.split("\n") if page else []
+        start = cumulative + 1
+        end = cumulative + len(lines)
+        boundaries.append((i, start, end))
+        cumulative = end + 1  # +1 for the blank separator line
+    return boundaries
+
+
+def _merge_refs(refs: list[dict]) -> list[dict]:
+    """Merge overlapping/adjacent refs for the same file and sort by line_start."""
+    by_file: dict[str, list[tuple[int, int, dict]]] = {}
+    for ref in refs:
+        fname = ref.get("file", "")
+        ls = ref.get("line_start", 0)
+        le = ref.get("line_end", 0)
+        by_file.setdefault(fname, []).append((ls, le, ref))
+
+    merged: list[dict] = []
+    for fname, ranges in by_file.items():
+        ranges.sort(key=lambda x: (x[0], x[1]))
+        cur_start, cur_end, cur_ref = None, None, None
+        for ls, le, ref in ranges:
+            if cur_start is None:
+                cur_start, cur_end, cur_ref = ls, le, ref
+            elif ls <= cur_end + 1:
+                # overlapping / adjacent: extend
+                if le > cur_end:
+                    cur_end = le
+                    cur_ref = ref
+            else:
+                item = {"file": fname, "line_start": cur_start, "line_end": cur_end}
+                if cur_ref.get("page"):
+                    item["page"] = cur_ref["page"]
+                merged.append(item)
+                cur_start, cur_end, cur_ref = ls, le, ref
+        if cur_start is not None:
+            item = {"file": fname, "line_start": cur_start, "line_end": cur_end}
+            if cur_ref.get("page"):
+                item["page"] = cur_ref["page"]
+            merged.append(item)
+    return merged
+
+
+def _enrich_page_header_refs(segments: list[dict], text_by_file: dict[str, str]) -> None:
+    """Ensure each product segment inherits the table header of its page.
+
+    The segmentation LLM may omit the shared column-header lines from
+    ``common_refs``. This is a deterministic, content-agnostic fix: for every
+    page that contains product rows, the leading block above the first product
+    row is added to ``common_refs`` of every product on that page.
+
+    No product names, prices, or line numbers are hardcoded; the header comes
+    from the uploaded document itself.
+    """
+    # Index page boundaries per file
+    file_boundaries: dict[str, list[tuple[int, int, int]]] = {
+        fname: _page_boundaries(text)
+        for fname, text in text_by_file.items()
+    }
+
+    def _find_page(line: int, boundaries: list[tuple[int, int, int]]) -> tuple[int, int, int] | None:
+        for page_num, start, end in boundaries:
+            if start <= line <= end:
+                return (page_num, start, end)
+        return None
+
+    # Collect product row start lines per (file, page)
+    page_info: dict[tuple[str, int], dict] = {}
+    for seg in segments:
+        for ref in seg.get("source_refs", []):
+            fname = ref.get("file", "")
+            ls = ref.get("line_start", 0)
+            if not fname or ls < 1:
+                continue
+            boundaries = file_boundaries.get(fname, [])
+            page = _find_page(ls, boundaries)
+            if page is None:
+                continue
+            page_num, page_start, page_end = page
+            key = (fname, page_num)
+            info = page_info.setdefault(key, {"page_start": page_start, "page_end": page_end, "row_starts": set()})
+            info["row_starts"].add(ls)
+
+    # For each page, compute the header range and attach it to relevant segments
+    for (fname, page_num), info in page_info.items():
+        row_starts = sorted(info["row_starts"])
+        if not row_starts:
+            continue
+        header_end = row_starts[0] - 1
+        if header_end < info["page_start"]:
+            continue
+        header_ref = {
+            "file": fname,
+            "page": page_num,
+            "line_start": info["page_start"],
+            "line_end": header_end,
+        }
+        for seg in segments:
+            # Only enrich segments that have a source_ref on this page
+            on_page = False
+            for ref in seg.get("source_refs", []):
+                if ref.get("file") != fname:
+                    continue
+                page = _find_page(ref.get("line_start", 0), file_boundaries.get(fname, []))
+                if page and page[0] == page_num:
+                    on_page = True
+                    break
+            if not on_page:
+                continue
+            common = seg.setdefault("common_refs", [])
+            # Add if not already covered
+            covered = any(
+                r.get("file") == fname
+                and r.get("line_start", 0) <= header_ref["line_start"]
+                and r.get("line_end", 0) >= header_ref["line_end"]
+                for r in common
+            )
+            if not covered:
+                common.append(header_ref)
+
+    # Normalize common_refs to remove duplicates/overlap and keep them sorted
+    for seg in segments:
+        common = seg.get("common_refs")
+        if common:
+            seg["common_refs"] = _merge_refs(common)
+
+
 # ------------------------------------------------------------------
 #  LLM call
 # ------------------------------------------------------------------
@@ -352,6 +490,10 @@ def segment_products(
 
     # กรณีหลายสินค้า → validate ก่อน materialize
     merged = _merge_segments(raw_segments)
+
+    # แก้ไข generic: ถ้า LLM ลืมใส่ header ของตารางใน common_refs ให้เติมโดยอัตโนมัติ
+    _enrich_page_header_refs(merged, text_by_file)
+
     all_errors: list[str] = []
     for seg in merged:
         errs = _validate_segment(seg, file_names, text_by_file)

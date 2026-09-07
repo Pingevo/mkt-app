@@ -160,6 +160,11 @@ def test_run_single_agent_uses_scoped_context_not_raw_catalog(_pdb, monkeypatch,
             self.product_images = []
             self.results = {}
 
+        def bind_product(self, product_id, *, product_images=None):
+            self.product_id = product_id
+            if product_images is not None:
+                self.product_images = product_images
+
         def run_product_spec(self, raw_data, product_images=None, llm=None, quick_brief=""):
             captured_raw_data["raw_data"] = raw_data
             captured_raw_data["product_images"] = product_images
@@ -204,6 +209,11 @@ def test_run_single_agent_falls_back_to_raw_when_no_folders(_pdb, monkeypatch, t
             self.product_id = ""
             self.product_images = []
             self.results = {}
+
+        def bind_product(self, product_id, *, product_images=None):
+            self.product_id = product_id
+            if product_images is not None:
+                self.product_images = product_images
 
         def run_product_spec(self, raw_data, product_images=None, llm=None, quick_brief=""):
             captured_raw_data["raw_data"] = raw_data
