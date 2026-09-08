@@ -506,6 +506,8 @@ class Orchestrator:
             agent = self._make_agent("content_creator", ContentCreatorAgent, llm)
             # ดึงข้อมูลสินค้าจาก DB ถ้ามี ไม่งั้นใช้ parameter (backward compatible)
             product_data = self._get_product_data(product_spec)
+            # เก็บ source context สำหรับ script review grounding (post-review mutation seam)
+            self._content_source_context = product_data
 
             # ดึง media model capabilities เพื่อบอก agent ว่า model ทำได้อะไร (grounding)
             media_caps_text = ""
@@ -714,11 +716,15 @@ class Orchestrator:
         llm: LLMClient | None = None,
         status_callback=None,
         ch_cfg: dict | None = None,
+        source_context: str = "",
     ) -> dict[str, Any]:
         """ตรวจ script ใน posts — แก้ script ถ้า score ต่ำ + สร้าง video_prompts ใหม่.
 
         แก้ posts ใน place (อัปเดต script + video_prompts + เพิ่ม script_review field).
         คืน script_review_result dict (สำหรับเก็บใน all_script_reviews).
+
+        source_context: ข้อมูลต้นทางของสินค้า — ส่งให้ script_reviewer เพื่อตรวจ
+            grounding ของ revised_script ไม่ให้แนะนำ claim ที่เกิน source
         """
         import json as _json
         from datetime import datetime as _dt
@@ -749,6 +755,7 @@ class Orchestrator:
                     original_script,
                     platform or "TikTok",
                     llm,
+                    source_context=source_context,
                 )
                 iterations_done = 1
 
@@ -776,6 +783,7 @@ class Orchestrator:
                             revised,
                             platform or "TikTok",
                             llm,
+                            source_context=source_context,
                         )
                         iterations_done = 2
                         re_score = re_review.get("score", 0) if re_review else 0
@@ -785,8 +793,18 @@ class Orchestrator:
                                 f"Script review รอบที่ 2: score {re_score}/100"
                             )
 
+                        # Fail-closed: if the second review cannot verify the
+                        # revision (empty/broken result), retain the original
+                        # grounded script rather than persist unchecked mutation.
+                        if not re_review:
+                            if status_callback:
+                                status_callback(
+                                    "⚠ ไม่สามารถตรวจสอบ script ที่แก้ได้ — ใช้ต้นฉบับ"
+                                )
+                            final_script = original_script
+                            final_score = first_score
                         # Loop safety: ถ้า re-check ต่ำกว่า original → revert
-                        if re_score < first_score:
+                        elif re_score < first_score:
                             if status_callback:
                                 status_callback(
                                     f"⚠ Script ที่แก้ ({re_score}/100) แย่กว่าต้นฉบับ "
@@ -1405,6 +1423,7 @@ class Orchestrator:
 
                     script_review_result = self._review_script_in_posts(
                         posts, platform_used, llm, status_callback, ch_cfg,
+                        source_context=getattr(self, "_content_source_context", ""),
                     )
 
                     if posts:

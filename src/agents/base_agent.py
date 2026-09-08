@@ -900,6 +900,20 @@ class BaseAgent:
                 "--- สิ้นสุด EVIDENCE DISCIPLINE ---\n"
             )
 
+        # Grounding policy — same block the generator sees, so the reviewer
+        # can distinguish supplied facts from inferences using the same
+        # three-category contract.  Without this, agents that have
+        # grounding_policy but no evidence_policy (e.g. content_creator)
+        # get no grounding guidance during review.
+        grounding_section = ""
+        gp = self.config.get("grounding_policy")
+        if gp:
+            grounding_section = (
+                f"\n--- GROUNDING POLICY (ใช้ตรวจข้อเท็จจริง) ---\n"
+                + self._render_grounding_policy(gp)
+                + "\n--- สิ้นสุด GROUNDING POLICY ---\n"
+            )
+
         brief_section = ""
         if quick_brief:
             brief_section = (
@@ -933,13 +947,14 @@ class BaseAgent:
                 f"{source_section}"
                 f"{checklist_section}"
                 f"{evidence_section}"
+                f"{grounding_section}"
                 f"{brief_section}\n"
                 f"--- ผลงานที่ต้องตรวจ ---\n"
                 f"{output}\n"
                 f"--- สิ้นสุดผลงาน ---\n\n"
                 f"{json_instruction}"
                 f"วิธีตรวจ:\n"
-                f"1. อ่าน CHECKLIST + EVIDENCE DISCIPLINE ทุกข้อ\n"
+                f"1. อ่าน CHECKLIST + EVIDENCE DISCIPLINE + GROUNDING POLICY ทุกข้อ\n"
                 f"2. เทียบทุก claim ในผลงานกับข้อมูลต้นทาง — ถ้าเกิน source ให้ลบหรือแก้\n"
                 f"3. ถ้ามี claim ใดไม่มีหลักฐานตาม evidence_policy หรือใช้แหล่งทีผิด ให้แก้หรือลบ\n"
                 f"4. ถ้าครบถ้วนทุกข้อ ส่งผลงานเดิมกลับมาเลย ไม่ต้องเปลี่ยนแปลง\n"

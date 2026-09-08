@@ -578,7 +578,7 @@ def test_script_review_regenerates_video_prompts_with_inner_schema():
     import json
     from unittest.mock import MagicMock
 
-    def _fake_review(script, platform, llm=None):
+    def _fake_review(script, platform, llm=None, source_context=""):
         return {
             "score": 50,
             "revised_script": "revised " + script,

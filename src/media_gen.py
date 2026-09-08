@@ -32,6 +32,10 @@ except ImportError:
 def _image_to_data_url(image_path: str | Path) -> str | None:
     """แปลงไฟล์รูปเป็น base64 data URL — สำหรับส่งเป็น input_references.
 
+    ถ้ารูปใหญ่เกิน max_reference_dimension (config) จะ resize ลงก่อน
+    เพื่อไม่ให้ request ใหญ่เกินไปจน provider timeout (เช่น 3 รูป 5MB
+    รวมกัน → 6.6MB request → timeout)
+
     คืน None ถ้าไฟล์ไม่มีหรืออ่านไม่ได้
     """
     p = Path(image_path)
@@ -40,6 +44,25 @@ def _image_to_data_url(image_path: str | Path) -> str | None:
     mime, _ = mimetypes.guess_type(str(p))
     if not mime or not mime.startswith("image/"):
         mime = "image/png"
+
+    # Check if resize is needed — large images cause provider timeouts
+    max_dim = int(_media_cfg().get("max_reference_dimension", 1024))
+    try:
+        from PIL import Image
+        import io as _io
+        img = Image.open(p)
+        w, h = img.size
+        if w > max_dim or h > max_dim:
+            img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGB")
+            buf = _io.BytesIO()
+            img.save(buf, format="PNG")
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            return f"data:image/png;base64,{b64}"
+    except Exception:
+        pass  # PIL not available or image unreadable → fall through to raw
+
     try:
         b64 = base64.b64encode(p.read_bytes()).decode("ascii")
         return f"data:{mime};base64,{b64}"
@@ -441,7 +464,16 @@ def generate_image(
 
     t0 = time.time()
     try:
-        with httpx.Client(timeout=timeout) as client:
+        # Finer-grained timeouts: connect fast (30s) so connection issues are
+        # detected quickly, but allow the full read timeout for generation.
+        # A single flat timeout would block all phases for the full duration.
+        httpx_timeout = httpx.Timeout(
+            connect=float(mcfg.get("image_connect_timeout_seconds", 30)),
+            read=timeout,
+            write=float(mcfg.get("image_connect_timeout_seconds", 30)),
+            pool=float(mcfg.get("image_connect_timeout_seconds", 30)),
+        )
+        with httpx.Client(timeout=httpx_timeout) as client:
             resp = client.post(
                 "https://openrouter.ai/api/v1/images",
                 headers=headers,

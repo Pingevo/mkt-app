@@ -484,8 +484,10 @@ def test_brief_renderer_outputs_bullets_no_table():
     assert "## ข้อจำกัด" in output
 
 
-def test_brief_renderer_demotes_unverified_recommendation_to_hypothesis():
-    """Unvalidated evidence_based_recommendation is not presented as verified fact in brief."""
+def test_brief_renderer_drops_unverified_recommendation_fail_closed():
+    """Unvalidated evidence_based_recommendation is dropped fail-closed,
+    not promoted to hypothesis — promoting verbatim leaks unsupported factual
+    premises (prices, specs, offers) as if they were strategic reasoning."""
     fixture = _load_fixture()
     data = json.loads(_good_research_response())
     data["evidence_based_recommendations"] = [
@@ -502,8 +504,9 @@ def test_brief_renderer_demotes_unverified_recommendation_to_hypothesis():
     )
     output = renderer.render(fixture["product_spec"])
     assert "## ข้อเสนอแนะที่มีหลักฐานรองรับ" not in output
-    assert "## สมมติฐานเชิงกลยุทธ์ (ยังไม่ยืนยัน)" in output
-    assert "เน้นหน้าจอใหญ่ของ K77" in output
+    # The unverified recommendation must NOT appear anywhere — not as evidence,
+    # not as hypothesis.  Promoting it verbatim leaks factual premises.
+    assert "เน้นหน้าจอใหญ่ของ K77" not in output
 
 
 def test_agent_run_respects_quick_brief_and_routes_to_brief():

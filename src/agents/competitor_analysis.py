@@ -204,6 +204,7 @@ class CompetitorAnalysisAgent(BaseAgent):
                 llm=self.llm,
                 config={
                     "model": self.config.get("review_model") or self.config.get("model"),
+                    "max_tokens": self.config.get("max_tokens", 4096),
                 },
             )
             reviewed = semantic_reviewer.review(research, relevant)
@@ -248,6 +249,7 @@ class CompetitorAnalysisAgent(BaseAgent):
                 llm=self.llm,
                 config={
                     "model": self.config.get("review_model") or self.config.get("model"),
+                    "max_tokens": self.config.get("max_tokens", 4096),
                 },
             )
             implications = brand_interp.interpret(

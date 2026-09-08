@@ -530,6 +530,12 @@ class LLMClient:
             "usage": usage,
         }
         self._last_finish_reason = finish_reason
+        # Extract actual cost from provider usage — same as non-stream path
+        # so budget guards and callers see real spend for streaming calls too.
+        if usage and isinstance(usage, dict):
+            cost = usage.get("cost")
+            if cost is not None:
+                self._last_cost_usd = float(cost)
 
         console.print()
         return "".join(collected), usage, request_id

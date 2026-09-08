@@ -75,6 +75,7 @@ def review_script(
     script: str,
     platform: str,
     llm: Any,
+    source_context: str = "",
 ) -> dict[str, Any]:
     """ตรวจ script หาจุดน่าเบื่อ + ให้คะแนน + เสนอ hook ใหม่ → คืน review dict.
 
@@ -82,6 +83,9 @@ def review_script(
         script: script ที่ content_creator เขียน (มี timestamp + scene + voiceover)
         platform: แพลตฟอร์มเป้าหมาย (เช่น "TikTok", "Facebook")
         llm: LLMClient instance
+        source_context: ข้อมูลต้นทางของสินค้า (product spec) — ใช้ตรวจข้อเท็จจริง
+            ถ้ามี → reviewer ต้องไม่แนะนำ claim ที่เกิน source
+            ถ้าไม่มี → reviewer ไม่มีข้อมูลตรวจ grounding (backward compatible)
 
     คืน: {score: int, component_scores: {hook, pacing, clarity, engagement},
            issues: [{timestamp, problem, fix}], suggested_hooks: [str], revised_script: str}
@@ -109,8 +113,24 @@ def review_script(
         "5. revised_script — script ที่แก้แล้ว (เอา hook ที่ดีที่สุดมาใส่ + แก้จุดที่มีปัญหา)\n\n"
         f"แพลตฟอร์ม: {platform}\n"
         "คำนึงถึงลักษณะของแพลตฟอร์ม (TikTok: สั้น เร็ว, Facebook: ยาวกว่า)\n\n"
-        "คืนเป็น JSON เท่านั้น"
     )
+
+    # Grounding constraint — when source context is provided, the reviewer
+    # must not introduce claims beyond the supplied facts.  This prevents
+    # the post-review mutation seam from injecting unsupported capabilities,
+    # offers, or absolute claims that were not in the original grounded output.
+    if source_context and source_context.strip():
+        system_prompt += (
+            "--- ข้อมูลต้นทาง (ใช้ตรวจข้อเท็จจริงของ revised_script) ---\n"
+            f"{source_context}\n"
+            "--- สิ้นสุดข้อมูลต้นทาง ---\n\n"
+            "กฎการแก้ script (สำคัญที่สุด):\n"
+            "- ห้ามเพิ่มข้อเท็จจริง คุณสมบัติ ฟีเจอร์ ราคา หรือข้อเสนอที่ไม่มีในข้อมูลต้นทาง\n"
+            "- แก้ hook/pacing/engagement ได้ แต่ต้องใช้เฉพาะข้อเท็จจริงที่มีในข้อมูลต้นทางเท่านั้น\n"
+            "- ถ้าไม่แน่ใจว่าข้อเท็จจริงมีใน source หรือไม่ ให้ไม่ใส่\n\n"
+        )
+
+    system_prompt += "คืนเป็น JSON เท่านั้น"
 
     user_prompt = f"ตรวจ script นี้:\n\n{script}"
 

@@ -9709,10 +9709,24 @@ function generateMediaFromOutput(mediaType) {
   if (bar) bar.innerHTML = '<span class="media-status working">กำลังสร้าง' + (doImage ? 'รูป' : 'วิดีโอ') + '...</span>';
   let sseBuffer = '';
   let finished = false;
+  // Elapsed timer — show the user that work is in progress, not frozen.
+  // Updates every second so a provider timeout doesn't look indefinite.
+  let _mediaElapsed = 0;
+  const _mediaTimer = setInterval(() => {
+    _mediaElapsed++;
+    if (bar && !finished) {
+      const cur = bar.querySelector('.media-status.working');
+      if (cur) {
+        const base = cur.textContent.replace(/\s*\(\d+s\)$/, '');
+        cur.textContent = base + ' (' + _mediaElapsed + 's)';
+      }
+    }
+  }, 1000);
 
   function refreshAfterGen() {
     if (finished) return;
     finished = true;
+    clearInterval(_mediaTimer);
     findSessionMedia(session, function(media) {
       const el = document.getElementById('preview-platform-content');
       if (el) el.innerHTML = renderPlatformPreview(_currentMediaPost, session, media.images, media.videos);
@@ -9750,6 +9764,7 @@ function generateMediaFromOutput(mediaType) {
             if (d.type === 'status' && bar) {
               bar.innerHTML = '<span class="media-status working">' + escapeHtml(d.text) + '</span>';
             } else if (d.type === 'error' && bar) {
+              clearInterval(_mediaTimer);
               bar.innerHTML = '<span class="media-status error">⚠ ' + escapeHtml(d.text) + '</span>';
             } else if (d.type === 'done') {
               refreshAfterGen();

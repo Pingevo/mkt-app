@@ -442,7 +442,6 @@ class CompetitorReportRenderer:
             for ev in self.research.evidence
             if self._validate_evidence(ev)[0]
         }
-        promoted_hypotheses: list[StrategicHypothesis] = []
         evidence_based: list[EvidenceBasedRecommendation] = []
 
         for rec in self.research.evidence_based_recommendations:
@@ -452,13 +451,16 @@ class CompetitorReportRenderer:
             )
             if urls_ok and rec.supporting_evidence_urls:
                 evidence_based.append(rec)
-            else:
-                promoted_hypotheses.append(StrategicHypothesis(
-                    text=rec.text,
-                    rationale="เดิมอ้างเป็น evidence_based แต่ URL รองรับไม่ผ่าน validation",
-                ))
+            # else: drop — do NOT promote to strategic_hypotheses.
+            # A recommendation authored as evidence_based contains factual
+            # premises (prices, specs, offers).  Promoting it verbatim to
+            # "hypothesis" re-labels it but preserves the unsupported factual
+            # claims, which then reach the user as if they were strategic
+            # reasoning.  The model would need to re-author it as a true
+            # hypothesis (without the factual premise) for it to be valid.
+            # Fail-closed: drop and let uncertainty capture the gap.
 
-        all_hypotheses = list(self.research.strategic_hypotheses) + promoted_hypotheses
+        all_hypotheses = list(self.research.strategic_hypotheses)
         return evidence_based, all_hypotheses
 
     def _wants_brief(self) -> bool:
@@ -679,14 +681,12 @@ class CompetitorReportRenderer:
                 lines.append(f"- {line}")
         lines.append("")
 
-        # Model's evidence-based recommendations (if any) — in limited
-        # analysis, no evidence is validated, so all go to hypotheses.
+        # Model's evidence-based recommendations — in limited analysis, no
+        # evidence is validated, so none survive.  Do NOT promote them to
+        # strategic_hypotheses: they were authored as evidence_based and
+        # contain factual premises (prices, specs, offers) that would leak
+        # as if they were strategic reasoning.  Drop fail-closed.
         all_hypotheses = list(self.research.strategic_hypotheses)
-        for rec in self.research.evidence_based_recommendations:
-            all_hypotheses.append(StrategicHypothesis(
-                text=rec.text,
-                rationale="เดิมอ้างเป็น evidence_based แต่ไม่มี evidence ผ่าน validation",
-            ))
         if all_hypotheses:
             lines.extend([
                 "## สมมติฐานเชิงกลยุทธ์ (ยังไม่ยืนยัน)",
@@ -852,7 +852,7 @@ class SemanticEvidenceReviewer:
                 messages,
                 model=self.config.get("model"),
                 temperature=0.1,
-                max_tokens=2048,
+                max_tokens=self.config.get("max_tokens", 4096),
                 max_retry_limit=0,  # no retry — one pass only
                 stream=False,
                 tools=None,  # no web tools — no web calls
@@ -863,6 +863,13 @@ class SemanticEvidenceReviewer:
             return None
 
         if not response or not response.strip():
+            return None
+
+        # Truncation guard — if the provider cut the response mid-generation
+        # (finish_reason=length), the JSON is likely malformed.  Return None
+        # (fail-closed) explicitly rather than relying on json.loads to fail.
+        # This is a deterministic check on provider metadata.
+        if getattr(self.llm, "last_truncated", False):
             return None
 
         # Parse JSON response
@@ -1023,7 +1030,7 @@ class BrandInterpretationPass:
                 messages,
                 model=self.config.get("model"),
                 temperature=0.2,
-                max_tokens=1024,
+                max_tokens=self.config.get("max_tokens", 2048),
                 max_retry_limit=0,  # no retry — one pass only
                 stream=False,
                 tools=None,  # no web tools — no web calls
@@ -1033,6 +1040,14 @@ class BrandInterpretationPass:
             return []  # graceful degradation
 
         if not response or not response.strip():
+            return []
+
+        # Truncation guard — if the provider cut the response mid-generation
+        # (finish_reason=length), the JSON is likely malformed.  Return []
+        # explicitly rather than relying on json.loads to fail silently.
+        # This is a deterministic check on provider metadata, not a semantic
+        # guess about content completeness.
+        if getattr(self.llm, "last_truncated", False):
             return []
 
         # Parse JSON response
