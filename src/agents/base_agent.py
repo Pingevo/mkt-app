@@ -1096,3 +1096,194 @@ class BaseAgent:
         Subclasses must override this.
         """
         raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Final grounding gate — shared truth boundary for all agents
+    # ------------------------------------------------------------------
+
+    _GROUNDING_CHECK_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "grounded": {
+                "type": "boolean",
+                "description": "true ถ้าทุก claim ใน final_text มีฐานจาก context ที่ให้",
+            },
+            "unsupported_claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "claim": {"type": "string", "description": "ข้อความที่ไม่มีฐาน"},
+                        "reason": {"type": "string", "description": "เหตุผลว่าทำไมไม่มีฐาน"},
+                    },
+                    "required": ["claim", "reason"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["grounded", "unsupported_claims"],
+        "additionalProperties": False,
+    }
+
+    def verify_final_grounding(
+        self,
+        final_text: str,
+        runtime_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Final grounding verification before persistence.
+
+        Uses model reasoning to check if final_text contains claims not
+        supported by the authorized runtime context.  This is a semantic
+        entailment check — no regex/keyword lists.
+
+        **Fails closed**: if the verifier cannot produce a valid, non-truncated
+        result (missing LLM, exception, malformed JSON, empty response,
+        truncation), the result is ``{grounded: False}`` so the caller
+        does NOT persist the artifact as a successful run.
+
+        Args:
+            final_text: the final candidate output (after all mutations)
+            runtime_context: dict with keys:
+                - product_source: selected product source text
+                - brand_context: brand/audience settings (positioning, tone, vocabulary)
+                - quick_brief: user instructions for this run
+                - ui_options: typed UI selections (platform, media_type, etc.)
+                - verified_evidence: externally verified facts with provenance (optional)
+
+        Returns:
+            {grounded: bool, unsupported_claims: [{claim, reason}]}
+        """
+        # Empty text is trivially grounded (nothing to verify).
+        if not final_text or not final_text.strip():
+            return {"grounded": True, "unsupported_claims": []}
+
+        # Missing LLM → cannot verify → fail closed.
+        if not self.llm:
+            return {"grounded": False, "unsupported_claims": [], "error": "no_llm"}
+
+        # Build the context sections for the model
+        sections = []
+
+        product_source = runtime_context.get("product_source", "")
+        if product_source:
+            sections.append(
+                f"--- ข้อมูลสินค้า (product source — ข้อเท็จจริงเท่านั้น) ---\n"
+                f"{product_source}\n"
+                f"--- สิ้นสุดข้อมูลสินค้า ---"
+            )
+
+        verified_evidence = runtime_context.get("verified_evidence", "")
+        if verified_evidence:
+            sections.append(
+                f"--- หลักฐานที่ผ่านการตรวจสอบ (verified evidence) ---\n"
+                f"{verified_evidence}\n"
+                f"--- สิ้นสุดหลักฐาน ---"
+            )
+
+        brand_context = runtime_context.get("brand_context", "")
+        if brand_context:
+            sections.append(
+                f"--- Brand/Audience (positioning, tone, vocabulary — ไม่ใช่ product capability) ---\n"
+                f"{brand_context}\n"
+                f"--- สิ้นสุด Brand/Audience ---"
+            )
+
+        quick_brief = runtime_context.get("quick_brief", "")
+        if quick_brief:
+            sections.append(
+                f"--- Quick Brief (คำสั่งของ user — ไม่สามารถสร้าง fact ได้) ---\n"
+                f"{quick_brief}\n"
+                f"--- สิ้นสุด Quick Brief ---"
+            )
+
+        ui_options = runtime_context.get("ui_options", {})
+        if ui_options:
+            import json as _json_opts
+            sections.append(
+                f"--- UI Options ---\n"
+                f"{_json_opts.dumps(ui_options, ensure_ascii=False)}\n"
+                f"--- สิ้นสุด UI Options ---"
+            )
+
+        context_block = "\n\n".join(sections)
+
+        system_prompt = (
+            "คุณเป็นผู้ตรวจสอบข้อเท็จจริง (Grounding Verifier)\n"
+            "หน้าที่: ตรวจว่างานสุดท้ายมี claim ใดที่ไม่มีฐานจาก context ที่ให้หรือไม่\n\n"
+            "กฎการตรวจ:\n"
+            "1. product source เป็นข้อเท็จจริงเท่านั้น — claim ต้องมีฐานจากนี่\n"
+            "2. verified evidence เป็นข้อเท็จจริงที่ตรวจสอบแล้ว — ใช้ได้\n"
+            "3. Brand/Audience ควบคุม positioning, tone, vocabulary, channels — "
+            "ไม่ใช่ product capability\n"
+            "   ถ้า brand context อ้างถึงสินค้าอื่น ห้ามนำ capability ของ "
+            "สินค้านั้นมาใส่ในสินค้าที่กำลังตรวจ\n"
+            "4. Quick Brief ควบคุมงานที่ขอ — ไม่สามารถสร้าง fact หรือ offer ได้\n"
+            "5. ถ้าไม่แน่ใจว่า claim มีฐานหรือไม่ → ถือว่าไม่มีฐาน\n"
+            "6. CTA ที่อ้างถึง offer/โปรโมชั่นที่ user ไม่ได้ระบุ = unsupported claim\n"
+            "7. inference/recommendation ที่ไม่อ้างเป็น fact = ผ่าน\n\n"
+            f"{context_block}\n\n"
+            "คืน JSON ตาม schema"
+        )
+
+        user_prompt = f"ตรวจงานสุดท้ายนี้:\n\n{final_text}"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "grounding_check",
+                "strict": True,
+                "schema": self._GROUNDING_CHECK_SCHEMA,
+            },
+        }
+
+        import json as _json
+        import re as _re
+
+        try:
+            raw = self.llm.chat(
+                messages,
+                temperature=0.1,
+                max_tokens=2048,
+                stream=False,
+                response_format=response_format,
+                source=f"{self.agent_name}.final_grounding_check",
+            )
+        except Exception:
+            # Infrastructure failure → fail closed.
+            return {"grounded": False, "unsupported_claims": [], "error": "llm_exception"}
+
+        if isinstance(raw, tuple):
+            raw = raw[0]
+
+        # Empty or None response → fail closed.
+        if not raw or not raw.strip():
+            return {"grounded": False, "unsupported_claims": [], "error": "empty_response"}
+
+        # Truncated response → fail closed.
+        if getattr(self.llm, "last_truncated", False):
+            return {"grounded": False, "unsupported_claims": [], "error": "truncated"}
+
+        # Strip code fences if present
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = _re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = _re.sub(r"\s*```$", "", raw)
+
+        try:
+            result = _json.loads(raw)
+        except (ValueError, TypeError):
+            # Malformed JSON → fail closed.
+            return {"grounded": False, "unsupported_claims": [], "error": "malformed_json"}
+
+        if not isinstance(result, dict) or "grounded" not in result:
+            return {"grounded": False, "unsupported_claims": [], "error": "invalid_schema"}
+
+        return {
+            "grounded": bool(result.get("grounded")),
+            "unsupported_claims": result.get("unsupported_claims", []),
+        }

@@ -46,9 +46,12 @@ class FakeLLMClient:
     def __init__(self, api_key=None, base_url=None, default_model="minimax/minimax-m3:free", timeout=120):
         self._default_model = default_model
         self.calls = []
+        self.last_truncated = False
 
     def chat(self, messages, *args, **kwargs):
         source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
         model = kwargs.get("model") or self._default_model
         self.calls.append({
             "source": source,

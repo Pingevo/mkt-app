@@ -79,7 +79,7 @@ def test_auto_mode_runs_all_four_agents(_client, tmp_path, monkeypatch):
         def _run_content_creator(*a, **k):
             agents_ran.append("content_creator")
             return _content_json()
-        fake.run_content_creator.side_effect = _run_content_creator
+        fake._run_content_creator_raw.side_effect = _run_content_creator
 
         fake._review_script_in_posts = MagicMock(return_value={})
 

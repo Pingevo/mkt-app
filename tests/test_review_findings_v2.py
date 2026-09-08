@@ -38,8 +38,12 @@ class FakeLLM:
         self._output = output
         self._outputs = outputs  # optional per-call overrides
         self.calls: list[dict] = []
+        self.last_truncated = False
 
     def chat(self, messages, **kwargs):
+        source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
         self.calls.append({"messages": messages, "kwargs": kwargs})
         if self._outputs is not None and len(self._outputs) > len(self.calls) - 1:
             out = self._outputs[len(self.calls) - 1]
@@ -1189,7 +1193,11 @@ def test_agent4_visual_style_in_final_prompt_and_media_config(tmp_path, monkeypa
     assert "product specific keyword" in orch.brand_visual.get("keywords", [])
 
     # 2. Use FakeLLM.chat() as the provider boundary — no BaseAgent.run() patch
-    fake_llm = FakeLLM(output='{"posts":[]}')
+    fake_llm = FakeLLM(output=json.dumps({"posts": [{
+        "platform": "Facebook", "concept": "test", "title": "T",
+        "caption": "C", "hashtags": "#h", "asset_ids": [],
+        "image_prompts": [], "video_prompts": [],
+    }]}))
 
     orch.run_content_creator("test spec", "", "", llm=fake_llm)
 

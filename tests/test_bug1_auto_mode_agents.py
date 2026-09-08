@@ -71,7 +71,7 @@ def test_auto_mode_runs_all_selected_agents(_client, tmp_path, monkeypatch):
             agents_ran.append("content_creator")
             return _content_json()
 
-        fake.run_content_creator.side_effect = _run_content_creator
+        fake._run_content_creator_raw.side_effect = _run_content_creator
 
         # competitor_analysis
         def _run_competitor(*args, **kw):

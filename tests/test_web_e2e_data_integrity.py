@@ -74,9 +74,16 @@ class FakeLLM:
         self._output = output
         self._outputs = outputs
         self.calls: list[dict] = []
+        self.last_truncated = False
 
     def chat(self, messages, **kwargs):
         self.calls.append({"messages": messages, "kwargs": kwargs})
+        # Grounding gate calls use a JSON schema response format and a
+        # source ending in .final_grounding_check — return a valid
+        # grounded verdict so wiring tests are not blocked by the gate.
+        source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
         if self._outputs is not None and len(self._outputs) > len(self.calls) - 1:
             out = self._outputs[len(self.calls) - 1]
         else:

@@ -396,8 +396,9 @@ def test_run_flows_wires_product_resource_and_asset_images(_client, tmp_path, mo
     fake_orch._make_client.return_value = MagicMock()
     fake_orch._make_client.return_value.close = MagicMock()
     fake_orch.save_result.return_value = {"content_creator": str(tmp_path / "out.md")}
-    fake_orch.run_content_creator.return_value = content
+    fake_orch._run_content_creator_raw.return_value = content
     fake_orch._review_script_in_posts = MagicMock(return_value={})
+    fake_orch._finalize_content_output.return_value = (content, content)
     monkeypatch.setattr(web_viewer, "Orchestrator", lambda **kw: fake_orch)
 
     resp = _client.post("/api/run_flows", json={

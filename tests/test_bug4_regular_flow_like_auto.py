@@ -57,13 +57,13 @@ def test_regular_flow_multi_platform_one_file_with_script_review(_client, tmp_pa
         fake._make_client.return_value.close = MagicMock()
         fake.save_result.return_value = {"content_creator": str(tmp_path / "out.md")}
 
-        # run_content_creator — คืน 1 โพสต์ต่อ call
+        # _run_content_creator_raw — คืน 1 โพสต์ต่อ call (raw, ungrounded)
         def _run_cc(*args, **kw):
             idx = cc_call_count[0]
             cc_call_count[0] += 1
             platform = "Facebook" if idx == 0 else "TikTok"
             return _content_json(platform=platform, concept=f"concept_{platform}")
-        fake.run_content_creator.side_effect = _run_cc
+        fake._run_content_creator_raw.side_effect = _run_cc
 
         # script review method — track ว่าถูกเรียก + แกะ script_review ลงใน post
         def _review_script(*args, **kw):
@@ -84,6 +84,13 @@ def test_regular_flow_multi_platform_one_file_with_script_review(_client, tmp_pa
                 }
             return {}
         fake._review_script_in_posts = MagicMock(side_effect=_review_script)
+
+        # _finalize_content_output returns (content_json, content_markdown)
+        def _finalize(*args, **kw):
+            posts = args[0] if args else kw.get("all_posts", [])
+            combined = json.dumps({"posts": posts}, ensure_ascii=False)
+            return combined, combined
+        fake._finalize_content_output = MagicMock(side_effect=_finalize)
 
         return fake
 
@@ -196,8 +203,13 @@ def test_run_flows_per_flow_quick_brief(_client, tmp_path, monkeypatch):
     fake_orch = MagicMock()
     fake_orch._make_client.return_value = MagicMock()
     fake_orch._make_client.return_value.close = MagicMock()
-    fake_orch.run_content_creator.side_effect = _run_cc
+    fake_orch._run_content_creator_raw.side_effect = _run_cc
     fake_orch.save_result.return_value = {"content_creator": str(tmp_path / "out.md")}
+    # _finalize_content_output returns (content_json, content_markdown)
+    fake_orch._finalize_content_output.side_effect = lambda *a, **k: (
+        json.dumps({"posts": a[0]}, ensure_ascii=False) if a else "{}",
+        "",
+    )
     monkeypatch.setattr(web_viewer, "Orchestrator", lambda **kw: fake_orch)
 
     monkeypatch.setattr(web_viewer.content_history, "record_entry", lambda *a, **k: None)

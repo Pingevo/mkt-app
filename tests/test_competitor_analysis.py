@@ -43,10 +43,13 @@ class FakeLLM:
         self.fetch_output = fetch_output
         self.repair_output = repair_output
         self.calls: list[dict] = []
+        self.last_truncated = False
 
     def chat(self, messages, **kwargs):
-        self.calls.append({"messages": messages, "kwargs": kwargs})
         source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
+        self.calls.append({"messages": messages, "kwargs": kwargs})
         if ".fetch" in source:
             return self.fetch_output
         if ".repair" in source:

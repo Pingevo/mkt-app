@@ -24,7 +24,13 @@ from src.agents.competitor_evidence import CompetitorReportRenderer, ResearchRes
 class FakeLLM:
     """Minimal fake LLM for unit testing agent internals."""
 
+    def __init__(self):
+        self.last_truncated = False
+
     def chat(self, *args, **kwargs):
+        source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
         return ""
 
     def close(self):

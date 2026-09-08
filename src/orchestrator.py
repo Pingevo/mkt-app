@@ -57,6 +57,14 @@ def _make_run_id() -> str:
     return f"{datetime.now().strftime('%H%M%S_%f')}_{uuid.uuid4().hex}"
 
 
+class GroundingError(Exception):
+    """Raised when the final grounding gate cannot produce a grounded artifact.
+
+    This is a fail-closed error — the run must not persist unsupported
+    output as a successful result.
+    """
+
+
 from . import product_db
 
 
@@ -266,6 +274,10 @@ class Orchestrator:
         เพราะไฟล์ดิบอาจเป็น catalog หลายรุ่น → LLM จะเขียนสเปคทั้งซีรีส์แทนเฉพาะรุ่นที่เลือก
         """
         own = llm is None
+        # Invalidate any stale successful artifact from a prior run so a
+        # failure in this attempt (including make_client failure) cannot
+        # leave the old result persistable.
+        self._invalidate_stale_result("product_spec")
         if own:
             llm = self.make_client()
         try:
@@ -278,8 +290,16 @@ class Orchestrator:
                 resource_context=resource_context, extra_image_paths=extra_image_paths,
                 step_context=step_context,
             )
+            # Final grounding gate — verify complete output before persistence
+            result = self._ground_and_store(
+                "product_spec", result, llm,
+                runtime_context={
+                    "product_source": self._get_product_data(raw_data),
+                    "brand_context": self._build_brand_context_text(),
+                    "quick_brief": quick_brief,
+                },
+            )
             self.results["product_spec"] = result
-
             return result
         finally:
             if own:
@@ -318,6 +338,33 @@ class Orchestrator:
                     return db_data
         return fallback
 
+    def _build_brand_context_text(self) -> str:
+        """Build a text representation of brand/audience context for grounding.
+
+        This is used by the final grounding gate to distinguish brand
+        positioning/vocabulary from product capabilities.
+        """
+        parts = []
+        if self.brand_context:
+            if isinstance(self.brand_context, dict):
+                for k, v in self.brand_context.items():
+                    parts.append(f"{k}: {v}")
+            else:
+                parts.append(str(self.brand_context))
+        if self.brand_reference:
+            if isinstance(self.brand_reference, str):
+                parts.append(f"Reference: {self.brand_reference}")
+            elif isinstance(self.brand_reference, dict):
+                for k, v in self.brand_reference.items():
+                    parts.append(f"{k}: {v}")
+        if self.brand_rules:
+            if isinstance(self.brand_rules, dict):
+                for k, v in self.brand_rules.items():
+                    parts.append(f"{k}: {v}")
+            else:
+                parts.append(str(self.brand_rules))
+        return "\n".join(parts) if parts else ""
+
     def _get_product_image_paths(self) -> list[str]:
         """ดึง path รูปจริงของสินค้า — สำหรับส่งเป็น multimodal ให้ agent (retrieve-then-read).
 
@@ -354,6 +401,8 @@ class Orchestrator:
         step_context: StepRunContext | None = None,
     ) -> str:
         own = llm is None
+        # Invalidate stale result before make_client can fail.
+        self._invalidate_stale_result("competitor_analysis")
         if own:
             llm = self.make_client()
         try:
@@ -368,8 +417,17 @@ class Orchestrator:
                 resource_context=resource_context, extra_image_paths=extra_image_paths,
                 step_context=step_context,
             )
+            # Final grounding gate — verify complete output before persistence
+            result = self._ground_and_store(
+                "competitor_analysis", result, llm,
+                runtime_context={
+                    "product_source": product_data,
+                    "brand_context": self._build_brand_context_text(),
+                    "quick_brief": quick_brief,
+                    "verified_evidence": resource_context or "",
+                },
+            )
             self.results["competitor_analysis"] = result
-
             return result
         finally:
             if own:
@@ -384,6 +442,8 @@ class Orchestrator:
         selected_pillar: str = "",
     ) -> str:
         own = llm is None
+        # Invalidate stale result before make_client can fail.
+        self._invalidate_stale_result("campaign_strategy")
         if own:
             llm = self.make_client()
         run_exception: Exception | None = None
@@ -478,13 +538,24 @@ class Orchestrator:
 
             if run_exception:
                 raise run_exception
+            # Final grounding gate — verify complete output before persistence
+            final_text = self._ground_and_store(
+                "campaign_strategy", final_text, llm,
+                runtime_context={
+                    "product_source": self._get_product_data(product_spec),
+                    "brand_context": self._build_brand_context_text(),
+                    "quick_brief": quick_brief,
+                    "verified_evidence": competitor_analysis or "",
+                },
+            )
+            self.results["campaign_strategy"] = final_text
             return final_text
         finally:
             clear_usage_context()
             if own:
                 llm.close()
 
-    def run_content_creator(
+    def _run_content_creator_raw(
         self,
         product_spec: str,
         competitor_analysis: str,
@@ -499,6 +570,18 @@ class Orchestrator:
         selected_pillar: str = "",
         content_pillars: str = "",
     ) -> str:
+        """Private raw Agent 4 generation — no grounding, no persistence.
+
+        Generates content via the Content Creator agent and returns the raw
+        JSON string.  Does NOT write to ``self.results``.
+
+        Callers MUST cross the final grounding gate (via
+        ``_finalize_content_output`` or the public ``run_content_creator``)
+        before persisting or returning the output as a successful result.
+        Aggregation paths (auto, manual web, qual_runner) should call this
+        method in their per-platform loop and then call
+        ``_finalize_content_output`` once on the complete aggregate.
+        """
         own = llm is None
         if own:
             llm = self.make_client()
@@ -508,6 +591,8 @@ class Orchestrator:
             product_data = self._get_product_data(product_spec)
             # เก็บ source context สำหรับ script review grounding (post-review mutation seam)
             self._content_source_context = product_data
+            # เก็บ brand context สำหรับ final grounding gate
+            self._content_brand_context = self._build_brand_context_text()
 
             # ดึง media model capabilities เพื่อบอก agent ว่า model ทำได้อะไร (grounding)
             media_caps_text = ""
@@ -590,18 +675,94 @@ class Orchestrator:
                 response_format=CONTENT_RESPONSE_FORMAT,
                 step_context=step_context,
             )
-            # แปลง JSON → markdown สำหรับ display + เก็บ JSON ดิบไว้สำหรับ parse_media_prompts
-            try:
-                parsed = _json_cc.loads(raw_result)
-                markdown = render_posts_to_markdown(parsed)
-                # เก็บทั้ง JSON ดิบ (สำหรับ media gen) และ markdown (สำหรับ display)
-                # save_result จะแยกเซฟ .json + .md
-                self.results["content_creator"] = raw_result
-                self.results["content_creator_markdown"] = markdown
-            except (_json_cc.JSONDecodeError, TypeError):
-                self.results["content_creator"] = raw_result
-                self.results["content_creator_markdown"] = raw_result
+            # Raw output only — no persistence.  Callers must cross the
+            # grounding gate before persisting or returning as success.
             return raw_result
+        finally:
+            if own:
+                llm.close()
+
+    def run_content_creator(
+        self,
+        product_spec: str,
+        competitor_analysis: str,
+        campaign_strategy: str,
+        llm: LLMClient | None = None,
+        quick_brief: str = "",
+        media_type: str = "",
+        asset_summary: str = "",
+        resource_context: str = "",
+        extra_image_paths: list[str] | None = None,
+        step_context: StepRunContext | None = None,
+        selected_pillar: str = "",
+        content_pillars: str = "",
+    ) -> str:
+        """Public Agent 4 completion — generate, ground, and persist.
+
+        Generates content via ``_run_content_creator_raw``, then crosses the
+        shared final grounding gate via ``_finalize_content_output`` before
+        storing to ``self.results``.  For standalone single-post use (CLI,
+        pipeline).
+
+        Aggregation paths (auto, manual web, qual_runner) should call
+        ``_run_content_creator_raw`` directly and then
+        ``_finalize_content_output`` once on the complete aggregate, to
+        avoid unnecessary per-platform grounding.
+
+        Returns the grounded JSON string.
+        Raises ``GroundingError`` if no grounded candidate can be produced.
+        """
+        own = llm is None
+        # Invalidate stale result before make_client can fail.
+        self._invalidate_stale_result("content_creator")
+        if own:
+            llm = self.make_client()
+        try:
+            raw_result = self._run_content_creator_raw(
+                product_spec, competitor_analysis, campaign_strategy,
+                llm=llm, quick_brief=quick_brief, media_type=media_type,
+                asset_summary=asset_summary, resource_context=resource_context,
+                extra_image_paths=extra_image_paths, step_context=step_context,
+                selected_pillar=selected_pillar, content_pillars=content_pillars,
+            )
+
+            import json as _json
+            import copy as _copy
+            from .output_validators import validate_content_output
+
+            # Mechanical schema gate — fail closed on malformed/empty output.
+            # No failed candidate may be stored under content_creator keys.
+            ok, err = validate_content_output(raw_result)
+            if not ok:
+                raise ValueError(
+                    f"content_creator output failed schema validation: {err}"
+                )
+            parsed = _json.loads(raw_result)
+            posts = parsed.get("posts", [])
+            if not posts:
+                raise ValueError(
+                    "content_creator output has no posts — cannot ground empty content"
+                )
+
+            # Standalone: no script-review mutation occurs, so the
+            # pre-mutation fallback is a deep copy of the generated posts.
+            pre_mutation_posts = [_copy.deepcopy(p) for p in posts]
+
+            grounding_runtime_context = {
+                "product_source": getattr(self, "_content_source_context", ""),
+                "brand_context": getattr(self, "_content_brand_context", ""),
+                "quick_brief": quick_brief or "",
+                "ui_options": {
+                    "platform": "",
+                    "media_type": media_type,
+                },
+            }
+
+            content, markdown = self._finalize_content_output(
+                posts, pre_mutation_posts, llm,
+                grounding_runtime_context, None,
+            )
+            return content
         finally:
             if own:
                 llm.close()
@@ -725,6 +886,11 @@ class Orchestrator:
 
         source_context: ข้อมูลต้นทางของสินค้า — ส่งให้ script_reviewer เพื่อตรวจ
             grounding ของ revised_script ไม่ให้แนะนำ claim ที่เกิน source
+
+        The caller is responsible for deep-copying each post BEFORE calling
+        this method to create a position-preserving pre-mutation fallback
+        slot.  This method mutates posts in place and does not collect
+        fallback state internally.
         """
         import json as _json
         from datetime import datetime as _dt
@@ -823,6 +989,8 @@ class Orchestrator:
                 script_changed = final_script.strip() != original_script.strip()
 
                 if script_changed and final_script.strip():
+                    # Caller is responsible for deep-copying the post before
+                    # calling this method to create a pre-mutation fallback.
                     posts[script_post_idx]["script"] = final_script
                     # สร้าง video_prompts ใหม่จาก script สุดท้าย
                     if status_callback:
@@ -889,6 +1057,275 @@ class Orchestrator:
             pass  # review พังไม่ต้อง crash pipeline
 
         return script_review_result
+
+    # ------------------------------------------------------------------
+    #  Final Grounding Gate — shared truth boundary for all agents
+    # ------------------------------------------------------------------
+
+    def _serialize_post_for_grounding(self, post: dict[str, Any]) -> str:
+        """Serialize a complete post (all content fields) for grounding check.
+
+        Includes: title/headline, caption, script, CTA/offers, hashtags,
+        image_prompts, video_prompts — not just script.
+        """
+        parts = []
+        for key in ("title", "headline", "caption", "script", "cta", "offer",
+                     "hashtags", "image_prompt", "image_prompts",
+                     "video_prompt", "video_prompts"):
+            val = post.get(key)
+            if val is None:
+                continue
+            if isinstance(val, list):
+                val = "\n".join(str(v) for v in val)
+            if isinstance(val, str) and val.strip():
+                parts.append(f"[{key}]\n{val}")
+        return "\n\n".join(parts) if parts else ""
+
+    # ------------------------------------------------------------------
+    # Stale-result invalidation
+    # ------------------------------------------------------------------
+
+    # Maps each agent's primary result key(s) that represent a successful
+    # run.  A new attempt invalidates these keys so that a generation,
+    # parsing, schema, grounding, or fallback failure cannot leave the
+    # previous successful artifact representing the new attempt.
+    _PRIMARY_RESULT_KEYS: dict[str, tuple[str, ...]] = {
+        "product_spec": ("product_spec",),
+        "competitor_analysis": ("competitor_analysis",),
+        "campaign_strategy": ("campaign_strategy",),
+        "content_creator": ("content_creator", "content_creator_markdown"),
+    }
+
+    def _invalidate_stale_result(self, agent_key: str) -> None:
+        """Remove the primary successful-result key(s) for ``agent_key``.
+
+        Called at the start of each public agent run boundary so that a
+        failure during the new attempt cannot leave a stale artifact from a
+        prior successful run persistable under the same key.
+
+        Only the primary result key(s) are removed — diagnostic evidence,
+        run metadata, and unrelated agent results are preserved.
+        """
+        keys = self._PRIMARY_RESULT_KEYS.get(agent_key)
+        if not keys:
+            return
+        for k in keys:
+            self.results.pop(k, None)
+
+    def _ground_and_store(
+        self,
+        agent_key: str,
+        result: str,
+        llm: LLMClient | None = None,
+        runtime_context: dict[str, Any] | None = None,
+        posts: list[dict[str, Any]] | None = None,
+        pre_mutation_posts: list[dict[str, Any]] | None = None,
+        status_callback=None,
+    ) -> str:
+        """Final grounding gate — verify complete artifact before persistence.
+
+        This is the shared truth boundary for all agents (1–4).
+        Uses model reasoning for semantic entailment; no keyword/regex lists.
+
+        For text agents (1–3): verifies the full text output.
+        For content_creator (4): verifies the complete serialized posts
+        (title, caption, script, CTA, hashtags, image/video prompts).
+
+        **Fails closed**:
+        - If grounding fails and a pre-mutation candidate exists → restore it
+          atomically (all fields), reverify, and store only if reverified OK.
+        - If grounding fails and no pre-mutation candidate exists → raise
+          GroundingError (do NOT persist unsupported output as success).
+        - If the verifier itself fails (infrastructure) → raise GroundingError.
+
+        Returns the (possibly reverted) result string to store.
+        Raises GroundingError if no grounded candidate can be produced.
+        """
+        runtime_context = runtime_context or {}
+
+        # Build a grounding agent instance
+        from .agents.base_agent import BaseAgent
+        grounding_agent = BaseAgent.__new__(BaseAgent)
+        grounding_agent.agent_name = agent_key
+        grounding_agent.config = {"model": "grounding-check"}
+        grounding_agent.instructions = {}
+        grounding_agent.llm = llm
+
+        # Determine the text to verify
+        if posts is not None:
+            # Agent 4: serialize all posts
+            verify_texts = []
+            for p in posts:
+                t = self._serialize_post_for_grounding(p)
+                if t:
+                    verify_texts.append(t)
+            verify_text = "\n\n---\n\n".join(verify_texts)
+        else:
+            # Agents 1–3: full text output
+            verify_text = result
+
+        if not verify_text or not verify_text.strip():
+            # Nothing to verify — trivially grounded
+            return result
+
+        # Run grounding check
+        try:
+            check = grounding_agent.verify_final_grounding(verify_text, runtime_context)
+        except Exception:
+            check = {"grounded": False, "unsupported_claims": [], "error": "verifier_exception"}
+
+        if check.get("grounded"):
+            # Grounded — return to caller for persistence
+            return result
+
+        # Grounding failed — try pre-mutation fallback if available
+        if pre_mutation_posts is not None and posts is not None:
+            # Agent 4: restore complete pre-mutation posts atomically
+            fallback_text_parts = []
+            for p in pre_mutation_posts:
+                t = self._serialize_post_for_grounding(p)
+                if t:
+                    fallback_text_parts.append(t)
+            fallback_text = "\n\n---\n\n".join(fallback_text_parts)
+
+            if fallback_text.strip():
+                # Reverify the fallback
+                try:
+                    recheck = grounding_agent.verify_final_grounding(fallback_text, runtime_context)
+                except Exception:
+                    recheck = {"grounded": False, "unsupported_claims": [], "error": "verifier_exception"}
+
+                if recheck.get("grounded"):
+                    # Fallback is grounded — restore atomically and store
+                    for i, p in enumerate(posts):
+                        pre = pre_mutation_posts[i] if i < len(pre_mutation_posts) else {}
+                        # Restore all content fields
+                        for key in ("title", "headline", "caption", "script", "cta",
+                                     "offer", "hashtags", "image_prompt", "image_prompts",
+                                     "video_prompt", "video_prompts"):
+                            if key in pre:
+                                p[key] = pre[key]
+                            elif key in p:
+                                del p[key]
+                        # Truthful telemetry: the fallback snapshot was taken
+                        # before script review, so it has no script_review.
+                        # After revert, the post is back to its pre-review
+                        # state — script_review must not claim a mutation
+                        # remains active.
+                        if "script_review" not in pre:
+                            p.pop("script_review", None)
+                        else:
+                            p["script_review"] = pre["script_review"]
+                    import json as _json
+                    if status_callback:
+                        status_callback(
+                            f"⚠ Grounding gate: reverted to pre-mutation version "
+                            f"(unsupported claims: {len(check.get('unsupported_claims', []))})"
+                        )
+                    return _json.dumps({"posts": posts}, ensure_ascii=False, indent=2)
+                else:
+                    # Fallback also failed grounding — fail the run
+                    raise GroundingError(
+                        f"Final grounding failed for {agent_key}: "
+                        f"both mutated and pre-mutation versions are ungrounded. "
+                        f"Unsupported claims: {check.get('unsupported_claims', [])}"
+                    )
+        elif pre_mutation_posts is None and posts is None:
+            # Agents 1–3: no pre-mutation concept — fail the run
+            raise GroundingError(
+                f"Final grounding failed for {agent_key}: "
+                f"unsupported claims: {check.get('unsupported_claims', [])}. "
+                f"Error: {check.get('error', 'semantic_failure')}"
+            )
+
+        # No fallback available — fail the run
+        raise GroundingError(
+            f"Final grounding failed for {agent_key}: "
+            f"unsupported claims: {check.get('unsupported_claims', [])}. "
+            f"Error: {check.get('error', 'semantic_failure')}"
+        )
+
+    def _finalize_content_output(
+        self,
+        all_posts: list[dict[str, Any]],
+        pre_mutation_posts: list[dict[str, Any]],
+        llm: LLMClient | None,
+        runtime_context: dict[str, Any],
+        status_callback=None,
+    ) -> tuple[str, str]:
+        """Shared finalization seam for Agent 4 content output.
+
+        Both the auto path (run_content_creator_auto) and the manual path
+        (web_viewer manual content creation) must call this method so that
+        final grounding, schema validation, and persistence all cross the
+        same truth boundary.
+
+        Returns (content_json, content_markdown).
+        Raises GroundingError or ValueError on failure.
+        """
+        import json as _json
+
+        # --- Step 0a: Invalidate stale successful artifact ---
+        # A new finalization attempt must not leave a prior successful
+        # artifact persistable if this attempt fails.  This is the shared
+        # seam for auto, manual web, and qualification paths.
+        self._invalidate_stale_result("content_creator")
+
+        # --- Step 0b: Non-empty aggregate invariant ---
+        # A final Agent 4 artifact with zero posts is mechanically invalid.
+        # Fail closed before any schema validation, grounding, or persistence.
+        # This guard is the shared seam for every aggregation caller
+        # (standalone, auto, manual web, qualification runner).
+        if not all_posts:
+            raise ValueError(
+                "content_creator finalization rejected an empty aggregate "
+                "— a final Agent 4 artifact must contain at least one post"
+            )
+
+        combined = {"posts": all_posts}
+        content = _json.dumps(combined, ensure_ascii=False, indent=2)
+
+        # --- Step 1: Parse raw JSON (already done above) ---
+        # combined is the parsed representation of the raw output
+
+        # --- Step 2: Validate mechanical schema BEFORE grounding ---
+        # Catch schema-invalid candidates before spending grounding resources.
+        from .output_validators import validate_content_output
+        ok, err = validate_content_output(combined)
+        if not ok:
+            if status_callback:
+                status_callback(f"⚠ ไฟล์ content ไม่ผ่าน schema (pre-grounding): {err}")
+            raise ValueError(f"Content output validation failed (pre-grounding): {err}")
+
+        # --- Step 3: Perform semantic grounding ---
+        # Grounding may revert to the pre-mutation fallback candidate.
+        content = self._ground_and_store(
+            "content_creator", content, llm,
+            runtime_context=runtime_context,
+            posts=all_posts,
+            pre_mutation_posts=pre_mutation_posts,
+            status_callback=status_callback,
+        )
+
+        # --- Step 4: Re-validate schema after possible fallback revert ---
+        # The fallback candidate must also pass the schema gate.
+        combined = _json.loads(content)
+        ok, err = validate_content_output(combined)
+        if not ok:
+            if status_callback:
+                status_callback(f"⚠ ไฟล์ content ไม่ผ่าน schema (post-grounding): {err}")
+            raise ValueError(f"Content output validation failed (post-grounding): {err}")
+
+        # --- Step 5: Persist only the exact fully accepted candidate ---
+        content = _json.dumps(combined, ensure_ascii=False, indent=2)
+        try:
+            from .content_schema import render_posts_to_markdown
+            markdown = render_posts_to_markdown(combined)
+        except Exception:
+            markdown = content
+        self.results["content_creator"] = content
+        self.results["content_creator_markdown"] = markdown
+        return content, markdown
 
     # ------------------------------------------------------------------
     #  Auto mode — agent เลือกสินค้าเอง + คอนเทนต์ไม่ซ้ำ
@@ -1254,6 +1691,8 @@ class Orchestrator:
         from .config_loader import get_section
 
         own = llm is None
+        # Invalidate stale result before make_client can fail.
+        self._invalidate_stale_result("content_creator")
         if own:
             llm = self.make_client()
         try:
@@ -1324,6 +1763,7 @@ class Orchestrator:
             target_platforms = platforms if platforms else [""]
 
             all_posts: list[dict[str, Any]] = []
+            pre_mutation_posts: list[dict[str, Any]] = []
             all_script_reviews: list[dict[str, Any]] = []
             overall_duplicate = False
             max_similarity = 0.0
@@ -1375,7 +1815,7 @@ class Orchestrator:
                     }
                     if step_context is not None:
                         content_kwargs["step_context"] = step_context.with_quick_brief(attempt_brief)
-                    content = self.run_content_creator("", "", "", **content_kwargs)
+                    content = self._run_content_creator_raw("", "", "", **content_kwargs)
 
                     # ดึง caption เพื่อตรวจซ้ำ
                     caption_summary = ""
@@ -1421,6 +1861,14 @@ class Orchestrator:
                     if posts and platform_label:
                         posts[0]["platform"] = platform_label
 
+                    # Position-preserving fallback: deep-copy the post
+                    # BEFORE script review so the pre-mutation snapshot is
+                    # associated with this exact post position.  This avoids
+                    # the sparse-collector + length-padding misalignment that
+                    # occurs when an unchanged post precedes a mutated post.
+                    import copy as _copy
+                    pre_snapshot = _copy.deepcopy(posts[0]) if posts else None
+
                     script_review_result = self._review_script_in_posts(
                         posts, platform_used, llm, status_callback, ch_cfg,
                         source_context=getattr(self, "_content_source_context", ""),
@@ -1428,29 +1876,42 @@ class Orchestrator:
 
                     if posts:
                         all_posts.append(posts[0])
+                        # One fallback slot per final post, preserving exact
+                        # position and post identity.  If no mutation
+                        # occurred, the snapshot equals the final post (a
+                        # correct no-op fallback).  Deep copy prevents aliasing.
+                        pre_mutation_posts.append(
+                            pre_snapshot if pre_snapshot is not None
+                            else _copy.deepcopy(posts[0])
+                        )
                     all_script_reviews.append(script_review_result)
                 except Exception:
                     pass  # review พังไม่ต้อง crash pipeline
 
-            # รวมผลลัพธ์ทุกแพลตฟอรืมเป็น JSON เดียว
+            # รวมผลลัพธ์ทุกแพลตฟอร์มเป็น JSON เดียว
             combined = {"posts": all_posts}
 
-            # Strict JSON contract: final saved artifact must always pass CONTENT_ARTIFACT_SCHEMA
-            from .output_validators import validate_content_output
-            ok, err = validate_content_output(combined)
-            if not ok:
-                if status_callback:
-                    status_callback(f"⚠ ไฟล์ content ไม่ผ่าน schema: {err}")
-                raise ValueError(f"Content output validation failed: {err}")
+            # --- Final Grounding Gate — verify complete posts after all mutations ---
+            # Generic truth boundary: checks that final content (after script
+            # review mutation + video prompt regeneration) does not contain
+            # claims unsupported by the authorized runtime context.
+            # Fails closed: raises GroundingError if no grounded candidate exists.
+            # pre_mutation_posts has one deep-copied slot per final post,
+            # assembled at append time, preserving exact position/identity.
+            grounding_runtime_context = {
+                "product_source": getattr(self, "_content_source_context", ""),
+                "brand_context": getattr(self, "_content_brand_context", ""),
+                "quick_brief": attempt_brief or quick_brief or "",
+                "ui_options": {
+                    "platform": platform_used,
+                    "media_type": media_type,
+                },
+            }
 
-            content = _json.dumps(combined, ensure_ascii=False, indent=2)
-            try:
-                from .content_schema import render_posts_to_markdown
-                markdown = render_posts_to_markdown(combined)
-            except Exception:
-                markdown = content
-            self.results["content_creator"] = content
-            self.results["content_creator_markdown"] = markdown
+            content, markdown = self._finalize_content_output(
+                all_posts, pre_mutation_posts, llm,
+                grounding_runtime_context, status_callback,
+            )
 
             # บันทึก history (1 entry ต่อการสร้าง — เก็บ product_ids ทั้งหมด + pillar)
             record_platform = ", ".join(

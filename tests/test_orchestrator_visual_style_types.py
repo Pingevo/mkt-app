@@ -10,6 +10,8 @@ hint ไปยัง prompt ของ LLM ได้ถูกต้อง
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.orchestrator import Orchestrator
@@ -21,8 +23,12 @@ class FakeLLM:
     def __init__(self, output: str = ""):
         self.output = output
         self.calls: list[dict] = []
+        self.last_truncated = False
 
     def chat(self, messages, **kwargs):
+        source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
         self.calls.append({"messages": messages, "kwargs": kwargs})
         if kwargs.get("return_annotations"):
             return self.output, []
@@ -30,6 +36,20 @@ class FakeLLM:
 
     def close(self):
         pass
+
+
+_VALID_POSTS_JSON = json.dumps({
+    "posts": [{
+        "platform": "Facebook",
+        "concept": "test",
+        "title": "Test Post",
+        "caption": "test caption",
+        "hashtags": "#test",
+        "asset_ids": [],
+        "image_prompts": [],
+        "video_prompts": [],
+    }],
+}, ensure_ascii=False)
 
 
 def _make_orchestrator(brand_visual: dict) -> Orchestrator:
@@ -58,7 +78,7 @@ def test_run_content_creator_string_image_style_does_not_crash():
     orch = _make_orchestrator({
         "image_style": "สดใส ปลอดภัย เหมาะกับเด็ก",
     })
-    fake_llm = FakeLLM(output='{"posts": []}')
+    fake_llm = FakeLLM(output=_VALID_POSTS_JSON)
 
     # ก่อนแก้: บรรทัด style.get("tone", "") จะ raise AttributeError
     # เพราะ style เป็น string ไม่ใช่ dict
@@ -69,7 +89,7 @@ def test_run_content_creator_string_image_style_does_not_crash():
         llm=fake_llm,
     )
 
-    assert result == '{"posts": []}'
+    assert json.loads(result)["posts"][0]["title"] == "Test Post"
     # visual_style hint ต้องปรากฏใน prompt ที่ส่งให้ LLM
     all_prompt_text = " ".join(
         str(c["messages"]) for c in fake_llm.calls
@@ -84,7 +104,7 @@ def test_run_content_creator_string_keywords_does_not_crash():
     orch = _make_orchestrator({
         "keywords": "outdoor rugged, bluetooth call, long battery",
     })
-    fake_llm = FakeLLM(output='{"posts": []}')
+    fake_llm = FakeLLM(output=_VALID_POSTS_JSON)
 
     # ก่อนแก้: ", ".join(keywords) จะ join ทีละตัวอักษร → "o, u, t, d, o, o, r..."
     result = orch.run_content_creator(
@@ -94,7 +114,7 @@ def test_run_content_creator_string_keywords_does_not_crash():
         llm=fake_llm,
     )
 
-    assert result == '{"posts": []}'
+    assert json.loads(result)["posts"][0]["title"] == "Test Post"
     all_prompt_text = " ".join(
         str(c["messages"]) for c in fake_llm.calls
     )
@@ -109,7 +129,7 @@ def test_run_content_creator_dict_image_style_still_works():
         "image_style": {"tone": "อบอุ่น สดใส", "product_shot": "สะอาด พื้นขาว"},
         "keywords": ["soft light", "warm tone", "family"],
     })
-    fake_llm = FakeLLM(output='{"posts": []}')
+    fake_llm = FakeLLM(output=_VALID_POSTS_JSON)
 
     result = orch.run_content_creator(
         product_spec="Lagenio K2 smartwatch",
@@ -118,7 +138,7 @@ def test_run_content_creator_dict_image_style_still_works():
         llm=fake_llm,
     )
 
-    assert result == '{"posts": []}'
+    assert json.loads(result)["posts"][0]["title"] == "Test Post"
     all_prompt_text = " ".join(
         str(c["messages"]) for c in fake_llm.calls
     )
@@ -136,7 +156,7 @@ def test_run_content_creator_string_image_style_and_string_keywords_together():
         "image_style": "สปอร์ตเอาต์ดอร์ ลุย ทนทาน",
         "keywords": "outdoor rugged, bluetooth call, long battery life",
     })
-    fake_llm = FakeLLM(output='{"posts": []}')
+    fake_llm = FakeLLM(output=_VALID_POSTS_JSON)
 
     result = orch.run_content_creator(
         product_spec="Lagenio K2 smartwatch",
@@ -145,7 +165,7 @@ def test_run_content_creator_string_image_style_and_string_keywords_together():
         llm=fake_llm,
     )
 
-    assert result == '{"posts": []}'
+    assert json.loads(result)["posts"][0]["title"] == "Test Post"
     all_prompt_text = " ".join(
         str(c["messages"]) for c in fake_llm.calls
     )

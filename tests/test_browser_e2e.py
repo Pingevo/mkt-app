@@ -178,9 +178,14 @@ def _server(tmp_path_factory):
             fake.results["content_creator"] = content
             fake.results["content_creator_markdown"] = "# Test Post\n\ntest caption #test\n"
             return content
-        fake.run_content_creator.side_effect = _run_content_creator
+        fake._run_content_creator_raw.side_effect = _run_content_creator
 
         fake._review_script_in_posts = MagicMock(return_value={})
+        # _finalize_content_output returns (content_json, content_markdown)
+        fake._finalize_content_output.return_value = (
+            fake.results.get("content_creator", "{}"),
+            fake.results.get("content_creator_markdown", ""),
+        )
         fake.select_product_auto.return_value = {
             "product_ids": ["TestProduct"],
             "concept": "test concept",
@@ -787,7 +792,7 @@ class TestErrorBehavior:
             fake.run_product_spec.side_effect = RuntimeError("Simulated test failure")
             fake.run_competitor_analysis.side_effect = RuntimeError("Simulated test failure")
             fake.run_campaign_strategy.side_effect = RuntimeError("Simulated test failure")
-            fake.run_content_creator.side_effect = RuntimeError("Simulated test failure")
+            fake._run_content_creator_raw.side_effect = RuntimeError("Simulated test failure")
             return fake
 
         web_viewer.Orchestrator = lambda **kw: _make_failing_orch()

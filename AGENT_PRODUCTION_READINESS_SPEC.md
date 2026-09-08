@@ -8,6 +8,31 @@
 - `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md` — ลำดับงาน ขอบเขต เวลา และ session handoff สำหรับพา Agent ทั้งสี่ขึ้น Beta
 - `AGENT_ORCHESTRATION_SPEC.md` — team flow และ artifact handoff ในอนาคต
 
+## Authority rule (binding — read before any mutation stage)
+
+1. **Product source** determines product capabilities and technical facts.
+2. **Researched evidence** may add externally verified facts with provenance.
+3. **Brand/Audience** controls positioning, audience, tone, vocabulary, and channels; it must not create product capabilities.
+4. **Quick Brief** controls the requested job but cannot turn an unsupported capability or offer into fact.
+5. **Brand examples for one product must not transfer their facts to another product.**
+6. **Any stage that mutates content after review must be followed by final grounding before persistence.**
+
+### Final Grounding Gate (Checkpoint A — implemented, pending approval)
+
+The final grounding gate is wired into the smallest common pre-persistence seam for all Agents 1–4:
+- `run_product_spec` → `_ground_and_store("product_spec", ...)`
+- `run_competitor_analysis` → `_ground_and_store("competitor_analysis", ...)`
+- `run_campaign_strategy` → `_ground_and_store("campaign_strategy", ...)`
+- `run_content_creator_auto` → `_ground_and_store("content_creator", ..., posts=..., pre_mutation_posts=...)`
+
+The gate:
+1. Verifies the **complete final artifact** (not just script): title, caption, script, CTA, hashtags, image_prompts, video_prompts for Agent 4; full text for Agents 1–3.
+2. **Fails closed** on all infrastructure failures: missing LLM, exception, malformed JSON, empty response, truncation → `GroundingError`.
+3. On semantic failure with a pre-mutation candidate: **atomically restores all fields** and **reverifies** the fallback.
+4. If no grounded candidate exists: **raises `GroundingError`** — does not persist unsupported output as success.
+5. Uses **generic wording** in production prompts ("สินค้าอื่น", "สินค้าที่กำลังตรวจ") — no product-specific examples.
+6. Uses **model reasoning** for semantic entailment — no keyword/regex lists.
+
 ## Product boundary
 
 User-facing Agent มีสี่ตำแหน่ง:
@@ -185,7 +210,7 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 ### Current classification
 
-**BETA PASS — selected-product data scope.** Qualification ล่าสุด `20260831_160709` ผ่านทั้ง zero-prompt และ Quick Brief + Agent Settings ด้วยโมเดลจริง ผลลัพธ์ถูกสินค้าและใช้ต่อได้ โดยรอบนี้ไม่ได้ส่ง product image เข้า model จึงยังไม่ถือเป็นหลักฐานใหม่ของ image-derived claim path
+**NOT READY — ต้อง requalify.** Output ล่าสุดขยาย camera/audio/accelerometer/Class Disable/Geo-Fence facts เกิน product source ต้องผ่าน Checkpoint A (generic final-output truth boundary) ก่อน requalify
 
 ## Agent 2 — Competitor Analyst (`competitor_analysis`)
 
@@ -215,7 +240,7 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 ### Current classification
 
-**LIMITED BETA PASS — default discovery และ explicit competitor analysis.** Qualification จริงรอบล่าสุด (`beta_rerun_a2_20260901_033048`) สร้าง analysis ที่ใช้ต่อได้ ระบุคู่แข่ง `imoo Watch Phone Z1`, `imoo Watch Phone Z7`, `myFirst Fone R1c` พร้อม evidence URLs ที่เกี่ยวข้อง แยก fact, inference และ missing evidence ชัดเจน ทำตาม Quick Brief (เน้นราคาและฟีเจอร์ GPS tracking) ไม่แต่ง critical facts ผ่านด้วย `google/gemini-3.5-flash`, 2 paid calls (generate + repair), ค่าใช้จ่าย `$0.176891`, Hub delivery COMPLETE (2/2)
+**NOT READY — ต้องแก้ user-facing rendering + ลบ unsupported factual premises.** Fail-closed drop ของ unverified evidence_based recommendations แก้แล้ว (commit `f50ec8e`) แต่ user-facing rendering ยังมี internal phrases ("ค่าที่จับคู่ได้", "evidence", "inference/recommendation") และยังไม่ลบ concrete premises ที่หลุดผ่าน. ต้องผ่าน Checkpoint A + B ก่อน requalify
 
 ## Agent 3 — Campaign Strategist (`campaign_strategy`)
 
@@ -248,7 +273,7 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 ### Current classification
 
-**LIMITED BETA PASS — context-grounded strategy, live-web not yet proven.** Qualification จริงรอบล่าสุด (`beta_rerun_a3_20260901_034644`) สร้างกลยุทธ์แคมเปญที่ใช้ตัดสินใจได้จริง มี campaign idea, target audience, channels, KPIs พร้อมแยก fact/estimate/uncertainty ชัดเจน ทำตาม Quick Brief (วางแคมเปญเปิดตัว LAGENIO K2) ไม่แต่ง critical facts ราคา งบประมาณ หรือเป้าหมายตัวเลข ใช้ product facts ถูกต้อง ผ่านด้วย google/gemini-3.7-flash, 2 paid calls (generate + repair), ค่าใช้จ่าย $0.029765, Hub delivery 2/2 ยืนยัน ส่วน live-web เป็น capability แยกและต้องพิสูจน์เฉพาะเมื่อจะเปิดให้ user
+**NOT READY — ต้อง requalify.** Brand/Audience values (age 25–45, Working Mom, selected channels) เป็น legitimate user settings แต่ K9/video-call examples ต้องไม่กลายเป็น K5 capabilities. Internal pending-validation language รั่วออกสู่ report. ต้องผ่าน Checkpoint A + B ก่อน requalify
 
 ## Agent 4 — Content Creator (`content_creator`)
 
@@ -283,7 +308,7 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 ### Current classification
 
-**LIMITED BETA PASS — Facebook single-post text + image prompt, other platforms/media not yet proven.** Qualification จริงรอบล่าสุด (`beta_rerun_a4_20260901_035324`) สร้าง 1 โพสต์ Facebook ที่มี concept, caption, hashtags, image prompt ใช้ product facts ถูกต้อง (AMOLED 1.78", กล้อง 5MP, GPS, Heart Rate, SpO2) ไม่แต่งราคา/งบ/KPI ทำตาม Quick Brief (ว่าง) ผ่าน review ด้วย google/gemini-3.7-flash, 2 paid calls (generate + review), ค่าใช้จ่าย $0.038109, Hub delivery 1/2 ยืนยันโดย local accounting ครบ ส่วน TikTok, multi-post, actual image generation, และ video เป็น capability แยกและต้องพิสูจน์เฉพาะเมื่อจะเปิดให้ user
+**NOT READY — final grounding หลัง post-review mutation ยังไม่ qualified.** Script generation + review path ใช้งานได้ (10 calls, 4 script reviews, all finish=stop) แต่ final persisted output ยังมี unsupported claims ("24 ชั่วโมง", "โปรโมชั่นพิเศษวันนี้", voice-message capability, game-addiction claims). source_context ส่งถึง script_reviewer แล้ว แต่ fail-closed มีเฉพาะ empty second review ไม่ cover semantically unsupported revision. ต้องผ่าน Checkpoint A + C ก่อน requalify
 
 ## Manager — internal component
 
@@ -314,18 +339,19 @@ Product Owner/ผู้ใช้สายงานตรวจ output จริ�
 
 ## Current evidence snapshot
 
-- Latest all-Agent qualification: `data/all_agents_beta_qualification/20260831_160709/`
-- Latest Agent 2 qualification (final): `data/all_agents_beta_qualification/beta_rerun_a2_20260901_033048/`
-- Latest Agent 3 qualification (final): `data/all_agents_beta_qualification/beta_rerun_a3_20260901_034644/`
-- Latest Agent 4 qualification (final): `data/all_agents_beta_qualification/beta_rerun_a4_20260901_035324/`
-- Offline suite: 776 passed, 0 failed
-- Paid usage: `$0.229751` over 12 requests (all-Agent) + `$0.176891` Agent 2 final + `$0.029765` Agent 3 final + `$0.038109` Agent 4 final
-- Agent 1: zero-prompt และ Quick Brief + Settings ส่งงานที่ใช้ได้
-- Agent 2: **LIMITED BETA PASS** — default discovery และ explicit competitor analysis เปิดใช้ได้
-- Agent 3: **LIMITED BETA PASS** — context-grounded campaign strategy ผ่าน, live-web research ยังไม่ถูกพิสูจน์
-- Agent 4: **LIMITED BETA PASS (Facebook single-post + image brief)** — 1 post, caption, hashtags, image prompt ไม่แต่งราคา, review ผ่าน; TikTok/multi-post/actual image gen/video ยังไม่ถูกพิสูจน์
-- Stage B video ไม่ได้เริ่ม
-- Hub reconciliation จาก qualification runner ยังใช้ตัดสินไม่ได้ เนื่องจาก collector snapshot เกิดก่อน async flush เสร็จ ต้องแก้ measurement ก่อนตรวจซ้ำ
+- Remediation checkpoint: commit `f50ec8e` on `origin/dev` (2026-09-08)
+- Original failed UAT (immutable): `evaluation_artifacts/real_uat_20260908_083822_FAILED_PARTIAL/`
+- Image probes: `evaluation_artifacts/image_probe_20260908_092915/` — no-ref OK (10s), one-normalized-ref OK (11s), three-raw-refs TIMEOUT (200s, 6.6MB request)
+- Final Agent 4 UAT: `evaluation_artifacts/final_agent4_uat_20260908_094512/` — flow done, 10 calls, 4 script reviews, all finish=stop, but final output still contains unsupported claims ("24 ชั่วโมง", "โปรโมชั่นพิเศษวันนี้", voice-message capability, game-addiction claims)
+- Product ingestion + 3 K5 images to model calls: **PASS**
+- Agent 1: **ต้อง requalify** — persisted output ขยาย camera/audio/accelerometer/Class Disable/Geo-Fence facts เกิน source
+- Agent 2: **ต้องแก้ user-facing rendering + ลบ unsupported factual premises** — fail-closed drop ของ unverified evidence_based recommendations แก้แล้ว แต่ user-facing rendering ยังมี internal language
+- Agent 3: **ต้อง requalify** — Brand/Audience values (age 25–45, Working Mom, channels) เป็น legitimate user settings แต่ K9/video-call examples ต้องไม่กลายเป็น K5 capabilities; internal pending-validation language ต้องไม่ leak
+- Agent 4: **Script path ใช้ได้ แต่ final grounding หลัง post-review mutation ยังไม่ qualified** — source_context ส่งถึง script_reviewer แล้ว แต่ model ยังแนะนำ unsupported claims; fail-closed มีเฉพาะ empty second review ไม่ cover semantically unsupported revision
+- Image generation: **PARTIAL** — no-ref PASS, one-normalized-ref PASS, three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix
+- Real video generation: **NOT QUALIFIED**
+- Scheduler: **NOT QUALIFIED** — unit tests ไม่พอพิสูจน์ UI save → scheduled fire → execution → history
+- Overall: **NOT FREEZE-READY**
 
 Automated tests เป็นหลักฐาน reliability ของ code path ไม่ใช่ใบรับรองคุณภาพ frontier model output
 
@@ -333,31 +359,38 @@ Automated tests เป็นหลักฐาน reliability ของ code pat
 
 | Agent | Beta today | Production Ready today | Honest user-facing label |
 |---|---|---|---|
-| Product Analyst | **Yes — selected-product data scope** | No | Beta — Product Analyst |
-| Competitor Analyst | **Yes — Limited Beta (default discovery + explicit)** | No | Limited Beta — Competitor Analyst |
-| Campaign Strategist | **Yes — Limited Beta (context-grounded strategy)** | No | Limited Beta — Campaign Strategist (live-web research not yet proven) |
-| Content Creator | **Yes — Limited Beta (Facebook single-post + image brief)** | No | Limited Beta — Content Creator (Facebook text + image prompt only; TikTok/multi-post/image gen/video not proven) |
+| Product Analyst | **No — ต้อง requalify** | No | Not Ready — output ขยาย facts เกิน source (camera/audio/accelerometer/Class Disable/Geo-Fence) |
+| Competitor Analyst | **No — ต้องแก้ rendering + ลบ unsupported premises** | No | Not Ready — user-facing rendering ยังมี internal language และ unsupported factual premises |
+| Campaign Strategist | **No — ต้อง requalify** | No | Not Ready — K9/video-call examples อาจกลายเป็น K5 capabilities; pending-validation language รั่วออก |
+| Content Creator | **No — final grounding หลัง post-review mutation ยังไม่ qualified** | No | Not Ready — script path ใช้ได้ แต่ final output ยังมี unsupported claims |
 
-ไม่มี Agent ตัวใด Production Ready จากหลักฐานปัจจุบัน และห้ามใช้จำนวน unit tests เพียงอย่างเดียวเปลี่ยนสถานะนี้
+ไม่มี Agent ตัวใด Beta หรือ Production Ready จากหลักฐานปัจจุบัน รวมถึง:
 
-## Agent 2 — Known Limitations (post-Beta feedback)
+- Image generation: PARTIAL (no-ref + one-normalized-ref PASS; three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix)
+- Real video generation: NOT QUALIFIED
+- Scheduler: NOT QUALIFIED (unit tests ไม่พอพิสูจน์ UI save → scheduled fire → execution → history)
 
-- **Provenance check ตรวจได้แค่ URL อยู่ใน evidence set ไม่ใช่ semantic grounding** — semantic grounding เป็นความรับผิดชอบร่วมของ model และการประเมินคุณภาพ ไม่สร้าง regex gate เพิ่ม
-- **ถ้อยคำอย่าง "ถนอมสายตา"** เป็น marketing language ที่ model ใส่เอง ไม่ใช่ factual claim แต่อาจต้องปรับในภายหลัง
-- ห้ามสร้าง regex หรือยิงทดสอบ Agent 2 เพิ่มเพื่อแก้ known limitations เหล่านี้
+**Overall: NOT FREEZE-READY** จนกว่า Checkpoints A–E ผ่านครบ
 
-## Agent 3 — Known Limitations (post-Beta feedback)
+## Agent 2 — Known Limitations (current cycle)
 
-- **Live-web research ยังไม่ถูกพิสูจน์** — model เลือกใช้ context ที่มีแทนการค้นเว็บ เมื่อ context เพียงพอ web_search: true หมายถึงอนุญาตให้ใช้ ไม่ได้หมายความว่าต้องเรียกทุกงาน
-- **ไม่บังคับ tool call เมื่อ context เพียงพอ** — การบังคับให้เรียก web ทั้งที่ไม่จำเป็นจะเพิ่มต้นทุนและอาจลดคุณภาพ
-- ห้ามยิง Agent 3 เพิ่มในรอบ Beta นี้
+- User-facing rendering ยังมี internal phrases ("ค่าที่จับคู่ได้", "evidence", "inference/recommendation") — ต้องแก้ใน Checkpoint B
+- Concrete premises ที่หลุดผ่านหลัง URL validation fail ต้องลบ ไม่เก็บไว้โดย relabel เป็น hypothesis — แก้ส่วน drop แล้ว แต่ต้อง verify ใน requalify
+- ต้องผ่าน Checkpoint A + B ก่อน requalify
 
-## Agent 4 — Known Limitations (post-Beta feedback)
+## Agent 3 — Known Limitations (current cycle)
 
-- **พิสูจน์เฉพาะ Facebook single-post + caption + hashtags + image prompt** — ยังไม่ได้พิสูจน์ TikTok, multi-post, actual image generation, หรือ video
-- **Hub delivery unconfirmed บาง request** เนื่องจาก flush timeout ของ collector แต่ local accounting ครบ
-- ถ้าต้องการเปิด TikTok + multi-post + actual image/video ตาม UI ต้องยิงเคสเพิ่มอีกครั้ง
-- ห้ามยิง Agent 4 เพิ่มในรอบ Beta นี้
+- K9/video-call examples ต้องไม่กลายเป็น K5 capabilities — ต้องแก้ใน Checkpoint A
+- Internal pending-validation language รั่วออกสู่ report — ต้องแก้ใน Checkpoint B
+- Brand/Audience values (age 25–45, Working Mom, channels) เป็น legitimate user settings — ไม่ต้องลบ
+- ต้องผ่าน Checkpoint A + B ก่อน requalify
+
+## Agent 4 — Known Limitations (current cycle)
+
+- Final grounding หลัง post-review mutation ยังไม่ qualified — source_context ส่งถึง script_reviewer แล้ว แต่ model ยังแนะนำ unsupported claims
+- Fail-closed มีเฉพาะ empty second review ไม่ cover semantically unsupported revision — ต้องแก้ใน Checkpoint A
+- Unsupported claims ใน final output: "24 ชั่วโมง", "โปรโมชั่นพิเศษวันนี้", voice-message capability, game-addiction claims
+- ต้องผ่าน Checkpoint A + C ก่อน requalify
 
 ## Definition of Done
 

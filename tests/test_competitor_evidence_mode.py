@@ -91,11 +91,14 @@ class FakeLLM:
         self.calls: list[dict] = []
         self._last_raw_response = {"usage": {"server_tool_use_details": {"web_search_requests": 1, "tool_calls_executed": 1}}}
         self._last_raw_annotations_count = 0
+        self.last_truncated = False
 
     def chat(self, messages, **kwargs):
+        source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
         self.calls.append({"messages": messages, "kwargs": kwargs})
         self._last_raw_annotations_count = len(self.annotations)
-        source = kwargs.get("source", "")
         if ".semantic_review" in source:
             return self.semantic_review_output
         if ".revise" in source:

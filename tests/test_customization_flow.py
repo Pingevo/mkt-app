@@ -23,8 +23,12 @@ from src.config_loader import get_agent_config, load_config
 class FakeLLM:
     def __init__(self):
         self.calls: list[dict] = []
+        self.last_truncated = False
 
     def chat(self, messages, **kwargs):
+        source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
         self.calls.append({"messages": messages, "kwargs": kwargs})
         out = (
             "## ราคาแนะนำ\n"

@@ -21,9 +21,16 @@ from src.orchestrator import Orchestrator
 class FakeLLM:
     def __init__(self):
         self.calls: list[dict] = []
+        self.last_truncated = False
 
     def chat(self, messages, **kwargs):
         self.calls.append({"messages": messages, "kwargs": kwargs})
+        # Grounding gate calls use a JSON schema response format and a
+        # source ending in .final_grounding_check — return a valid
+        # grounded verdict so wiring tests are not blocked by the gate.
+        source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
         out = (
             "## ราคาแนะนำ\n- ราคา pending financial validation\n"
             "## แคมเปญหลัก\n- ชื่อ: Launch Campaign เปิดตัวสินค้ารุ่นใหม่\n"
@@ -172,7 +179,11 @@ def test_orchestrator_wires_product_images_to_all_agents(monkeypatch, tmp_path):
         captured_images[self.agent_name] = list(kwargs.get("image_paths") or [])
         captured_prompts[self.agent_name] = user_prompt
         if self.agent_name == "content_creator":
-            return '{"posts":[]}'
+            return json.dumps({"posts": [{
+                "platform": "Facebook", "concept": "test", "title": "T",
+                "caption": "C", "hashtags": "#h", "asset_ids": [],
+                "image_prompts": [], "video_prompts": [],
+            }]})
         return f"[{self.agent_name} result]"
 
     monkeypatch.setattr(base_agent.BaseAgent, "run", _capture_run)

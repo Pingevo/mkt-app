@@ -618,7 +618,7 @@ def run_case(
                                 multi_brief = (multi_brief or "") + "\n\nวิเคราะห์สินค้านี้แล้วเลือกมุมมองที่เหมาะสมที่สุด แล้วสร้างโพสต์จากมุมมองนั้น"
                             if platform_label:
                                 multi_brief = (multi_brief or "") + f"\nแพลตฟอร์มที่ต้องสร้างสำหรับโพสต์นี้: {platform_label} เท่านั้น"
-                            result = orch.run_content_creator(
+                            result = orch._run_content_creator_raw(
                                 "", analysis_text, campaign_text,
                                 llm=llm, quick_brief=multi_brief,
                                 media_type=media_type,
@@ -640,44 +640,89 @@ def run_case(
                     combined = {"posts": all_posts}
                     raw_json = json.dumps(combined, ensure_ascii=False, indent=2)
 
-                    # Item 10: S4 presentation parity — Judge should see the
-                    # production-equivalent rendered representation, not raw JSON.
-                    # The production UI renders posts to markdown via
-                    # render_posts_to_markdown (src/content_schema.py).
-                    # We preserve raw JSON as a separate audit artifact and
-                    # write the rendered markdown as the judge-facing output.
+                    # Final grounding gate — qualification-facing path must
+                    # cross the same truth boundary as production.  No
+                    # script review in qual_runner, so pre-mutation fallback
+                    # is a deep copy of the final posts.
+                    import copy as _qcopy
+                    _pre_posts = [_qcopy.deepcopy(p) for p in all_posts]
+                    _grounding_ctx = {
+                        "product_source": getattr(orch, "_content_source_context", ""),
+                        "brand_context": getattr(orch, "_content_brand_context", ""),
+                        "quick_brief": quick_brief or "",
+                        "ui_options": {
+                            "platform": ", ".join(target_platforms) if target_platforms else "",
+                            "media_type": media_type,
+                        },
+                    }
+                    grounding_failed = False
                     try:
-                        from src.content_schema import render_posts_to_markdown
-                        rendered_md = render_posts_to_markdown(combined)
-                        if rendered_md and rendered_md.strip():
-                            result_text = rendered_md
-                        else:
-                            # Renderer returned empty — fall back to raw JSON
-                            # but flag it so it's not silently treated as
-                            # production-equivalent.
-                            result_text = raw_json
-                            error = "content_creator render_posts_to_markdown returned empty — falling back to raw JSON"
-                    except Exception as render_exc:
-                        # Renderer failure — do NOT silently fall back to raw JSON.
-                        # This is a harness presentation failure that should be
-                        # visible, not hidden.
-                        result_text = raw_json
-                        error = f"content_creator render_posts_to_markdown failed: {render_exc}"
-
-                    # Save raw JSON as audit artifact (machine-readable)
-                    raw_json_file = output_dir / f"{case_id}_output_raw.json"
-                    raw_json_file.write_text(raw_json, encoding="utf-8")
-
-                    # Auto media generation (mirrors UI) — uses raw JSON
-                    if (auto_image or auto_video) and all_posts:
-                        _run_media_gen(
-                            orch, llm, raw_json, output_dir,
-                            auto_image=auto_image or False,
-                            auto_video=auto_video or False,
-                            product_id=product_id,
-                            case_id=case_id,
-                            stage=stage,
+                        raw_json, _rendered_md = orch._finalize_content_output(
+                            all_posts, _pre_posts, llm, _grounding_ctx, None,
                         )
+                        combined = json.loads(raw_json)
+                    except Exception as finalize_exc:
+                        error = f"content_creator final grounding failed: {finalize_exc}"
+                        result_text = ""
+                        raw_json = ""
+                        combined = {"posts": []}
+                        grounding_failed = True
+
+                    if grounding_failed:
+                        # Grounding/finalization failure — rejected content
+                        # must not be rendered as a successful result, sent
+                        # to Judge evaluation as candidate output, or used
+                        # as media-generation input.  A diagnostic artifact
+                        # may be retained but must be clearly marked as
+                        # rejected/debug evidence and excluded from
+                        # success/completeness evaluation.
+                        rejected_json = json.dumps(
+                            {"posts": all_posts, "_rejected": True,
+                             "_reason": "grounding_failure"},
+                            ensure_ascii=False, indent=2,
+                        )
+                        rejected_file = output_dir / f"{case_id}_rejected_debug.json"
+                        rejected_file.write_text(rejected_json, encoding="utf-8")
+                    else:
+                        # Item 10: S4 presentation parity — Judge should see
+                        # the production-equivalent rendered representation,
+                        # not raw JSON.  The production UI renders posts to
+                        # markdown via render_posts_to_markdown
+                        # (src/content_schema.py).  We preserve raw JSON as a
+                        # separate audit artifact and write the rendered
+                        # markdown as the judge-facing output.
+                        try:
+                            from src.content_schema import render_posts_to_markdown
+                            rendered_md = render_posts_to_markdown(combined)
+                            if rendered_md and rendered_md.strip():
+                                result_text = rendered_md
+                            else:
+                                # Renderer returned empty — fall back to raw
+                                # JSON but flag it so it's not silently
+                                # treated as production-equivalent.
+                                result_text = raw_json
+                                error = "content_creator render_posts_to_markdown returned empty — falling back to raw JSON"
+                        except Exception as render_exc:
+                            # Renderer failure — do NOT silently fall back to
+                            # raw JSON.  This is a harness presentation failure
+                            # that should be visible, not hidden.
+                            result_text = raw_json
+                            error = f"content_creator render_posts_to_markdown failed: {render_exc}"
+
+                        # Save raw JSON as audit artifact (machine-readable)
+                        raw_json_file = output_dir / f"{case_id}_output_raw.json"
+                        raw_json_file.write_text(raw_json, encoding="utf-8")
+
+                        # Auto media generation (mirrors UI) — uses raw JSON
+                        if (auto_image or auto_video) and all_posts:
+                            _run_media_gen(
+                                orch, llm, raw_json, output_dir,
+                                auto_image=auto_image or False,
+                                auto_video=auto_video or False,
+                                product_id=product_id,
+                                case_id=case_id,
+                                stage=stage,
+                            )
                 else:
                     raise ValueError(f"Unknown agent: {agent_key}")
 

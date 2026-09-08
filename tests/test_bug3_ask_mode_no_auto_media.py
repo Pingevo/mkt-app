@@ -58,8 +58,11 @@ def test_run_flows_ask_mode_does_not_auto_generate_media(_client, tmp_path, monk
     fake_orch._make_client.return_value = MagicMock()
     fake_orch._make_client.return_value.close = MagicMock()
     # run_content_creator คืน JSON structured output (มี image/video prompts)
-    fake_orch.run_content_creator.return_value = _content_creator_json()
+    fake_orch._run_content_creator_raw.return_value = _content_creator_json()
     fake_orch.save_result.return_value = {"content_creator": str(tmp_path / "out.md")}
+    # _finalize_content_output returns (content_json, content_markdown)
+    _cc_json = _content_creator_json()
+    fake_orch._finalize_content_output.return_value = (_cc_json, _cc_json)
     monkeypatch.setattr(web_viewer, "Orchestrator", lambda **kw: fake_orch)
 
     # --- spy บน media_gen — ถ้าถูกเรียน = bug ---
@@ -188,8 +191,10 @@ def test_run_flows_null_auto_image_does_not_auto_generate_media(_client, tmp_pat
     fake_orch = MagicMock()
     fake_orch._make_client.return_value = MagicMock()
     fake_orch._make_client.return_value.close = MagicMock()
-    fake_orch.run_content_creator.return_value = _content_creator_json()
+    fake_orch._run_content_creator_raw.return_value = _content_creator_json()
     fake_orch.save_result.return_value = {"content_creator": str(tmp_path / "out.md")}
+    _cc_json2 = _content_creator_json()
+    fake_orch._finalize_content_output.return_value = (_cc_json2, _cc_json2)
     monkeypatch.setattr(web_viewer, "Orchestrator", lambda **kw: fake_orch)
 
     # mock media_gen._load_media_config ให้คืน auto_generate_image: true

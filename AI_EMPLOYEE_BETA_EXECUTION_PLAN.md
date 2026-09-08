@@ -22,16 +22,21 @@
 
 ## Current fast-track status (overrides the broad phase sequence below)
 
-ผล real-model qualification ล่าสุดอยู่ที่ `data/all_agents_beta_qualification/20260831_160709/` และกำหนดงานปัจจุบันดังนี้:
+สถานะปัจจุบันหลัง remediation checkpoint `f50ec8e`:
 
-| Agent | หน้าที่เมื่อ user กดรัน | สถานะล่าสุด | งานที่ต้องทำต่อ |
-|---|---|---|---|
-| Product Analyst | เปลี่ยนข้อมูลสินค้าที่เลือกเป็น product brief/spec | **BETA PASS** ใน selected-product text scope; image understanding ยังไม่พิสูจน์ | ไม่แก้เพิ่มก่อน Beta; image path เป็น capability ที่ยังไม่ requalify |
-| Competitor Analyst | ค้นคู่แข่งที่เกี่ยวข้องและส่ง analysis ที่มีหลักฐาน | **LIMITED BETA PASS** — default discovery และ explicit competitor analysis | หยุดทดสอบ; known limitations ถูกบันทึกแล้ว |
-| Campaign Strategist | สร้างแผนแคมเปญที่ใช้ได้จาก context ที่มี | **LIMITED BETA PASS** — context-grounded campaign strategy; live-web research ยังไม่พิสูจน์ | หยุดทดสอบ; known limitations ถูกบันทึกแล้ว |
-| Content Creator | สร้างงานตาม platform/count/media ที่ UI เลือก | **LIMITED BETA PASS** — Facebook single-post + caption/hashtags/image prompt; TikTok, multi-post และ media generation ยังไม่พิสูจน์ | หยุดทดสอบ; known limitations ถูกบันทึกแล้ว |
+| Capability | สถานะล่าสุด | งานที่ต้องทำต่อ |
+|---|---|---|
+| Product ingestion + 3 K5 images to model calls | **PASS** | — |
+| Agent 1 Product Analyst | **ต้อง requalify** — output ขยาย camera/audio/accelerometer/Class Disable/Geo-Fence facts เกิน source | Requalify หลัง Checkpoint A |
+| Agent 2 Competitor Analyst | **ต้องแก้ user-facing rendering + ลบ unsupported factual premises** | Checkpoint A + B |
+| Agent 3 Campaign Strategist | **ต้อง requalify** — Brand/Audience values (age 25–45, Working Mom, channels) เป็น user settings ที่ถูกต้อง แต่ K9/video-call examples ต้องไม่กลายเป็น K5 capabilities; internal pending-validation language ต้องไม่ leak | Checkpoint A + B |
+| Agent 4 Content Creator | **Script generation + review path ใช้งานได้ แต่ final grounding หลัง post-review mutation ยังไม่ qualified** | Checkpoint A + C |
+| Image generation | **PARTIAL** — no-ref PASS, one-normalized-ref PASS, three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix | Checkpoint C |
+| Real video generation | **NOT QUALIFIED** | Checkpoint C |
+| Scheduler | **NOT QUALIFIED** — unit tests ไม่พอพิสูจน์ UI save → scheduled fire → execution → history | Checkpoint D |
+| Overall | **NOT FREEZE-READY** จนกว่า Checkpoints A–E ผ่านครบ | — |
 
-ห้ามย้อนกลับไปทำ Phase 1–6 ทั้งชุดโดยอัตโนมัติ ลำดับกว้างด้านล่างเป็นแผน Production/ความสมบูรณ์ระยะยาว งานเร่งด่วนตอนนี้คือ qualification แบบ UI-equivalent เฉพาะ capability หลักที่แก้แล้วในตารางเท่านั้น
+ห้ามย้อนกลับไปทำ Phase 1–6 ทั้งชุดโดยอัตโนมัติ ลำดับกว้างด้านล่างเป็นแผน Production/ความสมบูรณ์ระยะยาว งานเร่งด่วนตอนนี้คือ Checkpoints A–E
 
 ## เป้าหมาย Beta รอบนี้
 
@@ -340,20 +345,77 @@ Beta ผ่านเมื่อ MKTApp ไม่ด้อยกว่า fronti
 
 ห้ามใช้ chat transcript เป็น source of truth หากข้อความใน chat ขัดกับเอกสารนี้ ให้หยุดและขอ Product Owner ตัดสิน แล้วอัปเดตเอกสารก่อนทำต่อ
 
+## Authority rule (binding — read before any mutation stage)
+
+1. **Product source** determines product capabilities and technical facts.
+2. **Researched evidence** may add externally verified facts with provenance.
+3. **Brand/Audience** controls positioning, audience, tone, vocabulary, and channels; it must not create product capabilities.
+4. **Quick Brief** controls the requested job but cannot turn an unsupported capability or offer into fact.
+5. **Brand examples for one product must not transfer their facts to another product.**
+6. **Any stage that mutates content after review must be followed by final grounding before persistence.**
+
+## Remediation checkpoints (current cycle)
+
+### Checkpoint A — Generic final-output truth boundary
+
+Implement the smallest generic architecture fix so the final persisted output is grounded after all mutation stages.
+
+- No K5-, video-call-, "24 ชั่วโมง"-, promotion-, or keyword-specific production logic.
+- Use model reasoning for semantic entailment.
+- Every post-processing stage that can change factual/commercial content must receive the authorized runtime context.
+- After the final mutation, verify the final candidate against: selected product source; verified researched evidence; Brand/Audience settings; Quick Brief and explicit offers; UI options.
+- If the final candidate adds unsupported facts or offers, do not persist it as success. Repair with a bounded attempt or retain the last grounded version.
+- Brand vocabulary approval means wording is allowed; it does not prove that the selected product has that capability.
+- Add tests demonstrating that a K9 Brand example cannot create that capability for a different product. Keep the test generic in production behavior.
+- Apply this boundary to Agent 1–4, not only Script Reviewer.
+
+### Checkpoint B — User-facing presentation
+
+Separate machine-readable status from user-facing language.
+
+- Agent 2: keep verified/unverified/inference state internally; replace internal phrases ("ค่าที่จับคู่ได้", "evidence", "inference/recommendation") with concise natural Thai; omit non-informative rows or use a short natural missing-data note; remove concrete premises whose supporting evidence fails validation.
+- Agent 3: preserve financial/operational safety internally; use one concise Thai readiness note only where cost-bearing mechanics exist; do not repeat "Pending financial/operational validation" on every item; present unapproved promotions as optional ideas; do not apply financial disclaimers to qualitative recommendations.
+- Tests must inspect complete rendered output, not merely search for safety keywords.
+
+### Checkpoint C — Media completion
+
+1. Prove three normalized K5 references at the provider boundary.
+2. Record original sizes, normalized sizes, total request size, duration, provider response, and generated file.
+3. Run one real image through the actual UI manual-generation path: elapsed status visible; per-image error visible if it fails; final status not stuck; one real output image exists and is displayed; generated media cost is recorded.
+4. Do not generate two images when one representative image is sufficient.
+5. After Agent 4 final script is grounded, generate one representative real video and verify saved file, status, duration/model parameters, cost, and UI visibility.
+
+### Checkpoint D — Scheduler qualification
+
+- UI flow serialization into schedule save; one-time job save/list; recurring job save/list; invalid schedule returns error and is not persisted; toggle off/on; deletion; server restart reload; missed job and stuck-run recovery; manual run-now; history and rerun; failure status; full parity of selected product, Agent, Quick Brief, Agent Settings, platform, content count, media mode, attachments/resource references, and auto/manual media consent.
+- Real representative proof: one low-cost scheduled one-time flow with media generation OFF; schedule for near-future time and let APScheduler fire it naturally; verify UI/API save → registered next_run → timed fire → real Agent output → run history → cost/trace; confirm scheduled Agent receives the same runtime contract as manual flow; delete test schedule after preserving evidence.
+
+### Checkpoint E — Qualification and test rule
+
+1. Direct unit tests for the changed seam.
+2. Affected integration groups.
+3. Read every final persisted output completely.
+4. One representative paid UAT per Agent only after offline tests pass.
+5. One real image and one real video only.
+6. One real scheduled run.
+7. Run the full suite once, immediately before the final freeze decision, because shared production code changed.
+
+Do not repeatedly run the full suite after small edits. Do not accept a run based only on finish_reason=stop, call counts, or absence of one previously observed phrase. For every real UAT, compare the complete final output against the exact runtime inputs and classify every questionable statement. No remediation is allowed during a qualification run. Preserve failed runs as immutable evidence.
+
 ## Progress Ledger
 
 อัปเดตตารางนี้ทุกครั้งที่ Devin/Codex จบงาน ไม่สร้าง progress report แยกกระจัดกระจายหากไม่จำเป็น
 
 | Field | Current value |
 |---|---|
-| Current phase | Fast-track real qualification after targeted offline fixes |
-| Current objective | สรุปผล Beta qualification ทั่งหมด และเตรียมจบรอบ |
-| Completed | Agent 1 real-model qualification ผ่าน; Agent 2–4 **LIMITED BETA PASS** ตามขอบเขตที่กำหนด; root causes ของ Agent 2–4 แก้ offline แล้ว; offline suite 776/776 ผ่าน |
-| Evidence | `data/all_agents_beta_qualification/beta_rerun_a2_20260901_033048/QUALIFICATION_REPORT.md` สำหรับ Agent 2; `data/all_agents_beta_qualification/beta_rerun_a3_20260901_034644/` สำหรับ Agent 3; `data/all_agents_beta_qualification/beta_rerun_a4_20260901_035324/` สำหรับ Agent 4; `data/all_agents_beta_qualification/20260831_160709/final_report.md` สำหรับ all-Agent |
-| Blocking owner decision | ไม่มี สถานะ Beta ของทุก Agent ชัดเจนแล้ว |
-| Paid calls allowed now | ไม่ — Beta qualification ปิดรอบ ใช้ไปรวม `$0.229751` + `$0.176891` + `$0.029765` + `$0.038109` |
-| Next exact action | สรุปผลรวมและอัปเดตเอกสารสิ้นสุด Beta รอบนี้ |
-| Last updated | 2026-09-01 |
+| Current phase | Remediation cycle — Checkpoints A–E |
+| Current objective | Generic final-output truth boundary + user-facing presentation + media completion + scheduler qualification + final qualification |
+| Completed | Checkpoint commit `f50ec8e` pushed to `origin/dev`: post-review mutation seam (source_context to script_reviewer), Agent 2 fail-closed drop of unverified evidence_based recommendations, streaming cost extraction test replacement, image probe diagnosis (3 probes), UI elapsed timer, image auto-resize |
+| Evidence | Image probes: `evaluation_artifacts/image_probe_20260908_092915/`; Final Agent 4 UAT: `evaluation_artifacts/final_agent4_uat_20260908_094512/`; Original failed UAT preserved: `evaluation_artifacts/real_uat_20260908_083822_FAILED_PARTIAL/` |
+| Blocking owner decision | ไม่มี — Product Owner อนุญาต paid testing และ autonomous remediation ผ่าน Checkpoints A–E |
+| Paid calls allowed now | Yes — สำหรับ Checkpoint C (1 image + 1 video), Checkpoint D (1 scheduled run), และ Checkpoint E (1 UAT ต่อ Agent) |
+| Next exact action | Checkpoint A — implement generic final-output truth boundary for all Agents 1–4 |
+| Last updated | 2026-09-08 |
 
 ## Post-Beta Backlog
 

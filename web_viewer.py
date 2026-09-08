@@ -2782,6 +2782,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
         count_per_platform = max(1, (content_count + _n_plat - 1) // _n_plat)
 
         all_posts: list[dict] = []
+        pre_mutation_posts: list[dict] = []
 
         for platform in target_platforms:
             platform_label = platform_names.get(platform, platform) if platform else ""
@@ -2823,7 +2824,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                 if step_context is not None:
                     effective_step_context = step_context.with_quick_brief(multi_brief)
                     run_kwargs["step_context"] = effective_step_context
-                result = orch.run_content_creator(
+                result = orch._run_content_creator_raw(
                     "", analysis_text, campaign_text,
                     llm=llm, quick_brief=multi_brief,
                     media_type=media_type, **run_kwargs
@@ -2836,6 +2837,12 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                     if posts and platform_label:
                         posts[0]["platform"] = platform_label
 
+                    # Position-preserving fallback: deep-copy the post
+                    # BEFORE script review so the pre-mutation snapshot is
+                    # associated with this exact post position.
+                    import copy as _copy
+                    pre_snapshot = _copy.deepcopy(posts[0]) if posts else None
+
                     # script review
                     ch_cfg = content_history._DEFAULTS if hasattr(content_history, '_DEFAULTS') else {}
                     orch._review_script_in_posts(
@@ -2844,6 +2851,13 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
 
                     if posts:
                         all_posts.append(posts[0])
+                        # One fallback slot per final post, preserving exact
+                        # position and post identity.  Deep copy prevents
+                        # aliasing between fallback and final mutable posts.
+                        pre_mutation_posts.append(
+                            pre_snapshot if pre_snapshot is not None
+                            else _copy.deepcopy(posts[0])
+                        )
                         completed_posts.append({
                             "concept": posts[0].get("concept", posts[0].get("angle", "")),
                             "platform": posts[0].get("platform", ""),
@@ -2852,24 +2866,22 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-        # รวมผลลัพธ์ทุกแพลตฟอร์มเป็น 1 ไฟล์ (เหมือน auto mode)
-        combined = {"posts": all_posts}
+        # Final grounding + schema validation + persistence via shared seam
+        # (same truth boundary as run_content_creator_auto)
+        grounding_runtime_context = {
+            "product_source": getattr(orch, "_content_source_context", ""),
+            "brand_context": getattr(orch, "_content_brand_context", ""),
+            "quick_brief": quick_brief or "",
+            "ui_options": {
+                "platform": ", ".join(target_platforms) if target_platforms else "",
+                "media_type": media_type,
+            },
+        }
 
-        # Strict JSON contract: final saved artifact must always pass CONTENT_ARTIFACT_SCHEMA
-        from src.output_validators import validate_content_output
-        ok, err = validate_content_output(combined)
-        if not ok:
-            raise ValueError(f"content output validation failed: {err}")
-
-        combined_json = json.dumps(combined, ensure_ascii=False, indent=2)
-        try:
-            from src.content_schema import render_posts_to_markdown
-            combined_md = render_posts_to_markdown(combined)
-        except Exception:
-            combined_md = combined_json
-
-        orch.results["content_creator"] = combined_json
-        orch.results["content_creator_markdown"] = combined_md
+        combined_json, combined_md = orch._finalize_content_output(
+            all_posts, pre_mutation_posts, llm,
+            grounding_runtime_context, status_callback,
+        )
 
         saved_path: str | None = None
         if save_output:

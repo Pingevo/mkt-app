@@ -2178,9 +2178,9 @@ class TestUISettingsPropagationMatrix:
             _lagenio_k2_segmentation(), "Lagenio K2",
         )
 
-        # Install a spy on Orchestrator.run_content_creator
+        # Install a spy on Orchestrator._run_content_creator_raw
         from src.orchestrator import Orchestrator
-        _orig_rcc = Orchestrator.run_content_creator
+        _orig_rcc = Orchestrator._run_content_creator_raw
         captured_media_type: list[str] = []
 
         def _spy_rcc(self, *args, **kwargs):
@@ -2188,7 +2188,7 @@ class TestUISettingsPropagationMatrix:
             captured_media_type.append(mt)
             return _orig_rcc(self, *args, **kwargs)
 
-        Orchestrator.run_content_creator = _spy_rcc
+        Orchestrator._run_content_creator_raw = _spy_rcc
         try:
             fake_llm.reset()
             fake_llm.set_agent_output(_content_creator_json())
@@ -2226,12 +2226,12 @@ class TestUISettingsPropagationMatrix:
 
             # Assert the exact media_type value reached the production boundary
             assert len(captured_media_type) >= 1, \
-                "run_content_creator must be called at least once"
+                "_run_content_creator_raw must be called at least once"
             assert captured_media_type[0] == "video", \
                 f"media_type must be 'video' (video-only selection), " \
                 f"got: {captured_media_type[0]}"
         finally:
-            Orchestrator.run_content_creator = _orig_rcc
+            Orchestrator._run_content_creator_raw = _orig_rcc
 
     def test_auto_image_false_prevents_media_generation(self, _browser):
         """auto_image=false must result in exactly 0 image provider calls.

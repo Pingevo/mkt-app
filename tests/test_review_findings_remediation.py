@@ -38,8 +38,12 @@ class FakeLLM:
     def __init__(self, output: str = "mock output"):
         self._output = output
         self.calls: list[dict] = []
+        self.last_truncated = False
 
     def chat(self, messages, **kwargs):
+        source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
         self.calls.append({"messages": messages, "kwargs": kwargs})
         if kwargs.get("return_annotations"):
             return self._output, []
@@ -114,7 +118,7 @@ def test_multi_product_agent2_receives_both_products_text_and_images(tmp_path, m
         captured_prompts[self.agent_name] = user_prompt
         captured_images[self.agent_name] = list(kwargs.get("image_paths") or [])
         if self.agent_name == "content_creator":
-            return '{"posts":[]}'
+            return '{"posts":[{"platform":"Facebook","concept":"c","title":"T","caption":"C","hashtags":"#h","asset_ids":[]}]}'
         return f"[{self.agent_name} result]"
 
     monkeypatch.setattr(base_agent.BaseAgent, "run", _capture_run)
@@ -176,7 +180,7 @@ def test_multi_product_agent4_receives_both_products_text_and_images(tmp_path, m
     def _capture_run(self, user_prompt, **kwargs):
         captured_prompts[self.agent_name] = user_prompt
         captured_images[self.agent_name] = list(kwargs.get("image_paths") or [])
-        return '{"posts":[]}'
+        return '{"posts":[{"platform":"Facebook","concept":"c","title":"T","caption":"C","hashtags":"#h","asset_ids":[]}]}'
 
     monkeypatch.setattr(base_agent.BaseAgent, "run", _capture_run)
 
@@ -290,7 +294,7 @@ def test_multi_product_run_single_agent_agent4(tmp_path, monkeypatch):
     def _capture_run(self, user_prompt, **kwargs):
         captured_prompts[self.agent_name] = user_prompt
         captured_images[self.agent_name] = list(kwargs.get("image_paths") or [])
-        return '{"posts":[]}'
+        return '{"posts":[{"platform":"Facebook","concept":"c","title":"T","caption":"C","hashtags":"#h","asset_ids":[]}]}'
 
     monkeypatch.setattr(base_agent.BaseAgent, "run", _capture_run)
 

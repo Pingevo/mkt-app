@@ -148,9 +148,18 @@ def _mock_orch(monkeypatch):
             fake.results["content_creator"] = content
             fake.results["content_creator_markdown"] = "# Test Post\n"
             return content
-        fake.run_content_creator.side_effect = _run_content_creator
+        fake._run_content_creator_raw.side_effect = _run_content_creator
 
         fake._review_script_in_posts = MagicMock(return_value={})
+        # _finalize_content_output returns (content_json, content_markdown)
+        _finalize_content = json.dumps({
+            "posts": [{
+                "platform": "Facebook", "concept": "test", "title": "Test Post",
+                "caption": "test caption", "script": "", "hashtags": "#test",
+                "image_prompts": [], "video_prompts": [], "asset_ids": [],
+            }],
+        }, ensure_ascii=False)
+        fake._finalize_content_output.return_value = (_finalize_content, "# Test Post\n")
         return fake
 
     fake = _make_fake_orch()
@@ -350,7 +359,7 @@ class TestAgent4ContentCreator:
         assert "agent_done" in types
         errors = [e for e in events if e.get("type") == "error"]
         assert not errors, f"Unexpected errors: {errors}"
-        _mock_orch.run_content_creator.assert_called_once()
+        _mock_orch._run_content_creator_raw.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

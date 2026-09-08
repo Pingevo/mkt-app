@@ -238,8 +238,12 @@ class FakeLLM:
         self.outputs = outputs
         self.calls = 0
         self.call_sources: list[str] = []
+        self.last_truncated = False
 
     def chat(self, messages, **kwargs):
+        source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
         out = self.outputs[self.calls % len(self.outputs)]
         self.calls += 1
         source = kwargs.get("source", "unknown")

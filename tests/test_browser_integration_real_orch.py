@@ -83,8 +83,12 @@ class FakeLLM:
     def __init__(self, output: str = "mock output"):
         self._output = output
         self.calls: list[dict] = []
+        self.last_truncated = False
 
     def chat(self, messages, **kwargs):
+        source = kwargs.get("source", "")
+        if "final_grounding_check" in source:
+            return '{"grounded": true, "unsupported_claims": []}'
         self.calls.append({"messages": messages, "kwargs": kwargs})
         if kwargs.get("return_annotations"):
             return self._output, []

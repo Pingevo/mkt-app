@@ -70,7 +70,7 @@ def test_parallel_flows_serialize_content_creator(_client, tmp_path, monkeypatch
             execution_log.append(("end", idx, time.monotonic()))
             return _content_json(concept)
 
-        fake.run_content_creator.side_effect = _run_content_creator
+        fake._run_content_creator_raw.side_effect = _run_content_creator
         return fake
 
     # แต่ละ flow ใช้ Orchestrator คนละ instance (เหมือนจริง)
