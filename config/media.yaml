@@ -25,7 +25,7 @@ auto_generate_video: false
 # LLM ที่ใช้แก้ prompt เมื่อ auto-gen ถูก reject (copyright, safety, etc.)
 # auto mode: วนแก้จนกว่าจะออก (ไม่มี limit)
 # ask mode: ไม่ auto-retry ส่ง error ให้ user ตัดสินใจ
-media_retry_model: anthropic/claude-sonnet-4
+media_retry_model: google/gemini-3.8-flash
 retry_temperature: 0.3
 retry_max_tokens: 1024
 

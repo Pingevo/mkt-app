@@ -51,7 +51,7 @@ status_labels:
 
 # --- LLM params สำหรับ ingestion ---
 # model ที่ใช้สร้าง description + summary จากข้อมูลดิบ
-model: google/gemini-3.7-flash
+model: google/gemini-3.8-flash
 temperature: 0.3
 max_tokens_description: 1024      # max tokens สำหรับ description generation
 max_tokens_summary: 512           # max tokens สำหรับ summary generation
@@ -69,7 +69,7 @@ raw_text_max_length: 12000        # ความยาว raw_text สูงส�
 # LLM ระบุเฉพาะชื่อ/รหัสและตำแหน่งในต้นฉบับ — ระบบคัด text เอง (ไม่รับสเปก/ราคาที่ LLM เขียนใหม่)
 product_segmentation:
   enabled: true                    # เปิด/ปิด segmentation (ถ้าปิด → ใช้ single-product flow เดิม)
-  model: google/gemini-3.7-flash   # model สำหรับ segmentation (override ของ ingestion หลัก)
+  model: google/gemini-3.8-flash   # model สำหรับ segmentation (override ของ ingestion หลัก)
   temperature: 0.2                 # ต่ำ → ผลคงที่ขึ้น
   max_output_tokens: 16384         # พอสำหรับ catalog 20+ รุ่น (แต่ละรุ่นมี source_refs)
   batch_size: 8000                 # จำนวนบรรทัดต่อ batch (เอกสารใหญ่แบ่งส่ง)

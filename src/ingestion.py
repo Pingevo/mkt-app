@@ -356,7 +356,7 @@ def extract_video_frames(file_path: Path, config: dict, llm: LLMClient | None = 
                 ing_cfg = _ingestion_cfg()
                 return llm.chat(
                     messages,
-                    model=ing_cfg.get("model", "google/gemini-2.5-flash"),
+                    model=ing_cfg.get("model", "google/gemini-3.8-flash"),
                     temperature=ing_cfg.get("temperature", 0.3),
                     max_tokens=ing_cfg.get("max_tokens_description", 1024),
                     stream=False,
@@ -435,7 +435,7 @@ def _make_llm() -> LLMClient | None:
     return LLMClient(
         api_key=api_key,
         base_url="https://openrouter.ai/api/v1",
-        default_model=ing_cfg.get("model", "google/gemini-2.5-flash"),
+        default_model=ing_cfg.get("model", "google/gemini-3.8-flash"),
         timeout=ing_cfg.get("timeout_seconds", 180),
     )
 
@@ -1044,7 +1044,7 @@ def _generate_metadata_summary(product_id: str, llm: LLMClient | None = None) ->
             ]
             summary = llm.chat(
                 messages,
-                model=ing_cfg.get("model", "google/gemini-2.5-flash"),
+                model=ing_cfg.get("model", "google/gemini-3.8-flash"),
                 temperature=ing_cfg.get("temperature", 0.3),
                 max_tokens=ing_cfg.get("max_tokens_summary", 512),
                 stream=False,

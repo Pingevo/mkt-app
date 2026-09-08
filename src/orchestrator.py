@@ -163,7 +163,7 @@ class Orchestrator:
         return LLMClient(
             api_key=api_key,
             base_url=defaults.get("base_url", "https://openrouter.ai/api/v1"),
-            default_model=defaults.get("model", "anthropic/claude-3.5-sonnet"),
+            default_model=defaults.get("model", "google/gemini-3.8-flash"),
             timeout=defaults.get("timeout_seconds", 120),
         )
 

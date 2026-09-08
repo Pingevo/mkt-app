@@ -965,7 +965,7 @@ def generate_image_with_retry(
     """
     cfg = _load_media_config()
     mcfg = _media_cfg()
-    retry_model = cfg.get("media_retry_model", mcfg.get("media_retry_model", "anthropic/claude-sonnet-4"))
+    retry_model = cfg.get("media_retry_model", mcfg.get("media_retry_model", "google/gemini-3.8-flash"))
     max_retries = int(cfg.get("max_content_policy_retries", 3))
     retry_delay = float(cfg.get("content_policy_retry_delay_seconds", 2.0))
 
@@ -1096,7 +1096,7 @@ def generate_video_with_retry(
     """
     cfg = _load_media_config()
     mcfg = _media_cfg()
-    retry_model = cfg.get("media_retry_model", mcfg.get("media_retry_model", "anthropic/claude-sonnet-4"))
+    retry_model = cfg.get("media_retry_model", mcfg.get("media_retry_model", "google/gemini-3.8-flash"))
     max_retries = int(cfg.get("max_content_policy_retries", 3))
     retry_delay = float(cfg.get("content_policy_retry_delay_seconds", 2.0))
 

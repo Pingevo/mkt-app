@@ -416,7 +416,7 @@ def _call_llm(llm, files: list[dict], config: dict) -> dict:
 
     raw = llm.chat(
         messages,
-        model=seg_cfg.get("model") or ing_cfg.get("model", "google/gemini-2.5-flash"),
+        model=seg_cfg.get("model") or ing_cfg.get("model", "google/gemini-3.8-flash"),
         temperature=seg_cfg.get("temperature", 0.2),
         max_tokens=seg_cfg.get("max_output_tokens", 4096),
         stream=False,

@@ -1,5 +1,5 @@
 manager:
-  model: google/gemini-3.7-flash
+  model: google/gemini-3.8-flash
   temperature: 0.3
   max_tokens: 2048
   max_retry_limit: 3
@@ -21,7 +21,7 @@ manager:
     สิ่งที่ขาด\"]\n}\n"
 defaults:
   base_url: https://openrouter.ai/api/v1
-  model: google/gemini-3.7-flash
+  model: google/gemini-3.8-flash
   temperature: 0.7
   max_tokens: 4096
   max_retry_limit: 3
@@ -82,7 +82,7 @@ auto_mode:
 
     '
 product_spec:
-  model: google/gemini-3.7-flash
+  model: google/gemini-3.8-flash
   temperature: 0.3
   max_tokens: 4096
   max_retry_limit: 3
@@ -137,7 +137,7 @@ product_spec:
       - supplied_fact
       - inference_or_recommendation
 competitor_analysis:
-  model: google/gemini-3.5-flash
+  model: google/gemini-3.8-flash
   temperature: 0.4
   max_tokens: 8192
   max_retry_limit: 0
@@ -287,7 +287,7 @@ competitor_analysis:
     - `uncertainty` บอกสิ่งที่ยังไม่พบหลักฐาน ไม่ใช่คาดการณ์
 
 campaign_strategy:
-  model: google/gemini-3.7-flash
+  model: google/gemini-3.8-flash
   temperature: 0.8
   max_tokens: 4096
   max_retry_limit: 3
@@ -580,7 +580,7 @@ campaign_strategy:
     - เลือก deliverable format / structure ที่เหมาะกับคำขอของ user เอง
     - ถ้า quick_brief ระบุรูปแบบ เช่น executive brief, one-page, สั้นกระชับ, 3 โปรโมชั่น ให้ทำตาม quick_brief
 content_creator:
-  model: google/gemini-3.7-flash
+  model: google/gemini-3.8-flash
   temperature: 0.9
   max_tokens: 8192
   max_retry_limit: 3

@@ -24,7 +24,7 @@ max_file_size_mb:
 
 # auto-tagging — LLM vision บรรยาย + ติด tag ตาม taxonomy ครั้งเดียวตอนอัปโหลด
 tagging:
-  model: google/gemini-3.7-flash      # ตาม model ปัจจุบันของระบบ
+  model: google/gemini-3.8-flash      # ตาม model ปัจจุบันของระบบ
   temperature: 0.2
   max_tokens: 1024
   description_max_words: 60

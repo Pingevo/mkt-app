@@ -69,7 +69,7 @@ def make_llm():
         return LLMClient(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
-            default_model=tag_cfg.get("model", "google/gemini-3.7-flash"),
+            default_model=tag_cfg.get("model", "google/gemini-3.8-flash"),
             timeout=180,
         )
     except Exception:
@@ -411,7 +411,7 @@ def _default_tagger(file_path: Path, ftype: str, config: dict, llm) -> dict:
     try:
         resp = llm.chat(
             messages,
-            model=tag_cfg.get("model", "google/gemini-3.7-flash"),
+            model=tag_cfg.get("model", "google/gemini-3.8-flash"),
             temperature=tag_cfg.get("temperature", 0.2),
             max_tokens=tag_cfg.get("max_tokens", 1024),
             stream=False,
@@ -484,7 +484,7 @@ def _summarize_text(file_path: Path, config: dict, llm) -> dict:
     try:
         resp = llm.chat(
             messages,
-            model=tag_cfg.get("model", "google/gemini-3.7-flash"),
+            model=tag_cfg.get("model", "google/gemini-3.8-flash"),
             temperature=tag_cfg.get("temperature", 0.2),
             max_tokens=tag_cfg.get("max_tokens", 1024),
             stream=False,

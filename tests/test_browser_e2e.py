@@ -82,10 +82,10 @@ def _server(tmp_path_factory):
 
     # Agents.yaml with minimal config
     (config_dir / "agents.yaml").write_text(
-        "product_spec:\n  model: google/gemini-3.7-flash\n  temperature: 0.3\n  max_tokens: 4096\n"
-        "competitor_analysis:\n  model: google/gemini-3.5-flash\n  temperature: 0.4\n  max_tokens: 8192\n  web_search: true\n"
-        "campaign_strategy:\n  model: google/gemini-3.7-flash\n  temperature: 0.8\n  max_tokens: 4096\n  web_search: true\n"
-        "content_creator:\n  model: google/gemini-3.7-flash\n  temperature: 0.9\n  max_tokens: 8192\n",
+        "product_spec:\n  model: google/gemini-3.8-flash\n  temperature: 0.3\n  max_tokens: 4096\n"
+        "competitor_analysis:\n  model: google/gemini-3.8-flash\n  temperature: 0.4\n  max_tokens: 8192\n  web_search: true\n"
+        "campaign_strategy:\n  model: google/gemini-3.8-flash\n  temperature: 0.8\n  max_tokens: 4096\n  web_search: true\n"
+        "content_creator:\n  model: google/gemini-3.8-flash\n  temperature: 0.9\n  max_tokens: 8192\n",
         encoding="utf-8",
     )
 
