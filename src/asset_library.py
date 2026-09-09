@@ -911,44 +911,89 @@ def preflight_reference_mentions(
     full_catalog: list[dict],
     remap: dict[int, int] | None,
 ) -> str | None:
-    """Reject prompts that reference a full-catalog ordinal excluded from the per-item subset.
+    """Reject prompts that reference an ordinal not available for this media item.
 
     For every 'Reference N' in the prompt:
-      - If N was in the full catalog but is absent from remap (the reference was
-        excluded from this media item's provider input), it is a dangling reference.
-      - Return a visible error naming the missing Reference number(s).
+      - If N is not in the full catalog at all → unknown reference.
+      - If N is in the full catalog but absent from remap (the reference was
+        excluded from this media item's provider input) → dangling reference.
+      - Return a visible error naming the invalid Reference number(s).
       - Do not silently retain the old number.
       - Do not substitute another reference.
 
     Mechanical text parsing only — does not interpret what a reference means.
-    Returns None if all referenced ordinals are present in the per-item subset.
+    Returns None if the prompt has no Reference mentions, or if every
+    mentioned ordinal is present in the per-item subset (or in the full
+    catalog when no subset remap is active).
     """
     import re
 
-    if not full_catalog:
-        return None
-    full_ordinals = {e["ordinal"] for e in full_catalog}
     mentions = re.findall(r"Reference (\d+)", prompt)
     if not mentions:
         return None
+    full_ordinals = {e["ordinal"] for e in full_catalog}
     # When remap is None (no subset selection), all full-catalog refs are present.
-    if remap is None:
-        return None
-    dangling: list[int] = []
+    # When remap is active, only ordinals in remap are available to this item.
+    available = full_ordinals if remap is None else set(remap.keys())
+    invalid: list[int] = []
     for num_str in mentions:
         num = int(num_str)
-        if num in full_ordinals and num not in remap:
-            if num not in dangling:
-                dangling.append(num)
-    if dangling:
-        dangling.sort()
-        names = ", ".join(f"Reference {n}" for n in dangling)
+        if num not in available:
+            if num not in invalid:
+                invalid.append(num)
+    if invalid:
+        invalid.sort()
+        names = ", ".join(f"Reference {n}" for n in invalid)
+        if remap is None:
+            reason = "does not exist in the reference catalog"
+        else:
+            reason = (
+                "was excluded from this media item's reference set "
+                "or does not exist in the full catalog"
+            )
         return (
-            f"Prompt mentions {names} but these were excluded from this "
-            f"media item's reference set. Cannot generate with dangling "
-            f"reference numbers."
+            f"Prompt mentions {names} but {reason}. Cannot generate with "
+            f"invalid reference numbers."
         )
     return None
+
+
+def extract_reference_ordinals(prompt: str) -> list[int]:
+    """Extract 'Reference N' ordinals from a media prompt.
+
+    Mechanical text parsing — same regex as preflight_reference_mentions.
+    Returns sorted unique list of ordinals mentioned in the prompt.
+    Empty list if no references mentioned.
+    """
+    import re
+    mentions = re.findall(r"Reference (\d+)", prompt)
+    return sorted(set(int(n) for n in mentions))
+
+
+def filter_catalog_by_ordinals(
+    full_catalog: list[dict],
+    selected_ordinals: list[int],
+) -> tuple[list[dict], dict[int, int]]:
+    """Filter a reference catalog to only selected ordinals.
+
+    Mechanical: matches ordinals, re-numbers sequentially from 1.
+    Returns (filtered_catalog, remap) where remap[old_ordinal] = new_ordinal.
+    Entries not in selected_ordinals are excluded — no semantic interpretation.
+    Does not mutate the input catalog.
+    """
+    selected_set = set(selected_ordinals)
+    filtered: list[dict] = []
+    remap: dict[int, int] = {}
+    new_idx = 0
+    for entry in full_catalog:
+        if entry["ordinal"] in selected_set:
+            new_idx += 1
+            new_entry = dict(entry)
+            new_entry["ordinal"] = new_idx
+            new_entry["label"] = f"Reference {new_idx}"
+            filtered.append(new_entry)
+            remap[entry["ordinal"]] = new_idx
+    return filtered, remap
 
 
 # ------------------------------------------------------------------

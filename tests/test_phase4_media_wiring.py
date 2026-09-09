@@ -963,7 +963,7 @@ def test_catalog_asset_ids_survive_session_reload(_client, tmp_path, monkeypatch
     monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
     resp = _client.post("/api/generate_media", json={
         "type": "image",
-        "prompt": "Use Reference 3 for the logo",
+        "prompt": "a product photo with logo",  # no Reference N → fallback sends all refs
         "output_dir": str(session_dir.relative_to(tmp_path / "output")),
         "filename": "image_1.png",
         "product_id": "TEST",
@@ -1052,7 +1052,7 @@ def test_single_item_regenerate_recovers_exact_per_item_assets_not_full_catalog(
 
     resp = _client.post("/api/generate_media", json={
         "type": "image",
-        "prompt": "Use Reference 2 for the logo and Reference 3 for the mascot",
+        "prompt": "product shot with logo and mascot",  # no Reference N → fallback sends all refs
         "output_dir": str(session_dir.relative_to(tmp_path / "output")),
         "filename": "image_1.png",
         "product_id": "TEST",
@@ -1127,11 +1127,12 @@ def test_single_item_reconstructs_catalog_asset_ids_for_remapping(_client, tmp_p
 
     # Single-item generate with per-item asset_ids = [a_003] (subset of 3)
     # Agent 4's full catalog: prod=1, a_001=2, a_002=3, a_003=4
-    # Agent 4 wrote "Reference 4" (a_003 in full catalog)
-    # Per-item catalog: prod=1, a_003=2 → "Reference 4" must become "Reference 2"
+    # Agent 4 wrote "Reference 1" (product) and "Reference 4" (a_003 in full catalog)
+    # Per-item selection: [1, 4] → filtered catalog: prod=1, a_003=2
+    # "Reference 4" must become "Reference 2"
     resp = _client.post("/api/generate_media", json={
         "type": "image",
-        "prompt": "Use Reference 4 for the product close-up",
+        "prompt": "Use Reference 1 for the product and Reference 4 for the close-up",
         "output_dir": str(session_dir.relative_to(tmp_path / "output")),
         "filename": "image_1.png",
         "product_id": "TEST",

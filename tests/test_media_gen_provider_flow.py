@@ -16,6 +16,7 @@ Root cause covered:
     always returned ``ok: False``.
 """
 import base64
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -1441,6 +1442,347 @@ def test_dangling_reference_no_silent_collision(monkeypatch, tmp_path):
     pos3_entry = [r for r in item_catalog if r["ordinal"] == 3][0]
     assert pos3_entry["path"] == str(asset3), \
         f"Per-item Reference 3 must be asset3, not asset2: {pos3_entry}"
+
+
+# ---------------------------------------------------------------------------
+# Per-item product-reference selection — Agent 4 chooses a subset of BOTH
+# product and asset references per media item. Python transports that decision
+# mechanically by extracting "Reference N" ordinals from the prompt.
+# ---------------------------------------------------------------------------
+
+def _setup_product_subset_env(monkeypatch, tmp_path):
+    """3 product images + 1 asset library image.
+    Full catalog: Reference 1=prod1, 2=prod2, 3=prod3, 4=asset1(logo).
+    """
+    prod1 = tmp_path / "prod1.png"; _make_real_png(prod1)
+    prod2 = tmp_path / "prod2.png"; _make_real_png(prod2)
+    prod3 = tmp_path / "prod3.png"; _make_real_png(prod3)
+    asset1 = tmp_path / "asset1.png"; _make_real_png(asset1)
+
+    _asset_recs = {
+        "a_001": {"id": "a_001", "type": "image", "path": str(asset1), "subject": "logo"},
+    }
+    from src import asset_library
+    monkeypatch.setattr(asset_library, "get_asset", lambda aid: _asset_recs.get(aid))
+    monkeypatch.setattr(asset_library, "_load_config", lambda: {"media": {"max_refs_per_post": 10}})
+
+    import web_viewer
+    monkeypatch.setattr(web_viewer, "_get_brand_visual", lambda *a, **k: {})
+    monkeypatch.setattr(web_viewer, "_resolve_product_image_paths",
+                        lambda pid: [str(prod1), str(prod2), str(prod3)])
+
+    return prod1, prod2, prod3, asset1
+
+
+def test_extract_reference_ordinals():
+    """extract_reference_ordinals parses 'Reference N' from prompt text."""
+    from src import asset_library
+    assert asset_library.extract_reference_ordinals("Use Reference 2 and Reference 4") == [2, 4]
+    assert asset_library.extract_reference_ordinals("No references here") == []
+    assert asset_library.extract_reference_ordinals("Reference 1 Reference 1 Reference 3") == [1, 3]
+    assert asset_library.extract_reference_ordinals("") == []
+
+
+def test_filter_catalog_by_ordinals():
+    """filter_catalog_by_ordinals filters catalog and builds remap."""
+    from src import asset_library
+    catalog = [
+        {"ordinal": 1, "label": "Reference 1", "path": "/a.png", "provenance": "product_db"},
+        {"ordinal": 2, "label": "Reference 2", "path": "/b.png", "provenance": "product_db"},
+        {"ordinal": 3, "label": "Reference 3", "path": "/c.png", "provenance": "product_db"},
+        {"ordinal": 4, "label": "Reference 4", "path": "/d.png", "provenance": "asset_library"},
+    ]
+    filtered, remap = asset_library.filter_catalog_by_ordinals(catalog, [2, 4])
+    assert len(filtered) == 2
+    assert filtered[0]["ordinal"] == 1
+    assert filtered[0]["path"] == "/b.png"
+    assert filtered[1]["ordinal"] == 2
+    assert filtered[1]["path"] == "/d.png"
+    assert remap == {2: 1, 4: 2}
+    # Original catalog must not be mutated
+    assert catalog[0]["ordinal"] == 1
+    assert catalog[1]["ordinal"] == 2
+
+
+def test_per_item_product_subset_excludes_unselected(monkeypatch, tmp_path):
+    """Test A: Full catalog: prod1=1, prod2=2, prod3=3, asset1=4.
+    Media item selects Reference 2 + Reference 4.
+    Provider receives exactly 2 files (prod2, asset1).
+    References 1 and 3 are NOT sent."""
+    prod1, prod2, prod3, asset1 = _setup_product_subset_env(monkeypatch, tmp_path)
+    import web_viewer
+
+    prompt = "Use Reference 2 for the product and Reference 4 for the logo"
+    composed = web_viewer.compose_media_input(
+        prompt=prompt,
+        product_id="TEST",
+        asset_ids=["a_001"],
+        resource_paths=[],
+        catalog_asset_ids=["a_001"],
+        selected_reference_ordinals=[2, 4],
+    )
+
+    assert not composed.get("preflight_error"), composed.get("preflight_error")
+    refs = composed["input_references"]
+    assert len(refs) == 2, f"expected 2 refs, got {len(refs)}: {refs}"
+    assert refs[0] == str(prod2), f"Reference 1 should be prod2: {refs}"
+    assert refs[1] == str(asset1), f"Reference 2 should be asset1: {refs}"
+    assert str(prod1) not in refs, "prod1 (Reference 1) must NOT be sent"
+    assert str(prod3) not in refs, "prod3 (Reference 3) must NOT be sent"
+
+
+def test_per_item_prompt_remapped_to_filtered_positions(monkeypatch, tmp_path):
+    """Test B: Prompt references Reference 2 and Reference 4.
+    After filtering to [2, 4], prompt is remapped to Reference 1 and Reference 2."""
+    prod1, prod2, prod3, asset1 = _setup_product_subset_env(monkeypatch, tmp_path)
+    import web_viewer
+
+    prompt = "Use Reference 2 for the product and Reference 4 for the logo"
+    composed = web_viewer.compose_media_input(
+        prompt=prompt,
+        product_id="TEST",
+        asset_ids=["a_001"],
+        resource_paths=[],
+        catalog_asset_ids=["a_001"],
+        selected_reference_ordinals=[2, 4],
+    )
+
+    assert not composed.get("preflight_error")
+    remapped = composed["prompt"]
+    assert "Reference 1" in remapped, f"Reference 2 should remap to 1: {remapped}"
+    assert "Reference 2" in remapped, f"Reference 4 should remap to 2: {remapped}"
+    assert "Reference 4" not in remapped, f"Reference 4 should be remapped: {remapped}"
+
+
+def test_per_item_dangling_reference_preflight_fail(monkeypatch, tmp_path):
+    """Test C: Media item selects 2+4 but prompt also references 3.
+    Preflight FAILS. Provider receives 0 refs."""
+    prod1, prod2, prod3, asset1 = _setup_product_subset_env(monkeypatch, tmp_path)
+    import web_viewer
+
+    prompt = "Use Reference 2, Reference 3, and Reference 4"
+    composed = web_viewer.compose_media_input(
+        prompt=prompt,
+        product_id="TEST",
+        asset_ids=["a_001"],
+        resource_paths=[],
+        catalog_asset_ids=["a_001"],
+        selected_reference_ordinals=[2, 4],
+    )
+
+    err = composed.get("preflight_error")
+    assert err is not None, "Preflight should reject dangling Reference 3"
+    assert "Reference 3" in err, f"Error should name Reference 3: {err}"
+    assert composed["input_references"] == [], "Provider should receive 0 refs"
+
+
+def test_per_item_different_subsets_for_image_and_video(monkeypatch, tmp_path):
+    """Test D: Image selects 2+3+4, video selects 2+4.
+    Each provider call gets only its own subset."""
+    prod1, prod2, prod3, asset1 = _setup_product_subset_env(monkeypatch, tmp_path)
+    import web_viewer
+
+    # Image: selects 2, 3, 4
+    img_prompt = "Use Reference 2, Reference 3, and Reference 4"
+    composed_img = web_viewer.compose_media_input(
+        prompt=img_prompt,
+        product_id="TEST",
+        asset_ids=["a_001"],
+        resource_paths=[],
+        catalog_asset_ids=["a_001"],
+        selected_reference_ordinals=[2, 3, 4],
+    )
+    assert not composed_img.get("preflight_error")
+    assert len(composed_img["input_references"]) == 3
+    assert composed_img["input_references"] == [str(prod2), str(prod3), str(asset1)]
+
+    # Video: selects 2, 4
+    vid_prompt = "Use Reference 2 and Reference 4"
+    composed_vid = web_viewer.compose_media_input(
+        prompt=vid_prompt,
+        product_id="TEST",
+        asset_ids=["a_001"],
+        resource_paths=[],
+        catalog_asset_ids=["a_001"],
+        selected_reference_ordinals=[2, 4],
+    )
+    assert not composed_vid.get("preflight_error")
+    assert len(composed_vid["input_references"]) == 2
+    assert composed_vid["input_references"] == [str(prod2), str(asset1)]
+
+
+def test_per_item_refresh_regenerate_restores_same_subset(monkeypatch, tmp_path):
+    """Test E: Persist a prompt that references 2+4.
+    After 'session reconstruction' (re-reading the persisted prompt),
+    regenerate without frontend selection state.
+    Assert exactly refs 2+4 are restored — no other product reference is sent."""
+    prod1, prod2, prod3, asset1 = _setup_product_subset_env(monkeypatch, tmp_path)
+    import web_viewer
+    from src import asset_library
+
+    # Simulate: Agent 4 produced a prompt that references 2 and 4
+    original_prompt = "Use Reference 2 for the product and Reference 4 for the logo"
+
+    # Simulate persistence: the prompt is saved in a JSON artifact
+    artifact = {"posts": [{"image_prompts": [{"prompt": original_prompt}], "asset_ids": ["a_001"]}]}
+    artifact_path = tmp_path / "agent4_output.json"
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    # Simulate session reconstruction: read the artifact, extract the prompt
+    loaded = json.loads(artifact_path.read_text(encoding="utf-8"))
+    loaded_prompt = loaded["posts"][0]["image_prompts"][0]["prompt"]
+
+    # Extract ordinals from the persisted prompt (no frontend state needed)
+    ordinals = asset_library.extract_reference_ordinals(loaded_prompt)
+    assert ordinals == [2, 4], f"expected [2, 4], got {ordinals}"
+
+    # Regenerate using the extracted ordinals
+    composed = web_viewer.compose_media_input(
+        prompt=loaded_prompt,
+        product_id="TEST",
+        asset_ids=["a_001"],
+        resource_paths=[],
+        catalog_asset_ids=["a_001"],
+        selected_reference_ordinals=ordinals,
+    )
+
+    assert not composed.get("preflight_error")
+    refs = composed["input_references"]
+    assert len(refs) == 2, f"expected 2 refs, got {len(refs)}"
+    assert refs == [str(prod2), str(asset1)]
+    assert str(prod1) not in refs
+    assert str(prod3) not in refs
+
+
+def test_uat_regression_unrelated_product_ref_not_sent(monkeypatch, tmp_path):
+    """Test H: Real-UAT finding regression fixture.
+
+    Reference 1 = product DB image (e.g., an app screenshot — NO category logic)
+    Reference 2 = product DB image (actual product imagery)
+    Reference 3 = product DB image (actual product imagery)
+    Reference 4 = asset library image (logo)
+
+    Agent media item requests only Reference 2 + Reference 4.
+    Assert Reference 1 never reaches the provider.
+
+    No brand/category/screenshot logic in production code — test uses generic files.
+    """
+    prod1, prod2, prod3, asset1 = _setup_product_subset_env(monkeypatch, tmp_path)
+    import web_viewer
+
+    # Agent 4's prompt mentions only Reference 2 and Reference 4
+    # (Reference 1 is an unrelated product-context image Agent 4 chose NOT to use)
+    prompt = "Show the product from Reference 2 with the logo from Reference 4"
+    composed = web_viewer.compose_media_input(
+        prompt=prompt,
+        product_id="TEST",
+        asset_ids=["a_001"],
+        resource_paths=[],
+        catalog_asset_ids=["a_001"],
+        selected_reference_ordinals=[2, 4],
+    )
+
+    assert not composed.get("preflight_error"), composed.get("preflight_error")
+    refs = composed["input_references"]
+    # Reference 1 (prod1) must NEVER reach the provider
+    assert str(prod1) not in refs, \
+        "Reference 1 (unrelated product image) must NOT be sent to provider"
+    assert str(prod3) not in refs, \
+        "Reference 3 (unselected product image) must NOT be sent to provider"
+    assert len(refs) == 2, f"expected exactly 2 refs, got {len(refs)}"
+    assert refs == [str(prod2), str(asset1)]
+
+
+# ---------------------------------------------------------------------------
+# Out-of-range / unknown reference ordinals — preflight must reject any
+# mentioned "Reference N" that does not exist in the full catalog, and must
+# not return early when the full catalog is empty. These exercise the real
+# production sequence: extract_reference_ordinals(prompt) → compose_media_input.
+# ---------------------------------------------------------------------------
+
+def test_unknown_reference_ordinal_rejected_via_real_sequence(monkeypatch, tmp_path):
+    """Regression for Codex review finding: prompt mentions Reference 99 while
+    the full catalog only contains Reference 1. Production derives
+    selected_reference_ordinals from the same prompt via
+    extract_reference_ordinals, then calls compose_media_input.
+
+    Expected:
+      - visible preflight_error;
+      - error names 'Reference 99';
+      - input_references == [];
+      - provider is not called.
+    """
+    prod1, prod2, prod3, asset1 = _setup_product_subset_env(monkeypatch, tmp_path)
+    import web_viewer
+    from src import asset_library
+
+    prompt = "Use Reference 99 for the hero shot"
+    # Real production sequence: caller extracts ordinals from the same prompt
+    ordinals = asset_library.extract_reference_ordinals(prompt)
+    assert ordinals == [99]
+
+    provider_called: list = []
+    def _fake_gen(*a, **k):
+        provider_called.append(True)
+        return {"ok": True, "path": "x", "model": "test"}
+    monkeypatch.setattr(web_viewer.media_gen, "generate_image_with_retry", _fake_gen)
+
+    composed = web_viewer.compose_media_input(
+        prompt=prompt,
+        product_id="TEST",
+        asset_ids=["a_001"],
+        resource_paths=[],
+        catalog_asset_ids=["a_001"],
+        selected_reference_ordinals=ordinals,
+    )
+
+    err = composed.get("preflight_error")
+    assert err is not None, "Preflight must reject unknown Reference 99"
+    assert "Reference 99" in err, f"Error must name Reference 99: {err}"
+    assert composed["input_references"] == [], \
+        f"Provider must receive 0 refs, got: {composed['input_references']}"
+    assert provider_called == [], "Provider must not be called on preflight failure"
+
+
+def test_reference_mention_with_empty_full_catalog_rejected(monkeypatch, tmp_path):
+    """Prompt mentions Reference 1 but the full catalog is empty (no product
+    images, no assets, no resources). Preflight must reject — not return early.
+
+    Expected:
+      - visible preflight_error;
+      - provider is not called.
+    """
+    import web_viewer
+    from src import asset_library
+
+    # Empty catalog: no product images, no assets, no resources
+    monkeypatch.setattr(web_viewer, "_get_brand_visual", lambda *a, **k: {})
+    monkeypatch.setattr(web_viewer, "_resolve_product_image_paths", lambda pid: [])
+    monkeypatch.setattr(asset_library, "_load_config", lambda: {"media": {"max_refs_per_post": 10}})
+
+    provider_called: list = []
+    def _fake_gen(*a, **k):
+        provider_called.append(True)
+        return {"ok": True, "path": "x", "model": "test"}
+    monkeypatch.setattr(web_viewer.media_gen, "generate_image_with_retry", _fake_gen)
+
+    prompt = "Use Reference 1 for the product"
+    ordinals = asset_library.extract_reference_ordinals(prompt)
+    assert ordinals == [1]
+
+    composed = web_viewer.compose_media_input(
+        prompt=prompt,
+        product_id="TEST",
+        asset_ids=[],
+        resource_paths=[],
+        catalog_asset_ids=[],
+        selected_reference_ordinals=ordinals,
+    )
+
+    err = composed.get("preflight_error")
+    assert err is not None, "Preflight must reject Reference 1 against empty catalog"
+    assert "Reference 1" in err, f"Error must name Reference 1: {err}"
+    assert provider_called == [], "Provider must not be called on preflight failure"
 
 
 if __name__ == "__main__":

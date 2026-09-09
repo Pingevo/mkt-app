@@ -34,6 +34,7 @@ from src import media_gen
 from src import product_db
 from src import content_history
 from src import pillar_manager
+from src import asset_library
 from src.flow_context import set_flow_id, clear_flow_id
 from src.cost_summary import write_cost_summary, write_flow_meta, find_flow_id_for_file, find_any_flow_id, update_cost_summary
 
@@ -153,6 +154,7 @@ def compose_media_input(
     resolution: str | None = None,
     use_retry: bool = True,
     catalog_asset_ids: list[str] | None = None,
+    selected_reference_ordinals: list[int] | None = None,
 ) -> dict:
     """Shared input composer สำหรับทุก media generation channel.
 
@@ -165,6 +167,13 @@ def compose_media_input(
     catalog_asset_ids: full set of selected asset IDs that Agent 4 saw in its catalog.
         When per-item asset_ids is a subset, reference numbers are mechanically
         remapped so "Reference N" in the prompt matches the per-item provider array.
+
+    selected_reference_ordinals: per-media-item reference selection extracted from
+        the Agent 4 prompt (e.g. [2, 4] means "Reference 2" and "Reference 4").
+        When provided, the full catalog is filtered to exactly those ordinals —
+        including product references.  This lets Agent 4 choose a subset of BOTH
+        product and asset references per media item.  When None, falls back to
+        the legacy behaviour (all product images + selected assets).
 
     คืน: {
         prompt, visual, reference_catalog, input_references,
@@ -179,14 +188,43 @@ def compose_media_input(
     product_image_paths = _resolve_product_image_paths(product_id)
 
     # 3. Ordered reference catalog — mechanical fields only (Agent 4 reasons about meaning)
-    from src import asset_library
     item_asset_ids = asset_ids or []
     catalog_asset_id_list = catalog_asset_ids or item_asset_ids
 
     # If per-item asset_ids differs from the full catalog's asset_ids,
     # build a remap so "Reference N" in the prompt matches the per-item array.
     reference_remap: dict[int, int] | None = None
-    if catalog_asset_id_list and set(item_asset_ids) != set(catalog_asset_id_list):
+    if selected_reference_ordinals:
+        # Per-item reference selection: Agent 4 chose a subset of BOTH product
+        # and asset references by mentioning specific "Reference N" ordinals.
+        # Filter the full catalog to exactly those ordinals.
+        # (Empty list = Agent 4 mentioned no Reference numbers → fall back to
+        #  legacy behaviour below, do not silently drop all references.)
+        full_catalog = asset_library.build_reference_catalog(
+            product_image_paths, catalog_asset_id_list, resource_paths,
+        )
+        item_catalog, reference_remap = asset_library.filter_catalog_by_ordinals(
+            full_catalog, selected_reference_ordinals,
+        )
+        mention_error = asset_library.preflight_reference_mentions(
+            prompt, full_catalog, reference_remap,
+        )
+        if mention_error:
+            return {
+                "prompt": prompt,
+                "visual": visual,
+                "reference_catalog": item_catalog,
+                "input_references": [],
+                "aspect_ratio": aspect_ratio,
+                "duration": duration,
+                "resolution": resolution,
+                "use_retry": use_retry,
+                "product_id": product_id,
+                "preflight_error": mention_error,
+                "reference_remap": reference_remap,
+            }
+        prompt = asset_library.remap_reference_numbers(prompt, reference_remap)
+    elif catalog_asset_id_list and set(item_asset_ids) != set(catalog_asset_id_list):
         full_catalog = asset_library.build_reference_catalog(
             product_image_paths, catalog_asset_id_list, resource_paths,
         )
@@ -751,6 +789,7 @@ async def api_generate_media(request: Request) -> StreamingResponse:
         resolution=resolution,
         use_retry=True,
         catalog_asset_ids=catalog_asset_ids,
+        selected_reference_ordinals=asset_library.extract_reference_ordinals(prompt),
     )
     if composed.get("preflight_error"):
         return JSONResponse({"error": composed["preflight_error"]})
@@ -1004,6 +1043,7 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                         aspect_ratio=img.get("aspect_ratio"),
                         use_retry=True,
                         catalog_asset_ids=_catalog_asset_ids,
+                        selected_reference_ordinals=asset_library.extract_reference_ordinals(img["prompt"]),
                     )
                     if composed.get("preflight_error"):
                         err = f"รูปที่ {i+1}: {composed['preflight_error']}"
@@ -1054,6 +1094,7 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                         resolution=vid.get("resolution"),
                         use_retry=True,
                         catalog_asset_ids=_catalog_asset_ids,
+                        selected_reference_ordinals=asset_library.extract_reference_ordinals(vid["prompt"]),
                     )
                     if composed.get("preflight_error"):
                         err = f"วิดีโอที่ {i+1}: {composed['preflight_error']}"
@@ -3197,6 +3238,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                             aspect_ratio=img.get("aspect_ratio"),
                             use_retry=True,
                             catalog_asset_ids=getattr(orch, "_selected_asset_ids", []),
+                            selected_reference_ordinals=asset_library.extract_reference_ordinals(img["prompt"]),
                         )
                         if composed.get("preflight_error"):
                             if status_callback:
@@ -3245,6 +3287,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                             resolution=vid.get("resolution"),
                             use_retry=True,
                             catalog_asset_ids=getattr(orch, "_selected_asset_ids", []),
+                            selected_reference_ordinals=asset_library.extract_reference_ordinals(vid["prompt"]),
                         )
                         if composed.get("preflight_error"):
                             if status_callback:
@@ -4260,6 +4303,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                         aspect_ratio=img.get("aspect_ratio"),
                                         use_retry=True,
                                         catalog_asset_ids=getattr(orch, "_selected_asset_ids", []),
+                                        selected_reference_ordinals=asset_library.extract_reference_ordinals(img["prompt"]),
                                     )
                                     if composed.get("preflight_error"):
                                         if _status_cb:
@@ -4293,6 +4337,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                                         resolution=vid.get("resolution"),
                                         use_retry=True,
                                         catalog_asset_ids=getattr(orch, "_selected_asset_ids", []),
+                                        selected_reference_ordinals=asset_library.extract_reference_ordinals(vid["prompt"]),
                                     )
                                     if composed.get("preflight_error"):
                                         if _status_cb:
