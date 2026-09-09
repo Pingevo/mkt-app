@@ -346,7 +346,7 @@ Product Owner/ผู้ใช้สายงานตรวจ output จริ�
 - Checkpoint A — final grounding boundary: implemented/frozen at `65ed8c7` (safeguard only; not yet re-qualified against current model).
 - Gemini 3.8 migration: production text/reasoning workload migrated to `google/gemini-3.8-flash` at `c39f596`. Current production text/reasoning model is read from `config/agents.yaml` and is presently `google/gemini-3.8-flash`.
 - Media Core (C1, mechanical reference transport): frozen at `5cc4724` + `06157af` — 60 focused backend tests + 8 browser media tests passed, `git diff --check` clean. Transport only; visual **Media Capability Coverage (C2)** (product/logo/mascot fidelity, provider fallback, cost-aware tool selection) remains unqualified.
-- Scheduler: implementation complete at `421bb40` (misfire_grace_time fix); real scheduled-fire qualification remains unqualified (paid run requires separate Product Owner approval).
+- Scheduler: **ACCEPTED / FROZEN** at `5781fd8` — offline 72 tests + 1 browser E2E passed; real UI wall-clock qualification passed (one-time `product_spec` job fired autonomously at `2026-09-09T16:06:00+07:00`, status `success`, 2 LLM calls, cost `$0.03216`, 0 media calls).
 - Original failed UAT (immutable): `evaluation_artifacts/real_uat_20260908_083822_FAILED_PARTIAL/`
 - Image probes (immutable): `evaluation_artifacts/image_probe_20260908_092915/` — no-ref OK (10s), one-normalized-ref OK (11s), three-raw-refs TIMEOUT (200s, 6.6MB request)
 - Final Agent 4 UAT (immutable, pre-Checkpoint-A): `evaluation_artifacts/final_agent4_uat_20260908_094512/` — flow done, 10 calls, 4 script reviews, all finish=stop, but final output still contained unsupported claims ("24 ชั่วโมง", "โปรโมชั่นพิเศษวันนี้", voice-message capability, game-addiction claims). This is historical evidence, not a current PASS.
@@ -358,7 +358,7 @@ Product Owner/ผู้ใช้สายงานตรวจ output จริ�
 - Agent 4: **Script path ใช้ได้ แต่ final grounding หลัง post-review mutation ยังไม่ qualified** — Checkpoint A implemented; final-grounding/text requalification → Checkpoint E; visual fidelity → Media Capability Coverage (C2)
 - Image generation: **PARTIAL** — no-ref PASS, one-normalized-ref PASS, three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix → Media Capability Coverage (C2)
 - Real video generation: **NOT QUALIFIED** → Media Capability Coverage (C2)
-- Scheduler: **Implementation complete; real scheduled-fire qualification NOT QUALIFIED**
+- Scheduler: **ACCEPTED / FROZEN** (`5781fd8`) — offline + real UI wall-clock qualification passed
 - Overall: **NOT FREEZE-READY** — no Agent 1–4 declared Beta-ready without current qualification evidence
 
 Automated tests เป็นหลักฐาน reliability ของ code path ไม่ใช่ใบรับรองคุณภาพ frontier model output
@@ -377,9 +377,9 @@ Automated tests เป็นหลักฐาน reliability ของ code pat
 - Media Core transport: frozen (`5cc4724` + `06157af`); visual Media Capability Coverage remains unqualified
 - Image generation: PARTIAL (no-ref + one-normalized-ref PASS; three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix)
 - Real video generation: NOT QUALIFIED
-- Scheduler: implementation complete (`421bb40`); real scheduled-fire qualification NOT QUALIFIED (paid run requires separate Product Owner approval)
+- Scheduler: **ACCEPTED / FROZEN** (`5781fd8`) — offline 72 tests + 1 browser E2E; real UI wall-clock qualification passed (one-time `product_spec` job, fire at `2026-09-09T16:06:00+07:00`, status `success`, 2 LLM calls, cost `$0.03216`, 0 media calls)
 
-**Overall: NOT FREEZE-READY** จนกว่า Checkpoints B / D / E และ Media Capability Coverage ผ่านครบ
+**Overall: NOT FREEZE-READY** จนกว่า Checkpoints B / E และ Media Capability Coverage ผ่านครบ
 
 ## Agent 2 — Known Limitations (current cycle)
 

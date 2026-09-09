@@ -37,8 +37,8 @@
 | Media Capability Coverage (C2) | **PLANNED** | Product/logo/mascot fidelity, provider fallback, cost-aware tool selection |
 | Image generation | **PARTIAL** — no-ref PASS, one-normalized-ref PASS, three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix | Media Capability Coverage (C2) |
 | Real video generation | **NOT QUALIFIED** | Media Capability Coverage (C2) |
-| Scheduler | **Implementation complete (`421bb40`); real scheduled-fire qualification NOT QUALIFIED** | Checkpoint D (paid run pending Product Owner approval) |
-| Overall | **NOT FREEZE-READY** — no Agent 1–4 declared Beta-ready without current qualification evidence | Checkpoint B / D / E + Media Capability Coverage (C2) |
+| Scheduler | **ACCEPTED / FROZEN** (`5781fd8`) — offline 72 tests + 1 browser E2E + real UI wall-clock qualification passed | — |
+| Overall | **NOT FREEZE-READY** — no Agent 1–4 declared Beta-ready without current qualification evidence | Checkpoint B / E + Media Capability Coverage (C2) |
 
 ห้ามย้อนกลับไปทำ Phase 1–6 ทั้งชุดโดยอัตโนมัติ ลำดับกว้างด้านล่างเป็นแผน Production/ความสมบูรณ์ระยะยาว Checkpoint A และ Media Core (C1) แช่แข็งแล้ว; เฟสถัดไปคือ Media Capability Coverage (C2)
 
@@ -395,7 +395,23 @@ Separate machine-readable status from user-facing language.
 
 ### Checkpoint D — Scheduler qualification
 
-> Status: Implementation complete at `421bb40` (misfire_grace_time fix). Real scheduled-fire qualification `BLOCKED` — paid run requires separate Product Owner approval.
+> Status: **ACCEPTED / FROZEN** at `5781fd8` (offline + real UI wall-clock qualification).
+
+**Offline evidence:** 72 focused Scheduler/run-context tests passed, 0 failed; 1 Browser Schedule Modal E2E passed; `git diff --check` clean. Attachment forwarding, durable cloning, restart/exact-once, rerun lifecycle, history retention, and orphan cleanup all accepted.
+
+**Real UI wall-clock qualification evidence:**
+- One one-time scheduled job created through the real Schedule UI (Playwright-automated wizard DOM, not direct API).
+- Product: `Lagenio K5`; Agent: `product_spec`; Quick Brief: `สรุปสเปคสินค้า Lagenio K5 แบบสั้น กระชับ 1 หน้า`.
+- Browser closed before fire; server remained running; no manual Run/rerun/execution API called.
+- Actual fire time: `2026-09-09T16:06:00+07:00`; Scheduler started run autonomously at `16:06:00.007 +07:00`; trigger: `auto`.
+- Exactly one logical Scheduler/Agent execution; one-time job removed after completion; status: `success`.
+- 2 paid LLM calls (1 generate + 1 review, 0 repair); model: `google/gemini-3.8-flash`; total cost: `$0.03216`.
+- Image generation submissions: 0; video generation submissions: 0; media provider calls: 0.
+- Agent output persisted (4,119 bytes, 28 lines); run history visible through UI; usage/cost visible through UI; result renders in UI overlay.
+
+**Known non-blocking findings:**
+- `product_spec`-only UI flow serializes default `auto_image=true` from wizard defaults; real qualification confirmed zero media provider calls because no `content_creator` path executes.
+- Scheduled run record had an empty `session_ts`; `output_files`, run history, UI rendering, status, and cost evidence all functioned correctly.
 
 - UI flow serialization into schedule save; one-time job save/list; recurring job save/list; invalid schedule returns error and is not persisted; toggle off/on; deletion; server restart reload; missed job and stuck-run recovery; manual run-now; history and rerun; failure status; full parity of selected product, Agent, Quick Brief, Agent Settings, platform, content count, media mode, attachments/resource references, and auto/manual media consent.
 - Real representative proof: one low-cost scheduled one-time flow with media generation OFF; schedule for near-future time and let APScheduler fire it naturally; verify UI/API save → registered next_run → timed fire → real Agent output → run history → cost/trace; confirm scheduled Agent receives the same runtime contract as manual flow; delete test schedule after preserving evidence.
@@ -427,13 +443,13 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 | Checkpoint C1 — Media Core (mechanical transport) | `ACCEPTED / FROZEN` at `5cc4724` + `06157af`. Per-item product+asset reference selection via `extract_reference_ordinals`/`filter_catalog_by_ordinals`/`selected_reference_ordinals` in `compose_media_input`; `preflight_reference_mentions` rejects unknown/out-of-range ordinals and empty-catalog mentions. Reviewed and accepted by Codex. Do not reopen speculative media plumbing. |
 | Checkpoint C2 — Media Capability Coverage | `PLANNED`. Scope: product fidelity, logo/brand fidelity, mascot/person/child consistency, provider fallback, cost-aware tool selection. No implementation details invented here. |
 | Checkpoint B — User-facing presentation | `PLANNED` (open). Agent 2/3 user-facing rendering still has internal phrases / pending-validation leakage; no accepted closure evidence. |
-| Scheduler (Checkpoint D) | Implementation complete at `421bb40` (misfire_grace_time fix). Real scheduled-fire qualification `BLOCKED` (pending separate Product Owner approval for paid run). |
+| Scheduler (Checkpoint D) | **ACCEPTED / FROZEN** at `5781fd8`. Offline: 72 focused tests + 1 browser E2E passed. Real UI wall-clock qualification: one one-time `product_spec` job fired autonomously at `2026-09-09T16:06:00+07:00`, status `success`, 2 LLM calls, cost `$0.03216`, 0 media calls. Known non-blocking: `auto_image=true` serialized by UI defaults but no media path executes for `product_spec`-only flow; `session_ts` empty in run record but output/history/cost all functioned. |
 | Checkpoint E — Final qualification | `BLOCKED` (open). No current-model qualification evidence; no Agent 1–4 declared Beta-ready. Agent 4 final-grounding/text requalification belongs here; visual fidelity belongs to C2. |
 | Evidence (Media Core) | `tests/test_media_gen_provider_flow.py tests/test_phase4_media_wiring.py` = 60 passed, 0 failed; `tests/test_browser_e2e.py::TestImageGenerationBrowserE2E + TestVideoGenerationBrowserE2E + TestMediaPersistenceBrowserE2E` = 8 passed, 0 failed; `git diff --check` clean at acceptance. Regression fixtures: `test_uat_regression_unrelated_product_ref_not_sent`, `test_unknown_reference_ordinal_rejected_via_real_sequence`, `test_reference_mention_with_empty_full_catalog_rejected`. |
 | Evidence (historical, immutable) | Image probes: `evaluation_artifacts/image_probe_20260908_092915/`; Final Agent 4 UAT: `evaluation_artifacts/final_agent4_uat_20260908_094512/`; Original failed UAT preserved: `evaluation_artifacts/real_uat_20260908_083822_FAILED_PARTIAL/`; Pre-subset-fix real UAT: `output/uat_media_20260909_125427/uat_report.json` — real image/video execution succeeded before the subset correction, but exposed extra-reference contamination; `06157af` fixed the defect offline; this is not post-fix fidelity/subset-isolation acceptance; do not rerun without separate Product Owner approval. These remain evidence, not current PASS. |
 | Paid calls allowed now | No. No paid/model/web/media/provider UAT is authorized unless the Product Owner approves it separately. |
 | Next exact action | Prepare a bounded, generic Media Capability Coverage plan for Product Owner/Codex review. |
-| Last updated | 2026-09-09 |
+| Last updated | 2026-09-09 (Checkpoint D accepted/frozen) |
 
 ## Post-Beta Backlog
 
