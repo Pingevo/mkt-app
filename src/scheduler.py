@@ -28,7 +28,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -186,7 +186,13 @@ def _make_trigger(schedule: dict):
 
 
 class Scheduler:
-    def __init__(self, project_root: Path, web_port: int = 8778, job_store: JobStore | None = None):
+    def __init__(
+        self,
+        project_root: Path,
+        web_port: int = 8778,
+        job_store: JobStore | None = None,
+        resource_store: Any = None,
+    ):
         self._project_root = project_root
         self._web_port = web_port
         self._cfg = _load_scheduler_config(project_root)
@@ -199,6 +205,19 @@ class Scheduler:
             retention_days = int(retention_days) if retention_days is not None else None
             job_store = JsonJobStore(jobs_path, runs_path, max_runs, retention_days=retention_days)
         self._store = job_store
+
+        # RunResourceStore for durable scheduled attachments — reuses existing
+        # file-storage primitives.  Resources cloned at save time get no expires_at
+        # so they survive until the job is deleted/changed.
+        if resource_store is None:
+            try:
+                from src.run_resources import RunResourceStore
+                from src.config_loader import load_config, get_section
+                _rr_cfg = get_section(load_config(project_root), "run_resources", {})
+                resource_store = RunResourceStore(project_root, config=_rr_cfg)
+            except Exception:
+                resource_store = None
+        self._resource_store = resource_store
 
         max_concurrent = int(self._cfg.get("max_concurrent_jobs", 1))
         self._executor = ThreadPoolExecutor(max_workers=max_concurrent)
@@ -247,6 +266,7 @@ class Scheduler:
         # ตรวจ run record ที่ค้างเป็น 'running' — เกิดจาก server ดับตอนกำลังรัน
         # mark เป็น 'interrupted' เพื่อให้ user เห็นและกดรันใหม่ได้
         self._cleanup_stuck_running()
+        self._cleanup_orphaned_durable_sessions()
 
         jobs = self._store.load_jobs()
         now = datetime.now().astimezone()
@@ -262,6 +282,7 @@ class Scheduler:
                     run_ts = _parse_ts(sched.get("value", ""))
                     if run_ts and run_ts < now:
                         self._record_missed(job)
+                        self._cleanup_durable_session(job)
                         job["enabled"] = False
                         job["next_run"] = ""
                         changed = True
@@ -306,6 +327,136 @@ class Scheduler:
         }
         self._store.append_run(run_record)
 
+    # ------------------------------------------------------------------
+    # Durable scheduled attachments — clone ephemeral resources at save time
+    # ------------------------------------------------------------------
+
+    def _clone_attachments(self, flow: dict) -> dict:
+        """Clone ephemeral run-resources into a durable (no-expiry) session.
+
+        Scheduled jobs may fire days/weeks later.  The original upload_session
+        has a 24h TTL, so resource_refs would be gone by fire time.  This method
+        re-uploads each referenced resource into a new session with no
+        expires_at, so the attachment survives until the job is deleted.
+
+        Returns a new flow dict with upload_session_id + resource_refs pointing
+        to the durable session.  Raises ValueError if any referenced resource
+        is already missing/expired — the caller must surface this visibly.
+        """
+        refs = flow.get("resource_refs", [])
+        session_id = flow.get("upload_session_id", "")
+        if not refs or not session_id or self._resource_store is None:
+            return flow
+
+        # Verify all resources are resolvable before cloning
+        missing = []
+        for ref in refs:
+            if not ref.startswith("resource:"):
+                continue
+            rec = self._resource_store.resolve_input_ref(ref, session_id)
+            if not rec:
+                missing.append(ref)
+        if missing:
+            raise ValueError(
+                f"missing or expired scheduled attachments: {', '.join(missing)}"
+            )
+
+        # Clone each resource into a new durable session
+        durable_session = self._resource_store.create_upload_session()
+        new_refs: list[str] = []
+        for ref in refs:
+            if not ref.startswith("resource:"):
+                new_refs.append(ref)
+                continue
+            old_id = ref.split(":", 1)[1]
+            rec = self._resource_store.get_resource(old_id, session_id)
+            if not rec:
+                continue
+            original_path = Path(rec["representations"]["original_path"])
+            content = original_path.read_bytes()
+            new_rec = self._resource_store.upload(
+                filename=rec.get("name", "attachment"),
+                content=content,
+                media_type=rec.get("media_type"),
+                session_id=durable_session,
+                expires_at="",  # no expiry — durable
+            )
+            new_refs.append(f"resource:{new_rec['resource_id']}")
+
+        new_flow = dict(flow)
+        new_flow["upload_session_id"] = durable_session
+        new_flow["resource_refs"] = new_refs
+        return new_flow
+
+    def _cleanup_durable_session(self, job: dict) -> None:
+        """Delete the durable attachment session for a job (on delete/fire)."""
+        if self._resource_store is None:
+            return
+        session_id = job.get("durable_session_id", "")
+        if not session_id:
+            return
+        import shutil
+        try:
+            p = (self._resource_store.storage_dir / session_id).resolve()
+            if p.is_relative_to(self._resource_store.storage_dir.resolve()) and p.exists():
+                shutil.rmtree(p)
+        except Exception:
+            pass
+
+    def _cleanup_orphaned_durable_sessions(self) -> None:
+        """Delete durable sessions no longer referenced by any job or run history.
+
+        The authoritative lifecycle boundary is run-history retention: when
+        ``append_run`` evicts old runs (by ``retention_days`` or ``max_runs``),
+        the session IDs they referenced are no longer in the referenced set.
+        This method scans the resource store for durable sessions (resources
+        with no ``expires_at``) that are not referenced by any active job or
+        any remaining run-history record, and deletes them.
+
+        Called at scheduler start and after each ``append_run`` so orphans are
+        cleaned up promptly without waiting for a restart.
+        """
+        if self._resource_store is None:
+            return
+        import shutil
+
+        # Collect all session IDs still referenced by active jobs or run history
+        referenced: set[str] = set()
+        for job in self._store.load_jobs():
+            referenced.add(job.get("durable_session_id", ""))
+            referenced.add(job.get("flow", {}).get("upload_session_id", ""))
+        for run in self._store.load_runs(limit=10000):
+            referenced.add(run.get("flow", {}).get("upload_session_id", ""))
+        referenced.discard("")
+
+        storage_dir = self._resource_store.storage_dir.resolve()
+        for session_dir in storage_dir.iterdir():
+            if not session_dir.is_dir():
+                continue
+            if session_dir.name in referenced:
+                continue
+            # Only delete durable sessions (resources with no expires_at).
+            # Ephemeral sessions are handled by cleanup_expired().
+            is_durable = False
+            for res_dir in session_dir.iterdir():
+                if not res_dir.is_dir():
+                    continue
+                record_path = res_dir / "resource.json"
+                if not record_path.exists():
+                    continue
+                try:
+                    record = json.loads(record_path.read_text(encoding="utf-8"))
+                    if not record.get("expires_at"):
+                        is_durable = True
+                        break
+                except (json.JSONDecodeError, OSError):
+                    continue
+            if is_durable:
+                try:
+                    shutil.rmtree(session_dir)
+                except OSError:
+                    pass
+
     def _cleanup_stuck_running(self) -> None:
         """ตรวจ run record ที่ค้าง — mark เป็น 'error'.
 
@@ -348,14 +499,24 @@ class Scheduler:
 
     def add_job(self, job_spec: dict) -> str:
         job_id = f"job_{uuid.uuid4().hex[:12]}"
+        flow = job_spec.get("flow", {})
+
+        # Clone ephemeral attachments to a durable session so they survive
+        # until the scheduled fire time (the original 24h TTL would expire).
+        durable_session_id = ""
+        if flow.get("resource_refs") and flow.get("upload_session_id"):
+            flow = self._clone_attachments(flow)
+            durable_session_id = flow.get("upload_session_id", "")
+
         job = {
             "id": job_id,
             "name": job_spec.get("name", "unnamed"),
             "enabled": job_spec.get("enabled", True),
             "schedule_type": job_spec.get("schedule_type", "one_time"),
             "schedule": job_spec.get("schedule", {}),
-            "flow": job_spec.get("flow", {}),
+            "flow": flow,
             "quick_brief": job_spec.get("quick_brief", ""),
+            "durable_session_id": durable_session_id,
             "created_at": datetime.now().astimezone().isoformat(),
             "last_run": "",
             "next_run": "",
@@ -388,10 +549,11 @@ class Scheduler:
 
     def remove_job(self, job_id: str) -> bool:
         jobs = self._store.load_jobs()
-        new_jobs = [j for j in jobs if j["id"] != job_id]
-        if len(new_jobs) == len(jobs):
+        job = next((j for j in jobs if j["id"] == job_id), None)
+        if not job:
             return False
 
+        new_jobs = [j for j in jobs if j["id"] != job_id]
         self._store.save_jobs(new_jobs)
         try:
             self._aps.remove_job(job_id)
@@ -399,6 +561,12 @@ class Scheduler:
             pass
         with self._lock:
             self._job_specs.pop(job_id, None)
+
+        # Durable session is NOT unconditionally deleted here — retained run
+        # history may still reference it for the existing rerun feature.
+        # Orphan cleanup deletes it only when no active job AND no run-history
+        # record references it.
+        self._cleanup_orphaned_durable_sessions()
         return True
 
     def toggle_job(self, job_id: str, enabled: bool) -> bool:
@@ -571,6 +739,8 @@ class Scheduler:
             })
         else:
             self._store.append_run(run_record)
+            # Retention may have evicted old runs — clean up orphaned durable sessions.
+            self._cleanup_orphaned_durable_sessions()
 
     def _execute_flow(self, flow: dict, quick_brief: str, job_id_for_status: str) -> tuple[list[str], str, str]:
         """ยิง flow ผ่าน HTTP SSE แล้ว parse events — ใช้ร่วมโดย _run_job และ _rerun_from_record.
@@ -591,6 +761,8 @@ class Scheduler:
                 "content_count": flow.get("content_count", 1),
                 "product_count": flow.get("auto_count", 1) if flow.get("auto_combined", False) else 1,
                 "combined": flow.get("auto_combined", False),
+                "upload_session_id": flow.get("upload_session_id", ""),
+                "resource_refs": flow.get("resource_refs", []),
             }
         else:
             url = f"http://localhost:{self._web_port}/api/run_flows"
@@ -696,6 +868,8 @@ class Scheduler:
             self._running_status.pop(job_id, None)
 
         self._store.append_run(run_record)
+        # Retention may have evicted old runs — clean up orphaned durable sessions.
+        self._cleanup_orphaned_durable_sessions()
 
         with self._lock:
             jobs = self._store.load_jobs()
@@ -708,6 +882,10 @@ class Scheduler:
                     break
 
             # one-time job ที่รันแล้ว → ลบออกจากรายการ (เหลือแค่ในประวัติ)
+            # NOTE: durable attachment session is NOT deleted here — run history
+            # retains the flow with upload_session_id/resource_refs so the
+            # existing rerun feature can reconstruct the same run.  Cleanup is
+            # owned by run-history retention eviction (see _cleanup_orphaned_durable_sessions).
             if job_type == "one_time":
                 jobs = [j for j in jobs if j["id"] != job_id]
                 try:

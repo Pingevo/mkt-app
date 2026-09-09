@@ -1449,3 +1449,72 @@ class TestMediaPersistenceBrowserE2E:
                         # The image should be there if auto_image generated it
                         assert img is not None, "Image not visible after session reload"
                     break
+
+
+# ---------------------------------------------------------------------------
+# 14. Schedule modal — UI → API → persisted → listed
+# ---------------------------------------------------------------------------
+
+class TestScheduleModalBrowserE2E:
+    """E2E: schedule modal opens, saves, and the job appears in the list."""
+
+    def test_schedule_save_and_list(self, _browser):
+        """Select product → agent → step 4 → open schedule → save → job listed."""
+        page = _browser["page"]
+
+        # Step 1: select product
+        assert _select_product(page, "TestProduct")
+
+        # Step 2: select agent
+        assert _go_to_step(page, 2)
+        assert _select_agent(page, "product_spec")
+
+        # Step 3 → 4
+        assert _go_to_step(page, 3)
+        assert _go_to_step(page, 4)
+        page.wait_for_timeout(500)
+
+        # Click the schedule button (📅 ตั้งเวลา)
+        sched_btn = page.query_selector("[id^='flow-schedule-']")
+        assert sched_btn is not None, "Schedule button not found on step 4"
+        sched_btn.click()
+        page.wait_for_timeout(500)
+
+        # Schedule modal should be visible
+        overlay = page.query_selector("#schedule-overlay.visible")
+        assert overlay is not None, "Schedule modal did not open"
+
+        # Fill in the schedule form
+        name_input = page.query_selector("#schedule-name")
+        assert name_input is not None
+        name_input.fill("Browser E2E schedule test")
+
+        date_input = page.query_selector("#schedule-date")
+        assert date_input is not None
+        # Set date to tomorrow
+        from datetime import datetime, timedelta
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        date_input.fill(tomorrow)
+
+        time_input = page.query_selector("#schedule-time")
+        assert time_input is not None
+        time_input.fill("09:00")
+
+        # Click save (scoped to schedule overlay — other .settings-save may be hidden)
+        save_btn = page.query_selector("#schedule-overlay .settings-save")
+        assert save_btn is not None
+        save_btn.click()
+        page.wait_for_timeout(2000)
+
+        # Modal should close
+        overlay = page.query_selector("#schedule-overlay.visible")
+        assert overlay is None, "Schedule modal should close after save"
+
+        # Verify the job was persisted via API
+        import httpx
+        port = _browser["server"]["port"]
+        resp = httpx.get(f"http://localhost:{port}/api/schedule/jobs")
+        assert resp.status_code == 200
+        jobs = resp.json()
+        assert any(j.get("name") == "Browser E2E schedule test" for j in jobs), \
+            "Saved schedule must appear in /api/schedule/jobs"

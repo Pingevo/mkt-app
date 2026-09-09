@@ -155,6 +155,7 @@ class RunResourceStore:
         content: bytes,
         media_type: str | None = None,
         session_id: str | None = None,
+        expires_at: str | None = None,
     ) -> dict[str, Any]:
         if not self.config.get("enabled", True):
             return _rejected(filename, "disabled")
@@ -222,7 +223,9 @@ class RunResourceStore:
             },
             "extracted_text": extracted_text,
             "created_at": _now().isoformat(),
-            "expires_at": (_now() + timedelta(hours=float(self.config["ttl_hours"]))).isoformat(),
+            "expires_at": expires_at if expires_at is not None else (
+                _now() + timedelta(hours=float(self.config["ttl_hours"]))
+            ).isoformat(),
         }
 
         (res_dir / "resource.json").write_text(
