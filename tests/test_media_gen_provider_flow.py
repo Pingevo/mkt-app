@@ -1785,5 +1785,184 @@ def test_reference_mention_with_empty_full_catalog_rejected(monkeypatch, tmp_pat
     assert provider_called == [], "Provider must not be called on preflight failure"
 
 
+# ---------------------------------------------------------------------------
+# Provider-advertised pricing metadata — cost-aware duration seam (C2)
+# ---------------------------------------------------------------------------
+
+def test_video_capability_parsing_preserves_pricing_skus(monkeypatch, tmp_path):
+    """get_model_capabilities must preserve pricing_skus from the video-models
+    API response so Agent 4 can reason about cost vs. duration."""
+    from src import media_gen
+
+    monkeypatch.setattr(media_gen, "_get_api_key", lambda: "fake-api-key")
+    monkeypatch.setattr(media_gen, "_CAPABILITIES_CACHE", {})
+    monkeypatch.setattr(media_gen, "_CAPABILITIES_CACHE_DIR", tmp_path)
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "data": [{
+                "id": "bytedance/seedance-2.0-fast",
+                "name": "Seedance 2.0 Fast",
+                "supported_durations": [4, 5, 6, 7, 8],
+                "supported_aspect_ratios": ["16:9"],
+                "supported_resolutions": ["720p"],
+                "supported_sizes": None,
+                "generate_audio": True,
+                "supported_frame_images": ["first_frame", "last_frame"],
+                "pricing_skus": {"per-video-second": "0.1028"},
+            }]
+        })
+
+    _patch_http(monkeypatch, handler)
+
+    caps = media_gen.get_model_capabilities("bytedance/seedance-2.0-fast", kind="video")
+    assert caps.get("pricing_skus") == {"per-video-second": "0.1028"}, \
+        "pricing_skus must be preserved from API response"
+
+
+def test_format_capabilities_includes_per_second_cost_when_present(monkeypatch, tmp_path):
+    """format_capabilities_for_prompt must surface provider-advertised per-second
+    cost as approximate pricing so Agent 4 can weigh duration vs. cost."""
+    from src import media_gen
+
+    monkeypatch.setattr(media_gen, "get_model_capabilities", lambda *a, **k: {
+        "id": "bytedance/seedance-2.0-fast",
+        "durations": [4, 5, 6, 7, 8],
+        "aspect_ratios": ["16:9"],
+        "resolutions": ["720p"],
+        "generate_audio": True,
+        "pricing_skus": {"per-video-second": "0.1028"},
+    })
+
+    text = media_gen.format_capabilities_for_prompt("bytedance/seedance-2.0-fast", kind="video")
+    assert "0.1028" in text, f"per-second price must appear: {text}"
+    assert "วินาที" in text, f"duration capability must still appear: {text}"
+    # Must be framed as advertised/approximate, not a guaranteed charge
+    assert "โดยประมาณ" in text or "advertised" in text.lower() or "approx" in text.lower(), \
+        f"must be framed as approximate: {text}"
+
+
+def test_format_capabilities_without_pricing_remains_valid(monkeypatch, tmp_path):
+    """Missing pricing metadata must not break formatting — image models and
+    providers that omit pricing_skus must still produce usable capability text."""
+    from src import media_gen
+
+    monkeypatch.setattr(media_gen, "get_model_capabilities", lambda *a, **k: {
+        "id": "google/gemini-3.1-flash-image",
+        "durations": [],
+        "aspect_ratios": [],
+        "resolutions": [],
+        "generate_audio": None,
+        "pricing_skus": {},
+    })
+
+    text = media_gen.format_capabilities_for_prompt("google/gemini-3.1-flash-image", kind="image")
+    # No caps fields present → empty string (existing behavior preserved)
+    assert text == "", f"empty caps must yield empty text: {text!r}"
+
+    monkeypatch.setattr(media_gen, "get_model_capabilities", lambda *a, **k: {
+        "id": "some/video-model",
+        "durations": [4, 5],
+        "aspect_ratios": ["16:9"],
+        "resolutions": ["720p"],
+        "generate_audio": False,
+        "pricing_skus": {},
+    })
+    text = media_gen.format_capabilities_for_prompt("some/video-model", kind="video")
+    assert "วินาที" in text, f"duration must still appear without pricing: {text}"
+    assert "cost" not in text.lower() and "$" not in text and "โดยประมาณ" not in text, \
+        f"no pricing line when pricing_skus empty: {text}"
+
+
+def test_stale_cache_without_pricing_refreshes_to_include_pricing(monkeypatch, tmp_path):
+    """A cached capability record written before pricing_skus was preserved must
+    not permanently block pricing metadata from reaching the Agent. The cache
+    refresh path must re-fetch and include the new field."""
+    from src import media_gen
+
+    monkeypatch.setattr(media_gen, "_get_api_key", lambda: "fake-api-key")
+    monkeypatch.setattr(media_gen, "_CAPABILITIES_CACHE", {})
+    monkeypatch.setattr(media_gen, "_CAPABILITIES_CACHE_DIR", tmp_path)
+
+    # Simulate a stale pre-change cache file (no pricing_skus field)
+    stale_caps = {
+        "id": "bytedance/seedance-2.0-fast",
+        "name": "Seedance 2.0 Fast",
+        "durations": [4, 5, 6, 7, 8],
+        "aspect_ratios": ["16:9"],
+        "resolutions": ["720p"],
+        "sizes": [],
+        "generate_audio": True,
+        "frame_images": ["first_frame", "last_frame"],
+    }
+    cache_file = tmp_path / "video_bytedance_seedance-2.0-fast.json"
+    cache_file.write_text(json.dumps(stale_caps, ensure_ascii=False), encoding="utf-8")
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "data": [{
+                "id": "bytedance/seedance-2.0-fast",
+                "name": "Seedance 2.0 Fast",
+                "supported_durations": [4, 5, 6, 7, 8],
+                "supported_aspect_ratios": ["16:9"],
+                "supported_resolutions": ["720p"],
+                "supported_sizes": None,
+                "generate_audio": True,
+                "supported_frame_images": ["first_frame", "last_frame"],
+                "pricing_skus": {"per-video-second": "0.1028"},
+            }]
+        })
+
+    _patch_http(monkeypatch, handler)
+
+    caps = media_gen.get_model_capabilities("bytedance/seedance-2.0-fast", kind="video")
+    assert caps.get("pricing_skus") == {"per-video-second": "0.1028"}, \
+        "stale cache without pricing_skus must refresh to include it"
+
+
+def test_agent4_prompt_receives_cost_conscious_duration_instruction():
+    """Agent 4 build_prompt with video media_capabilities must include a generic
+    instruction to choose the shortest sufficient duration considering cost,
+    without imposing a hard maximum."""
+    from src.agents.content_creator import ContentCreatorAgent
+
+    agent = ContentCreatorAgent.__new__(ContentCreatorAgent)
+    prompt = agent.build_prompt(
+        product_spec="Product K5 spec",
+        competitor_analysis="",
+        campaign_strategy="",
+        media_capabilities="duration: 4-8 วินาที | cost โดยประมาณ: ~$0.10/วินาที",
+        media_type="video",
+        visual_style="",
+        asset_summary="",
+        reference_catalog=None,
+        brand_context="",
+    )
+    assert "duration" in prompt.lower(), "duration capability must appear"
+    # Generic cost-conscious instruction present
+    assert "สั้นที่สุด" in prompt or "shortest" in prompt.lower(), \
+        "must instruct to choose shortest sufficient duration"
+    assert "cost" in prompt.lower() or "ค่าใช้จ่าย" in prompt, \
+        "must reference cost in the instruction"
+
+
+def test_no_hard_duration_clamp_introduced(monkeypatch, tmp_path):
+    """clamp_to_capabilities must NOT clamp duration to a new hard maximum as a
+    substitute for agent reasoning. A user-requested 10s within provider
+    supported range must remain 10s (no artificial 5s/6s/8s cap)."""
+    from src import media_gen
+
+    caps = {
+        "durations": [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        "aspect_ratios": ["16:9"],
+        "resolutions": ["720p"],
+        "pricing_skus": {"per-video-second": "0.1028"},
+    }
+    # User explicitly requests 10s, provider supports 10s → must stay 10s
+    val, warn = media_gen.clamp_to_capabilities(10, caps, "durations", 5)
+    assert val == 10, f"explicit 10s within range must not be clamped: {val}"
+    assert warn is None, f"no warning for in-range value: {warn}"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -158,6 +158,7 @@ def test_generate_image_reaches_api_with_lagenio_visual(monkeypatch):
 
     monkeypatch.setattr(media_gen, "_get_api_key", lambda: "fake-api-key")
     monkeypatch.setattr(media_gen, "_log_media_usage", lambda *a, **k: None)
+    monkeypatch.setattr(media_gen, "get_model_capabilities", lambda *a, **k: {})
 
     calls = []
     original_post = httpx.Client.post

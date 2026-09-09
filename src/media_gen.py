@@ -183,8 +183,12 @@ def get_model_capabilities(model_id: str, kind: str = "video") -> dict[str, Any]
         if age < _capabilities_cache_ttl():
             try:
                 data = json.loads(cache_file.read_text(encoding="utf-8"))
-                _CAPABILITIES_CACHE[cache_key] = data
-                return data
+                # Stale-shape guard: records written before pricing_skus was
+                # preserved lack the field — refresh through the API seam
+                # rather than serving an incomplete capability set.
+                if "pricing_skus" in data:
+                    _CAPABILITIES_CACHE[cache_key] = data
+                    return data
             except Exception:
                 pass  # ไฟล์เสีย → ดึงใหม่
 
@@ -218,6 +222,7 @@ def get_model_capabilities(model_id: str, kind: str = "video") -> dict[str, Any]
                 "sizes": m.get("supported_sizes") or [],
                 "generate_audio": m.get("generate_audio"),
                 "frame_images": m.get("supported_frame_images") or [],
+                "pricing_skus": m.get("pricing_skus") or {},
             }
             # เก็บ cache
             _CAPABILITIES_CACHE[cache_key] = caps
@@ -251,6 +256,15 @@ def format_capabilities_for_prompt(model_id: str, kind: str = "video") -> str:
         parts.append(f"resolution: {', '.join(caps['resolutions'])}")
     if caps.get("generate_audio"):
         parts.append("audio: สร้างเสียงได้")
+    if caps.get("pricing_skus"):
+        sku_parts = []
+        for sku, price in caps["pricing_skus"].items():
+            if sku == "per-video-second":
+                sku_parts.append(f"~${price}/วินาที")
+            else:
+                sku_parts.append(f"{sku}: ${price}")
+        if sku_parts:
+            parts.append(f"cost โดยประมาณ (provider-advertised): {' | '.join(sku_parts)}")
     if not parts:
         return ""
     return f"Model {model_id} รองรับ: {' | '.join(parts)}"
