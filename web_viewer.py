@@ -98,18 +98,145 @@ def _refresh_conflict_cache() -> None:
     _conflict_cache = cache
 
 
-def _get_brand_visual() -> dict:
-    """โหลด brand/visual.json — cached ที่ module level เพื่อไม่อ่านซ้ำทุก request."""
+def _get_brand_visual(product_id: str | None = None) -> dict:
+    """โหลด brand/visual.json — cached ที่ module level.
+
+    ถ้ามี product_id → merge product-specific visual_override ด้วย
+    (cache เฉพาะ brand-level; product override อ่านใหม่ทุกครั้งเพราะ product profile เปลี่ยนได้)
+    """
     global _BRAND_VISUAL_CACHE
     if _BRAND_VISUAL_CACHE is None:
         try:
             _BRAND_VISUAL_CACHE = load_brand_visual(BRAND_DIR)
         except Exception:
             _BRAND_VISUAL_CACHE = {}
-    return _BRAND_VISUAL_CACHE
+    if not product_id:
+        return _BRAND_VISUAL_CACHE
+    # Product-specific override — อ่านใหม่ไม่ cache (product profile เปลี่ยนได้)
+    try:
+        return load_brand_visual(BRAND_DIR, product_id=product_id)
+    except Exception:
+        return _BRAND_VISUAL_CACHE
 
 
 _BRAND_VISUAL_CACHE: dict | None = None
+
+
+def _resolve_product_image_paths(product_id: str | None) -> list[str]:
+    """ดึงรูปสินค้าจริงจาก product_db — รองรับ multi-product ("A + B").
+
+    แก้ปัญหา: ก่อนหน้านี้ /api/run_auto ส่ง combined label เป็น product_id เดียว
+    ให้ product_db.query ทำให้หาไม่เจอ — ตอนนี้ resolve แต่ละสินค้าแยก
+    get_product_image_paths จัดการ product ที่ไม่มีอยู่เอง (คืน list ว่าง)
+    """
+    if not product_id:
+        return []
+    paths: list[str] = []
+    if " + " in product_id:
+        for pid in product_id.split(" + "):
+            pid = pid.strip()
+            if pid:
+                paths.extend(product_db.get_product_image_paths(pid))
+    else:
+        paths = product_db.get_product_image_paths(product_id)
+    return paths
+
+
+def compose_media_input(
+    *,
+    prompt: str,
+    product_id: str | None = None,
+    asset_ids: list[str] | None = None,
+    resource_paths: list[str] | None = None,
+    aspect_ratio: str | None = None,
+    duration: int | None = None,
+    resolution: str | None = None,
+    use_retry: bool = True,
+    catalog_asset_ids: list[str] | None = None,
+) -> dict:
+    """Shared input composer สำหรับทุก media generation channel.
+
+    รวม: prompt + brand visual (product-specific override) + product images
+    + user resources + asset library → ordered reference catalog + input_references
+    + visual + provider params (aspect_ratio, duration, resolution).
+
+    ใช้ฟังก์ชันเดียวในทุก channel: auto, manual, generate_all, single-item, retry.
+
+    catalog_asset_ids: full set of selected asset IDs that Agent 4 saw in its catalog.
+        When per-item asset_ids is a subset, reference numbers are mechanically
+        remapped so "Reference N" in the prompt matches the per-item provider array.
+
+    คืน: {
+        prompt, visual, reference_catalog, input_references,
+        aspect_ratio, duration, resolution, use_retry,
+        product_id, preflight_error (str | None), reference_remap (dict|None)
+    }
+    """
+    # 1. Brand visual — with product-specific override
+    visual = _get_brand_visual(product_id) if product_id else _get_brand_visual()
+
+    # 2. Product images — resolve each product independently (no combined-label query)
+    product_image_paths = _resolve_product_image_paths(product_id)
+
+    # 3. Ordered reference catalog — mechanical fields only (Agent 4 reasons about meaning)
+    from src import asset_library
+    item_asset_ids = asset_ids or []
+    catalog_asset_id_list = catalog_asset_ids or item_asset_ids
+
+    # If per-item asset_ids differs from the full catalog's asset_ids,
+    # build a remap so "Reference N" in the prompt matches the per-item array.
+    reference_remap: dict[int, int] | None = None
+    if catalog_asset_id_list and set(item_asset_ids) != set(catalog_asset_id_list):
+        full_catalog = asset_library.build_reference_catalog(
+            product_image_paths, catalog_asset_id_list, resource_paths,
+        )
+        item_catalog, reference_remap = asset_library.build_reference_remap(
+            full_catalog, item_asset_ids, product_image_paths, resource_paths,
+        )
+        # Preflight: reject dangling Reference numbers before remapping/provider call
+        mention_error = asset_library.preflight_reference_mentions(
+            prompt, full_catalog, reference_remap,
+        )
+        if mention_error:
+            return {
+                "prompt": prompt,
+                "visual": visual,
+                "reference_catalog": item_catalog,
+                "input_references": [],
+                "aspect_ratio": aspect_ratio,
+                "duration": duration,
+                "resolution": resolution,
+                "use_retry": use_retry,
+                "product_id": product_id,
+                "preflight_error": mention_error,
+                "reference_remap": reference_remap,
+            }
+        prompt = asset_library.remap_reference_numbers(prompt, reference_remap)
+    else:
+        item_catalog = asset_library.build_reference_catalog(
+            product_image_paths, item_asset_ids, resource_paths,
+        )
+
+    # 4. Preflight — missing/unreadable files or count > limit → visible error, no silent truncation
+    preflight_error = asset_library.preflight_references(item_catalog)
+
+    # 5. input_references — flat list of paths in the same order as the catalog
+    input_refs = [r["path"] for r in item_catalog if r.get("path")]
+
+    return {
+        "prompt": prompt,
+        "visual": visual,
+        "reference_catalog": item_catalog,
+        "input_references": input_refs,
+        "aspect_ratio": aspect_ratio,
+        "duration": duration,
+        "resolution": resolution,
+        "use_retry": use_retry,
+        "product_id": product_id,
+        "preflight_error": preflight_error,
+        "reference_remap": reference_remap,
+    }
+
 
 _orch: Orchestrator | None = None  # only used by single-agent endpoint
 _cancel_requested: bool = False
@@ -465,6 +592,60 @@ async def api_parse_media_prompts(request: Request) -> JSONResponse:
     return JSONResponse(parsed)
 
 
+def _recover_item_asset_ids(output_dir: Path, filename: str, media_type: str) -> list[str]:
+    """Recover the original per-item asset_ids from the persisted content JSON.
+
+    Reads the content_creator JSON in output_dir, finds the media item that
+    corresponds to the given filename, and returns that item's asset_ids.
+
+    asset_ids in the content JSON are at the post level — all image/video items
+    within a post share the same asset_ids. So we map the filename to its post
+    and return that post's asset_ids.
+
+    Filename patterns:
+      image_N.png / video_N.mp4           → flattened item N (1-based)
+      image_โพสต์P_N.png / video_โพสต์P_N.mp4 → post P, item N within post (1-based)
+    """
+    import re
+    content_json: Path | None = None
+    if not output_dir.exists():
+        return []
+    for f in output_dir.iterdir():
+        if f.is_file() and "content_creator" in f.name.lower() and f.suffix == ".json":
+            content_json = f
+            break
+    if not content_json:
+        return []
+    try:
+        raw = content_json.read_text(encoding="utf-8")
+        parsed_json = json.loads(raw)
+    except Exception:
+        return []
+    posts = parsed_json.get("posts", [])
+    if not posts:
+        return []
+
+    # Pattern 1: image_N.png / video_N.mp4 (flattened index from parse_media_prompts)
+    m1 = re.match(r"(?:image|video)_(\d+)\.\w+", filename)
+    if m1:
+        idx = int(m1.group(1)) - 1
+        items = media_gen.parse_media_prompts(raw)
+        item_list = items.get("images", []) if media_type == "image" else items.get("videos", [])
+        if 0 <= idx < len(item_list):
+            return list(item_list[idx].get("asset_ids", []))
+        return []
+
+    # Pattern 2: image_โพสต์P_N.png / video_โพสต์P_N.mp4 (post P, item N within post)
+    m2 = re.match(r"(?:image|video)_โพสต์(\d+)_(\d+)\.\w+", filename)
+    if m2:
+        post_idx = int(m2.group(1)) - 1
+        if 0 <= post_idx < len(posts):
+            return list(posts[post_idx].get("asset_ids", []))
+        return []
+
+    return []
+
+
 @app.post("/api/generate_media")
 async def api_generate_media(request: Request) -> StreamingResponse:
     """สร้าง image หรือ video จาก prompt — SSE ส่ง status ระหว่างทำ.
@@ -512,22 +693,67 @@ async def api_generate_media(request: Request) -> StreamingResponse:
         media_flow_id = find_any_flow_id(output_dir)
 
     # หารูปสินค้าจริงจาก product_id (ถ้าไม่มี ลองอ่านจาก session meta)
+    # และ recover resource_refs + asset_ids จาก session meta เพื่อ reconstruct
+    # รูปอ้างอิงเดิม (single-item regenerate ใช้ references ชุดเดียวกับตอนสร้างครั้งแรก)
+    asset_ids = body.get("asset_ids", [])
+    resource_paths = body.get("resource_paths", [])
+    meta_path = output_dir / "_session_meta.json"
+    meta = {}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
     if not product_id:
-        meta_path = output_dir / "_session_meta.json"
-        if meta_path.exists():
+        product_id = meta.get("product_id", "")
+    # recover asset_ids จาก session meta ถ้า request ไม่ส่งมาเอง
+    if not asset_ids:
+        asset_ids = meta.get("asset_ids", [])
+    # recover catalog_asset_ids (full set Agent 4 saw) for reference remapping context only
+    catalog_asset_ids = meta.get("catalog_asset_ids", []) or asset_ids
+    # When request omits asset_ids AND session_meta has no per-item asset_ids,
+    # recover the EXACT per-item asset_ids from the persisted content JSON.
+    # Do NOT use catalog_asset_ids as the per-item set — that would send assets
+    # the original media item did not select.
+    if not asset_ids:
+        asset_ids = _recover_item_asset_ids(output_dir, filename, media_type)
+    # reconstruct resource paths จาก persisted resource_refs (ถ้า request ไม่ส่งมาเอง)
+    if not resource_paths:
+        meta_resource_refs = meta.get("resource_refs", [])
+        meta_upload_session_id = meta.get("upload_session_id", "")
+        if meta_resource_refs and meta_upload_session_id:
             try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                product_id = meta.get("product_id", "")
-            except Exception:
-                pass
-    product_image_paths: list[str] = []
-    if product_id:
-        # กรณี multi-product: product_id = "K5 + K2" → ดึงจากทุกสินค้า
-        if " + " in product_id:
-            for pid in product_id.split(" + "):
-                product_image_paths.extend(product_db.get_product_image_paths(pid.strip()))
-        else:
-            product_image_paths = product_db.get_product_image_paths(product_id)
+                ctx = build_step_run_context(
+                    _resource_store,
+                    workflow_id=f"generate_media_{output_dir.name}",
+                    step_id="generate_media_step",
+                    agent_key="content_creator",
+                    quick_brief="",
+                    product_refs=[],
+                    resource_refs=meta_resource_refs,
+                    upload_session_id=meta_upload_session_id,
+                )
+                if ctx.warnings:
+                    return JSONResponse({"error": f"resource preflight failed: {list(ctx.warnings)}"}, status_code=400)
+                resource_paths = list(ctx.resource_image_paths)
+            except Exception as e:
+                return JSONResponse({"error": f"failed to recover session resources: {e}"}, status_code=400)
+
+    # Compose media input through shared seam — product images + visual override +
+    # asset_ids + resource_paths → ordered reference catalog + input_references
+    composed = compose_media_input(
+        prompt=prompt,
+        product_id=product_id,
+        asset_ids=asset_ids,
+        resource_paths=resource_paths,
+        aspect_ratio=aspect_ratio,
+        duration=duration,
+        resolution=resolution,
+        use_retry=True,
+        catalog_asset_ids=catalog_asset_ids,
+    )
+    if composed.get("preflight_error"):
+        return JSONResponse({"error": composed["preflight_error"]})
 
     q: _queue.Queue[str | None] = _queue.Queue()
 
@@ -539,34 +765,33 @@ async def api_generate_media(request: Request) -> StreamingResponse:
             if media_type == "image":
                 q.put_nowait(_sse("status", "กำลังสร้างรูป..."))
                 img_kwargs: dict = {}
-                if aspect_ratio:
-                    img_kwargs["aspect_ratio"] = aspect_ratio
-                # ส่งรูปสินค้าจริงเป็น reference — image-to-image
-                if product_image_paths:
-                    img_kwargs["input_references"] = product_image_paths
-                # Visual brand injection — แป๊ะ keywords/colors/tone ต่อท้าย prompt
-                visual = _get_brand_visual()
-                if visual:
-                    img_kwargs["visual"] = visual
-                result = media_gen.generate_image(prompt, output_path, **img_kwargs)
+                if composed["aspect_ratio"]:
+                    img_kwargs["aspect_ratio"] = composed["aspect_ratio"]
+                if composed["input_references"]:
+                    img_kwargs["input_references"] = composed["input_references"]
+                if composed["visual"]:
+                    img_kwargs["visual"] = composed["visual"]
+                # Use with_retry for consistent retry/policy behavior across all channels
+                result = media_gen.generate_image_with_retry(
+                    composed["prompt"], output_path, **img_kwargs,
+                )
             else:
                 def on_status(s):
                     q.put_nowait(_sse("status", f"วิดีโอ: {s}"))
                 vid_kwargs: dict = {"on_status": on_status}
-                if duration:
-                    vid_kwargs["duration"] = int(duration)
-                if aspect_ratio:
-                    vid_kwargs["aspect_ratio"] = aspect_ratio
-                if resolution:
-                    vid_kwargs["resolution"] = resolution
-                # ส่งรูปสินค้าจริงเป็น reference — reference-to-video
-                if product_image_paths:
-                    vid_kwargs["input_references"] = product_image_paths
-                # Visual brand injection
-                visual = _get_brand_visual()
-                if visual:
-                    vid_kwargs["visual"] = visual
-                result = media_gen.generate_video(prompt, output_path, **vid_kwargs)
+                if composed["duration"]:
+                    vid_kwargs["duration"] = int(composed["duration"])
+                if composed["aspect_ratio"]:
+                    vid_kwargs["aspect_ratio"] = composed["aspect_ratio"]
+                if composed["resolution"]:
+                    vid_kwargs["resolution"] = composed["resolution"]
+                if composed["input_references"]:
+                    vid_kwargs["input_references"] = composed["input_references"]
+                if composed["visual"]:
+                    vid_kwargs["visual"] = composed["visual"]
+                result = media_gen.generate_video_with_retry(
+                    composed["prompt"], output_path, **vid_kwargs,
+                )
 
             # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
             media_gen.save_retry_history(output_path.parent, media_type, filename, result)
@@ -629,22 +854,24 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
         return JSONResponse({"error": f"file not found: {filepath}"})
 
     # หารูปสินค้าจริงจาก product_id (ถ้าไม่มี ลองอ่านจาก session meta)
+    _generate_all_meta = {}
     if not product_id:
         meta_path = p.parent / "_session_meta.json"
         if meta_path.exists():
             try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                product_id = meta.get("product_id", "")
+                _generate_all_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                product_id = _generate_all_meta.get("product_id", "")
             except Exception:
                 pass
-    product_image_paths: list[str] = []
-    if product_id:
-        # กรณี multi-product: product_id = "K5 + K2" → ดึงจากทุกสินค้า
-        if " + " in product_id:
-            for pid in product_id.split(" + "):
-                product_image_paths.extend(product_db.get_product_image_paths(pid.strip()))
-        else:
-            product_image_paths = product_db.get_product_image_paths(product_id)
+    # recover catalog_asset_ids (full set Agent 4 saw) for reference remapping
+    if not _generate_all_meta:
+        _meta_path = p.parent / "_session_meta.json"
+        if _meta_path.exists():
+            try:
+                _generate_all_meta = json.loads(_meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+    _catalog_asset_ids = _generate_all_meta.get("catalog_asset_ids", [])
 
     # ถ้าเป็น .md → ลองหา .json ที่ชื่อเดียวกันก่อน (structured output)
     content = ""
@@ -657,9 +884,6 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
     parsed = media_gen.parse_media_prompts(content)
     images = parsed.get("images", [])
     videos = parsed.get("videos", [])
-
-    # Phase 4: รวมรูปสินค้า + รูป asset เป็น input_references (helper เดียว)
-    from src import asset_library as _al
 
     output_dir = p.parent
     session_rel = str(output_dir.relative_to(OUTPUT_DIR)) if output_dir.is_relative_to(OUTPUT_DIR) else str(output_dir)
@@ -770,20 +994,33 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                     _save_status({**_load_status(), "last_update": f"รูปที่ {i+1}: กำลังสร้าง..."})
                     fname = f"image_{i+1}.png"
                     out_path = output_dir / fname
-                    img_kwargs: dict = {}
-                    if img.get("aspect_ratio"):
-                        img_kwargs["aspect_ratio"] = img["aspect_ratio"]
-                    # ส่งรูปสินค้า + รูป asset เป็น reference — image-to-image
-                    _refs = _al.build_input_references(
-                        product_image_paths, img.get("asset_ids", []), resource_paths=resource_image_paths,
+                    # Compose through shared seam — product images + visual override +
+                    # asset_ids + resource_paths → reference manifest + input_references
+                    composed = compose_media_input(
+                        prompt=img["prompt"],
+                        product_id=product_id,
+                        asset_ids=img.get("asset_ids", []),
+                        resource_paths=resource_image_paths,
+                        aspect_ratio=img.get("aspect_ratio"),
+                        use_retry=True,
+                        catalog_asset_ids=_catalog_asset_ids,
                     )
-                    if _refs:
-                        img_kwargs["input_references"] = _refs
-                    # Visual brand injection
-                    visual = _get_brand_visual()
-                    if visual:
-                        img_kwargs["visual"] = visual
-                    result = media_gen.generate_image(img["prompt"], out_path, **img_kwargs)
+                    if composed.get("preflight_error"):
+                        err = f"รูปที่ {i+1}: {composed['preflight_error']}"
+                        errors.append(err)
+                        q.put_nowait(_sse("error", err))
+                        done += 1
+                        continue
+                    img_kwargs: dict = {}
+                    if composed["aspect_ratio"]:
+                        img_kwargs["aspect_ratio"] = composed["aspect_ratio"]
+                    if composed["input_references"]:
+                        img_kwargs["input_references"] = composed["input_references"]
+                    if composed["visual"]:
+                        img_kwargs["visual"] = composed["visual"]
+                    result = media_gen.generate_image_with_retry(
+                        composed["prompt"], out_path, **img_kwargs,
+                    )
                     done += 1
                     # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
                     media_gen.save_retry_history(output_dir, "image", fname, result)
@@ -806,24 +1043,38 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                         _save_status({**_load_status(), "last_update": f"วิดีโอที่ {idx+1}: {s}"})
                     fname = f"video_{i+1}.mp4"
                     out_path = output_dir / fname
-                    vid_kwargs: dict = {"on_status": on_status}
-                    if vid.get("duration"):
-                        vid_kwargs["duration"] = int(vid["duration"])
-                    if vid.get("aspect_ratio"):
-                        vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
-                    if vid.get("resolution"):
-                        vid_kwargs["resolution"] = vid["resolution"]
-                    # ส่งรูปสินค้า + รูป asset เป็น reference — reference-to-video
-                    _refs = _al.build_input_references(
-                        product_image_paths, vid.get("asset_ids", []), resource_paths=resource_image_paths,
+                    # Compose through shared seam
+                    composed = compose_media_input(
+                        prompt=vid["prompt"],
+                        product_id=product_id,
+                        asset_ids=vid.get("asset_ids", []),
+                        resource_paths=resource_image_paths,
+                        duration=vid.get("duration"),
+                        aspect_ratio=vid.get("aspect_ratio"),
+                        resolution=vid.get("resolution"),
+                        use_retry=True,
+                        catalog_asset_ids=_catalog_asset_ids,
                     )
-                    if _refs:
-                        vid_kwargs["input_references"] = _refs
-                    # Visual brand injection
-                    visual = _get_brand_visual()
-                    if visual:
-                        vid_kwargs["visual"] = visual
-                    result = media_gen.generate_video(vid["prompt"], out_path, **vid_kwargs)
+                    if composed.get("preflight_error"):
+                        err = f"วิดีโอที่ {i+1}: {composed['preflight_error']}"
+                        errors.append(err)
+                        q.put_nowait(_sse("error", err))
+                        done += 1
+                        continue
+                    vid_kwargs: dict = {"on_status": on_status}
+                    if composed["duration"]:
+                        vid_kwargs["duration"] = int(composed["duration"])
+                    if composed["aspect_ratio"]:
+                        vid_kwargs["aspect_ratio"] = composed["aspect_ratio"]
+                    if composed["resolution"]:
+                        vid_kwargs["resolution"] = composed["resolution"]
+                    if composed["input_references"]:
+                        vid_kwargs["input_references"] = composed["input_references"]
+                    if composed["visual"]:
+                        vid_kwargs["visual"] = composed["visual"]
+                    result = media_gen.generate_video_with_retry(
+                        composed["prompt"], out_path, **vid_kwargs,
+                    )
                     done += 1
                     # เก็บประวัติ (ถูก reject หรือสำเร็จ ก็เก็บ)
                     media_gen.save_retry_history(output_dir, "video", fname, result)
@@ -2407,6 +2658,8 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                     try:
                         def _status_cb(msg, _ak=agent_key):
                             q.put_nowait(_sse("status", msg, agent=_ak))
+                        def _error_cb(msg, _ak=agent_key):
+                            q.put_nowait(_sse("error", msg, agent=_ak))
                         results = _run_single_agent(
                             agent_key, folder, raw_contents, image_paths,
                             ready_contents, orch, llm, output_dir,
@@ -2414,6 +2667,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                             auto_image=auto_image, auto_video=auto_video, platforms=platforms,
                             media_type=media_type,
                             status_callback=_status_cb,
+                            error_callback=_error_cb,
                             folders=[folder],
                             step_context=step_context,
                         )
@@ -2562,8 +2816,15 @@ def _write_session_meta(
     resource_image_paths: list[str] | None = None,
     resource_refs: list[str] | None = None,
     upload_session_id: str = "",
+    asset_ids: list[str] | None = None,
+    catalog_asset_ids: list[str] | None = None,
 ) -> None:
-    """Persist session metadata so generate-later endpoints can recover attached resources."""
+    """Persist session metadata so generate-later endpoints can recover attached resources.
+
+    catalog_asset_ids: the FULL set of selected asset IDs that Agent 4 saw in its
+        reference catalog. Used by compose_media_input to remap Reference numbers
+        when per-item asset_ids is a subset. If absent, falls back to asset_ids.
+    """
     try:
         meta_path = output_dir / "_session_meta.json"
         meta_path.write_text(json.dumps({
@@ -2572,6 +2833,8 @@ def _write_session_meta(
             "resource_image_paths": resource_image_paths or [],
             "resource_refs": resource_refs or [],
             "upload_session_id": upload_session_id,
+            "asset_ids": asset_ids or [],
+            "catalog_asset_ids": catalog_asset_ids or asset_ids or [],
             "created_at": datetime.now().isoformat(),
         }, ensure_ascii=False), encoding="utf-8")
     except Exception:
@@ -2590,7 +2853,8 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                       folders: list[str] | None = None,
                       resource_context: str = "",
                       extra_image_paths: list[str] | None = None,
-                      step_context=None) -> list[tuple[str, str | None]]:
+                      step_context=None,
+                      error_callback=None) -> list[tuple[str, str | None]]:
     """Run one agent, return list of (result_text, filepath) tuples.
 
     context: {use_competitor: bool, use_campaign: bool} — user เลือกว่าจะใช้ context อะไร
@@ -2895,6 +3159,16 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
             results.append((combined_json, saved_path))
             for _p in completed_posts:
                 _p["output_file"] = saved_path or ""
+            # Persist catalog_asset_ids (full set Agent 4 saw) for reference remapping
+            # in generate-later / single-item regenerate flows
+            _catalog_aids = getattr(orch, "_selected_asset_ids", [])
+            if _catalog_aids:
+                _write_session_meta(
+                    output_dir, product_id=folder,
+                    product_ids=effective_folders,
+                    resource_image_paths=extra_image_paths,
+                    catalog_asset_ids=_catalog_aids,
+                )
         else:
             results.append((combined_json, None))
 
@@ -2902,35 +3176,45 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
         if save_output and saved_path and (auto_image or auto_video):
             try:
                 parsed = media_gen.parse_media_prompts(combined_json)
-                from src import asset_library as _al
                 retry_llm = llm if llm is not None else None
                 if retry_llm is None:
                     try:
                         retry_llm = orch.make_client()
                     except Exception:
                         retry_llm = None
+                # Determine product_id for this run (folder may be multi-product)
+                _media_product_id = folder if " + " not in folder else folder
                 if auto_image:
                     for j, img in enumerate(parsed.get("images", [])):
                         img_path = output_dir / f"image_{j+1}.png"
                         if status_callback:
                             status_callback(f"กำลังสร้างรูปที่ {j+1}...")
-                        img_kwargs: dict = {}
-                        if img.get("aspect_ratio"):
-                            img_kwargs["aspect_ratio"] = img["aspect_ratio"]
-                        _refs = _al.build_input_references(
-                            image_paths, img.get("asset_ids", []), resource_paths=extra_image_paths,
+                        composed = compose_media_input(
+                            prompt=img["prompt"],
+                            product_id=_media_product_id,
+                            asset_ids=img.get("asset_ids", []),
+                            resource_paths=extra_image_paths,
+                            aspect_ratio=img.get("aspect_ratio"),
+                            use_retry=True,
+                            catalog_asset_ids=getattr(orch, "_selected_asset_ids", []),
                         )
-                        if _refs:
-                            img_kwargs["input_references"] = _refs
-                        visual = _get_brand_visual()
-                        if visual:
-                            img_kwargs["visual"] = visual
+                        if composed.get("preflight_error"):
+                            if status_callback:
+                                status_callback(f"รูปที่ {j+1}: {composed['preflight_error']}")
+                            continue
+                        img_kwargs: dict = {}
+                        if composed["aspect_ratio"]:
+                            img_kwargs["aspect_ratio"] = composed["aspect_ratio"]
+                        if composed["input_references"]:
+                            img_kwargs["input_references"] = composed["input_references"]
+                        if composed["visual"]:
+                            img_kwargs["visual"] = composed["visual"]
                         def _img_retry(old_p, new_p, err, idx=j):
                             if status_callback:
                                 status_callback(f"รูปที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
                             print(f"[MediaGen] retry รูป {idx+1}: {err[:int(_sys_cfg().get('error_preview_length', 200))]}", flush=True)
                         r = media_gen.generate_image_with_retry(
-                            img["prompt"], img_path, llm=retry_llm,
+                            composed["prompt"], img_path, llm=retry_llm,
                             on_retry=_img_retry, **img_kwargs,
                         )
                         media_gen.save_retry_history(
@@ -2938,8 +3222,9 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                         )
                         if not r.get("ok"):
                             msg = f"รูปที่ {j+1}: {r.get('error', 'unknown')}"
-                            if status_callback:
-                                status_callback(msg)
+                            _ecb = error_callback or status_callback
+                            if _ecb:
+                                _ecb(msg)
                             print(f"[MediaGen] {msg}", flush=True)
                         elif r.get("retry_count"):
                             if status_callback:
@@ -2950,36 +3235,48 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                         def _vid_status(s, idx=j):
                             if status_callback:
                                 status_callback(f"วิดีโอที่ {idx+1}: {s}")
-                        vid_kwargs: dict = {"on_status": _vid_status}
-                        if vid.get("duration"):
-                            vid_kwargs["duration"] = int(vid["duration"])
-                        if vid.get("aspect_ratio"):
-                            vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
-                        if vid.get("resolution"):
-                            vid_kwargs["resolution"] = vid["resolution"]
-                        _refs = _al.build_input_references(
-                            image_paths, vid.get("asset_ids", []), resource_paths=extra_image_paths,
+                        composed = compose_media_input(
+                            prompt=vid["prompt"],
+                            product_id=_media_product_id,
+                            asset_ids=vid.get("asset_ids", []),
+                            resource_paths=extra_image_paths,
+                            duration=vid.get("duration"),
+                            aspect_ratio=vid.get("aspect_ratio"),
+                            resolution=vid.get("resolution"),
+                            use_retry=True,
+                            catalog_asset_ids=getattr(orch, "_selected_asset_ids", []),
                         )
-                        if _refs:
-                            vid_kwargs["input_references"] = _refs
-                        visual = _get_brand_visual()
-                        if visual:
-                            vid_kwargs["visual"] = visual
+                        if composed.get("preflight_error"):
+                            if status_callback:
+                                status_callback(f"วิดีโอที่ {j+1}: {composed['preflight_error']}")
+                            continue
+                        vid_kwargs: dict = {"on_status": _vid_status}
+                        if composed["duration"]:
+                            vid_kwargs["duration"] = int(composed["duration"])
+                        if composed["aspect_ratio"]:
+                            vid_kwargs["aspect_ratio"] = composed["aspect_ratio"]
+                        if composed["resolution"]:
+                            vid_kwargs["resolution"] = composed["resolution"]
+                        if composed["input_references"]:
+                            vid_kwargs["input_references"] = composed["input_references"]
+                        if composed["visual"]:
+                            vid_kwargs["visual"] = composed["visual"]
                         def _vid_retry(old_p, new_p, err, idx=j):
                             if status_callback:
                                 status_callback(f"วิดีโอที่ {idx+1}: ถูกปฏิเสธ กำลังแก้ prompt แล้วลองใหม่...")
                             print(f"[MediaGen] retry วิดีโอ {idx+1}: {err[:int(_sys_cfg().get('error_preview_length', 200))]}", flush=True)
                         vid_kwargs["on_retry"] = _vid_retry
                         r = media_gen.generate_video_with_retry(
-                            vid["prompt"], vid_path, llm=retry_llm, **vid_kwargs,
+                            composed["prompt"], vid_path, llm=retry_llm, **vid_kwargs,
                         )
                         media_gen.save_retry_history(
                             output_dir, "video", vid_path.name, r,
                         )
                         if not r.get("ok"):
                             msg = f"วิดีโอที่ {j+1}: {r.get('error', 'unknown')}"
-                            if status_callback:
-                                status_callback(msg)
+                            _ecb = error_callback or status_callback
+                            if _ecb:
+                                _ecb(msg)
                             print(f"[MediaGen] {msg}", flush=True)
                         elif r.get("retry_count"):
                             if status_callback:
@@ -3378,6 +3675,8 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                     try:
                         def _status_cb(msg, _ak=agent_key):
                             q.put_nowait(_sse("status", msg, agent=_ak, plan=plan_idx))
+                        def _error_cb(msg, _ak=agent_key):
+                            q.put_nowait(_sse("error", msg, agent=_ak, plan=plan_idx))
 
                         agent_context = step_context.with_agent_key(agent_key).with_phase("generation")
                         all_phase_traces.append(agent_context.phase_traces[-1].as_dict())
@@ -3389,6 +3688,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                             auto_image=auto_image, auto_video=auto_video,
                             platforms=platforms, media_type=media_type,
                             status_callback=_status_cb,
+                            error_callback=_error_cb,
                             folders=folders,
                             resource_context=resource_context,
                             extra_image_paths=extra_image_paths,
@@ -3740,6 +4040,8 @@ async def api_run_auto(request: Request) -> StreamingResponse:
 
                 def _status_cb(msg):
                     q.put_nowait(_sse("status", msg, agent="content_creator"))
+                def _error_cb(msg):
+                    q.put_nowait(_sse("error", msg, agent="content_creator"))
 
                 # --- สร้างคอนเทนต์ตามจำนวนที่ user ขอ ---
                 all_results: list[tuple[str, str | None]] = []
@@ -3926,6 +4228,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                         resource_image_paths=extra_image_paths,
                         resource_refs=resource_refs,
                         upload_session_id=upload_session_id,
+                        catalog_asset_ids=getattr(orch, "_selected_asset_ids", []),
                     )
 
                     # อัปเดต history entry ล่าสุดให้มี output_file (orchestrator บันทึกก่อนเซฟไฟล์)
@@ -3943,65 +4246,75 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     if auto_image or auto_video:
                         try:
                             parsed_media = media_gen.parse_media_prompts(content)
-                            # ดึง image_paths ของสินค้าที่เลือก
-                            from src import product_db as _pdb
-                            from src import asset_library as _al
-                            # Bind single product so brand_visual reflects
-                            # product-specific visual_override for media gen
-                            orch.bind_product(chosen_pid)
-                            product_img_paths = _pdb.get_product_image_paths(chosen_pid) if _pdb.is_ready(chosen_pid) else []
                             if auto_image:
                                 for j, img in enumerate(parsed_media.get("images", [])):
                                     img_path = output_dir / f"image_โพสต์{i+1}_{j+1}.png"
                                     if _status_cb:
                                         _status_cb(f"กำลังสร้างรูปที่ {j+1}...")
-                                    img_kwargs: dict = {}
-                                    if img.get("aspect_ratio"):
-                                        img_kwargs["aspect_ratio"] = img["aspect_ratio"]
-                                    # ส่งรูปสินค้า + รูป asset เป็น reference — image-to-image
-                                    _refs = _al.build_input_references(
-                                        product_img_paths, img.get("asset_ids", []), resource_paths=extra_image_paths,
+                                    # Compose through shared seam — resolves each product independently
+                                    composed = compose_media_input(
+                                        prompt=img["prompt"],
+                                        product_id=chosen_pid,
+                                        asset_ids=img.get("asset_ids", []),
+                                        resource_paths=extra_image_paths,
+                                        aspect_ratio=img.get("aspect_ratio"),
+                                        use_retry=True,
+                                        catalog_asset_ids=getattr(orch, "_selected_asset_ids", []),
                                     )
-                                    if _refs:
-                                        img_kwargs["input_references"] = _refs
-                                    # Visual brand injection
-                                    visual = _get_brand_visual()
-                                    if visual:
-                                        img_kwargs["visual"] = visual
+                                    if composed.get("preflight_error"):
+                                        if _status_cb:
+                                            _status_cb(f"รูปที่ {j+1}: {composed['preflight_error']}")
+                                        continue
+                                    img_kwargs: dict = {}
+                                    if composed["aspect_ratio"]:
+                                        img_kwargs["aspect_ratio"] = composed["aspect_ratio"]
+                                    if composed["input_references"]:
+                                        img_kwargs["input_references"] = composed["input_references"]
+                                    if composed["visual"]:
+                                        img_kwargs["visual"] = composed["visual"]
                                     r = media_gen.generate_image_with_retry(
-                                        img["prompt"], img_path, llm=llm, **img_kwargs,
+                                        composed["prompt"], img_path, llm=llm, **img_kwargs,
                                     )
                                     media_gen.save_retry_history(output_dir, "image", img_path.name, r)
                                     if not r.get("ok"):
-                                        _status_cb(f"รูปที่ {j+1}: {r.get('error', 'unknown')}")
+                                        _error_cb(f"รูปที่ {j+1}: {r.get('error', 'unknown')}")
                             if auto_video:
                                 for j, vid in enumerate(parsed_media.get("videos", [])):
                                     vid_path = output_dir / f"video_โพสต์{i+1}_{j+1}.mp4"
                                     def _vid_status(s, idx=j):
                                         _status_cb(f"วิดีโอที่ {idx+1}: {s}")
-                                    vid_kwargs: dict = {"on_status": _vid_status}
-                                    if vid.get("duration"):
-                                        vid_kwargs["duration"] = int(vid["duration"])
-                                    if vid.get("aspect_ratio"):
-                                        vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
-                                    if vid.get("resolution"):
-                                        vid_kwargs["resolution"] = vid["resolution"]
-                                    # ส่งรูปสินค้า + รูป asset เป็น reference — reference-to-video
-                                    _refs = _al.build_input_references(
-                                        product_img_paths, vid.get("asset_ids", []), resource_paths=extra_image_paths,
+                                    composed = compose_media_input(
+                                        prompt=vid["prompt"],
+                                        product_id=chosen_pid,
+                                        asset_ids=vid.get("asset_ids", []),
+                                        resource_paths=extra_image_paths,
+                                        duration=vid.get("duration"),
+                                        aspect_ratio=vid.get("aspect_ratio"),
+                                        resolution=vid.get("resolution"),
+                                        use_retry=True,
+                                        catalog_asset_ids=getattr(orch, "_selected_asset_ids", []),
                                     )
-                                    if _refs:
-                                        vid_kwargs["input_references"] = _refs
-                                    # Visual brand injection
-                                    visual = _get_brand_visual()
-                                    if visual:
-                                        vid_kwargs["visual"] = visual
+                                    if composed.get("preflight_error"):
+                                        if _status_cb:
+                                            _status_cb(f"วิดีโอที่ {j+1}: {composed['preflight_error']}")
+                                        continue
+                                    vid_kwargs: dict = {"on_status": _vid_status}
+                                    if composed["duration"]:
+                                        vid_kwargs["duration"] = int(composed["duration"])
+                                    if composed["aspect_ratio"]:
+                                        vid_kwargs["aspect_ratio"] = composed["aspect_ratio"]
+                                    if composed["resolution"]:
+                                        vid_kwargs["resolution"] = composed["resolution"]
+                                    if composed["input_references"]:
+                                        vid_kwargs["input_references"] = composed["input_references"]
+                                    if composed["visual"]:
+                                        vid_kwargs["visual"] = composed["visual"]
                                     r = media_gen.generate_video_with_retry(
-                                        vid["prompt"], vid_path, llm=llm, **vid_kwargs,
+                                        composed["prompt"], vid_path, llm=llm, **vid_kwargs,
                                     )
                                     media_gen.save_retry_history(output_dir, "video", vid_path.name, r)
                                     if not r.get("ok"):
-                                        _status_cb(f"วิดีโอที่ {j+1}: {r.get('error', 'unknown')}")
+                                        _error_cb(f"วิดีโอที่ {j+1}: {r.get('error', 'unknown')}")
                         except Exception as e:
                             _status_cb(f"สร้างสื่อไม่สำเร็จ: {e}")
 

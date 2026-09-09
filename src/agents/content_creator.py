@@ -20,6 +20,8 @@ class ContentCreatorAgent(BaseAgent):
         asset_summary: str = "",
         selected_pillar: str = "",
         content_pillars: str = "",
+        reference_catalog: list[dict] | None = None,
+        brand_context: str = "",
     ) -> str:
         parts = ["กรุณาสร้าง **1 โพสต์** สำหรับโปรโมทสินค้า ตามรูปแบบใน system prompt"]
 
@@ -37,6 +39,13 @@ class ContentCreatorAgent(BaseAgent):
                 f"--- แนวทางภาพของแบรนด์ (ใช้เป็นแนวทางตอนเขียน image/video prompts) ---\n"
                 f"{visual_style}\n"
                 f"--- สิ้นสุดแนวทางภาพ ---"
+            )
+        # Brand context — บริบทแบรนด์/ผู้อ่าน จาก brand_context (audience, tone, positioning)
+        if brand_context:
+            parts.append(
+                f"--- บริบทแบรนด์และผู้อ่าน ---\n"
+                f"{brand_context}\n"
+                f"--- สิ้นสุดบริบทแบรนด์และผู้อ่าน ---"
             )
         # ตรวจว่าเป็นโหมดรวมหลายสินค้าไหม
         is_multi = "=== สินค้า:" in product_spec and product_spec.count("=== สินค้า:") > 1
@@ -71,6 +80,38 @@ class ContentCreatorAgent(BaseAgent):
                 f"{asset_summary}\n"
                 f"--- สิ้นสุดวัตถุดิบแบรนด์ ---\n"
                 f"ระบุ asset_ids ที่ใช้ในแต่ละโพสต์"
+            )
+
+        # Ordered reference catalog — รูปอ้างอิงทั้งหมดที่จะส่งให้ provider สร้างสื่อ
+        # แต่ละรูปมีเลข Reference N (เรียงตามลำดับที่จะส่ง), provenance, filename, และ
+        # metadata ของ asset (ถ้ามี) — ไม่มีการตีความหมวดหมู่ของรูปในโค้ด
+        if reference_catalog:
+            lines = []
+            for ref in reference_catalog:
+                line = f"- {ref.get('label', '')}: source={ref.get('provenance', '')}"
+                if ref.get("filename"):
+                    line += f" | file={ref['filename']}"
+                if ref.get("asset_id"):
+                    line += f" | asset_id={ref['asset_id']}"
+                meta = ref.get("metadata") or {}
+                if meta:
+                    meta_parts = [f"{k}={v}" for k, v in meta.items()]
+                    line += f" | {' '.join(meta_parts)}"
+                lines.append(line)
+            parts.append(
+                f"--- รูปอ้างอิงที่จะส่งให้ผู้สร้างสื่อ (ตามลำดับเลข Reference) ---\n"
+                f"{chr(10).join(lines)}\n"
+                f"--- สิ้นสุดรูปอ้างอิง ---"
+            )
+            # Generic instruction เดียว — ให้โมเดลเป็นคนตัดสินใจเรื่องความหมายของแต่ละรูป
+            parts.append(
+                "พิจารณา Quick Brief, บริบทสินค้า, บริบทแบรนด์, และรูปอ้างอิงทุกรูปข้างต้น "
+                "ตัดสินใจว่ารูปไหนเกี่ยวข้องและจะใช้แต่ละรูปอย่างไรสำหรับสื่อชิ้นนี้ "
+                "เขียน prompt สำหรับผู้สร้างสื่อโดยระบุรูปอ้างอิงด้วยเลข Reference ตามลำดับข้างต้น "
+                "เมื่อความตั้งใจของ user และบริบทแสดงว่าต้องรักษาเอกลักษณ์/รายละเอียดภาพของรูปใด "
+                "ให้รักษาไว้ ห้ามแทนที่ ออกแบบใหม่ หรือตัดรูปที่ user ขอใช้โดยไม่บอก "
+                "ถ้าคำขอไม่พอใส่ในขีดจำกัดของผู้สร้างสื่อโดยเปลี่ยนความตั้งใจของ user "
+                "ให้คืนข้อจำกัดที่ชัดเจนแทนการเดา"
             )
 
         # Content Pillars — optional content-strategy guidance (not mandatory keywords)

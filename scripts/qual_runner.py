@@ -946,9 +946,18 @@ def _run_media_gen(
             img_kwargs: dict = {}
             if img.get("aspect_ratio"):
                 img_kwargs["aspect_ratio"] = img["aspect_ratio"]
-            _refs = _al.build_input_references(
+            _catalog = _al.build_reference_catalog(
                 image_paths, img.get("asset_ids", []),
             )
+            _pf = _al.preflight_references(_catalog)
+            if _pf:
+                print(f"[qual] image {j+1} preflight FAILED: {_pf}", flush=True)
+                media_gen.save_retry_history(
+                    output_dir, "image", img_path.name,
+                    {"ok": False, "error": _pf, "prompt": img.get("prompt", "")},
+                )
+                continue
+            _refs = [r["path"] for r in _catalog if r.get("path")]
             if _refs:
                 img_kwargs["input_references"] = _refs
             visual = orch.brand_visual
@@ -971,9 +980,18 @@ def _run_media_gen(
                 vid_kwargs["aspect_ratio"] = vid["aspect_ratio"]
             if vid.get("resolution"):
                 vid_kwargs["resolution"] = vid["resolution"]
-            _refs = _al.build_input_references(
+            _catalog = _al.build_reference_catalog(
                 image_paths, vid.get("asset_ids", []),
             )
+            _pf = _al.preflight_references(_catalog)
+            if _pf:
+                print(f"[qual] video {j+1} preflight FAILED: {_pf}", flush=True)
+                media_gen.save_retry_history(
+                    output_dir, "video", vid_path.name,
+                    {"ok": False, "error": _pf, "prompt": vid.get("prompt", "")},
+                )
+                continue
+            _refs = [r["path"] for r in _catalog if r.get("path")]
             if _refs:
                 vid_kwargs["input_references"] = _refs
             visual = orch.brand_visual

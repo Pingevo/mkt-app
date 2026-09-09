@@ -83,6 +83,7 @@ def _paths_to_input_references(paths: list[str]) -> list[dict]:
             refs.append({"type": "image_url", "image_url": {"url": url}})
     return refs
 
+
 from .config_loader import get_env
 
 
@@ -668,6 +669,11 @@ def generate_video(
                              request_id=job_id, attempt=attempt, units=units, error_message="no job_id")
             return {"ok": False, "error": f"API ไม่คืน job_id: {result}", "model": model, "prompt": prompt}
 
+        # OpenRouter คืน polling_url เป็น relative path (เช่น "/api/v1/videos/<jobId>")
+        # httpx ต้องการ absolute URL — เติม base URL ถ้าเป็น relative
+        if not polling_url.startswith("http"):
+            polling_url = "https://openrouter.ai" + polling_url
+
         # Poll จนเสร็จ
         elapsed = 0.0
         with httpx.Client(timeout=int(_system_cfg().get("api_timeout_video", 60))) as client:
@@ -694,24 +700,42 @@ def generate_video(
                     _log_media_usage("video", model, status_data.get("usage"),
                                      duration_ms=int((time.time() - t0) * 1000),
                                      request_id=job_id, attempt=attempt, units=units)
-                    # download — ส่ง Authorization header เหมือนโค้ดที่ใช้งานได้ใน my-agent-app
+                    # download — retry retrieval of the completed job (not new generation)
+                    # provider บางตัว e.g. bytedance ต้องการ bearer token
                     if on_status:
                         on_status("downloading")
-                    video_resp = httpx.get(
-                        urls[0],
-                        headers={"Authorization": f"Bearer {api_key}"},
-                        timeout=int(_system_cfg().get("api_timeout_video_download", 120)),
-                    )
-                    video_resp.raise_for_status()
-                    output_path.write_bytes(video_resp.content)
-                    return {
-                        "ok": True,
-                        "path": str(output_path),
-                        "model": model,
-                        "prompt": prompt,
-                        "url": urls[0],
-                        "warnings": warnings,
-                    }
+                    download_timeout = int(_system_cfg().get("api_timeout_video_download", 120))
+                    max_download_retries = int(_system_cfg().get("video_download_retries", 3))
+                    download_delay = float(_system_cfg().get("video_download_retry_delay_seconds", 2.0))
+                    download_error: str | None = None
+                    for dl_attempt in range(max_download_retries):
+                        try:
+                            video_resp = httpx.get(
+                                urls[0],
+                                headers={"Authorization": f"Bearer {api_key}"},
+                                timeout=download_timeout,
+                            )
+                            video_resp.raise_for_status()
+                            output_path.write_bytes(video_resp.content)
+                            return {
+                                "ok": True,
+                                "path": str(output_path),
+                                "model": model,
+                                "prompt": prompt,
+                                "url": urls[0],
+                                "job_id": job_id,
+                                "warnings": warnings,
+                            }
+                        except Exception as dl_err:
+                            download_error = str(dl_err)
+                            if dl_attempt < max_download_retries - 1:
+                                if on_status:
+                                    on_status(f"download retry {dl_attempt + 1}/{max_download_retries}")
+                                time.sleep(download_delay)
+                    # download failed after all retries — return error with job_id for later retry
+                    return {"ok": False, "error": f"download failed after {max_download_retries} retries: {download_error}",
+                            "model": model, "prompt": prompt, "url": urls[0], "job_id": job_id,
+                            "warnings": warnings}
                 elif status == "failed":
                     err = status_data.get("error", "unknown")
                     _log_media_usage("video", model, status_data.get("usage"),
@@ -806,6 +830,19 @@ _TRANSIENT_TYPES = {
     "provider_unavailable",
 }
 
+# Input-image privacy/safety rejection — provider ปฏิเสธรูปอ้างอิงเอง
+# (ไม่ใช่ prompt) แก้ไม่ได้ด้วยการแก้ prompt หรือ retry เดิม
+# error_code ที่ provider ใช้บอกว่า input image มีปัญหา:
+#   InputImageSensitiveContentDetected.PrivacyInformation (bytedance)
+#   InputImageSensitiveContentDetected (generic)
+#   InputImagePolicyViolation (generic)
+_INPUT_IMAGE_REJECTED_CODE_FRAGMENTS = (
+    "inputimagesensitivecontentdetected",
+    "inputimagepolicyviolation",
+    "input_image_sensitive",
+    "input_image_policy",
+)
+
 
 def _parse_error_response(response_text: str) -> tuple[str | None, str | None]:
     """Parse error_type และ error_code จาก OpenRouter error response.
@@ -860,13 +897,25 @@ def _classify_media_error(
 ) -> str:
     """จำแนกประเภท error เพื่อเลือก retry strategy.
 
-    คืน: 'content_policy' | 'transient' | 'other'
-    - content_policy: โดน content filter (flaky — retry กับ provider เดิมมีโอกาสผ่าน)
+    คืน: 'input_image_rejected' | 'content_policy' | 'transient' | 'other'
+    - input_image_rejected: provider ปฏิเสธรูปอ้างอิงเอง (privacy/safety) —
+      แก้ไม่ได้ด้วยการแก้ prompt หรือ retry เดิม ต้องให้ user เลือก
+    - content_policy: โดน content filter ของ text prompt (flaky — retry กับ provider เดิมมีโอกาสผ่าน)
     - transient: rate limit / server error (retry กับ backoff)
     - other: ไม่ retry
     """
     et = (error_type or "").lower()
     ec = (error_code or "").lower()
+
+    # input-image rejection — เช็คก่อน content_policy เพราะ error_code มีคำว่า
+    # "sensitivecontent" และ "privacy" เหมือนกัน แต่ "inputimage" บอกว่าเป็นรูปไม่ใช่ prompt
+    # ตรวจทั้ง error_code และ error_type เพราะ provider อาจใส่ในฟิลด์ใดฟิลด์หนึ่ง
+    for field_val in (ec, et):
+        if not field_val:
+            continue
+        for frag in _INPUT_IMAGE_REJECTED_CODE_FRAGMENTS:
+            if frag in field_val:
+                return "input_image_rejected"
 
     # content policy — จาก OpenRouter error_type
     if et in _CONTENT_POLICY_TYPES:
@@ -992,6 +1041,14 @@ def generate_image_with_retry(
         error_code = result.get("error_code")
         http_status = result.get("http_status")
         category = _classify_media_error(error_type, error_code, http_status)
+
+        # input_image_rejected → ไม่ retry รูปเดิม (provider ปฏิเสธรูปอ้างอิงเอง)
+        # แก้ไม่ได้ด้วยการแก้ prompt — ต้องให้ user เลือก: เอารูปนั้นออก / เลือกรูปอื่น / ใช้ model อื่น
+        if category == "input_image_rejected":
+            result["retry_history"] = retry_history
+            result["error_category"] = "input_image_rejected"
+            result["original_prompt"] = prompt
+            return result
 
         # other → ไม่ retry
         if category == "other":
@@ -1126,6 +1183,13 @@ def generate_video_with_retry(
         error_code = result.get("error_code")
         http_status = result.get("http_status")
         category = _classify_media_error(error_type, error_code, http_status)
+
+        # input_image_rejected → ไม่ retry รูปเดิม (provider ปฏิเสธรูปอ้างอิงเอง)
+        if category == "input_image_rejected":
+            result["retry_history"] = retry_history
+            result["error_category"] = "input_image_rejected"
+            result["original_prompt"] = prompt
+            return result
 
         # other → ไม่ retry
         if category == "other":

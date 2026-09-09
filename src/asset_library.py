@@ -764,20 +764,191 @@ def build_input_references(
     asset_ids: list[str],
     resource_paths: list[str] | None = None,
 ) -> list[str]:
-    """รวมรูปสินค้า + รูปแนบจาก quick brief/run context + รูป asset เป็น input_references เดียว.
+    """รวมรูปสินค้า + รูปแนบจาก quick brief/run context + รูป asset เป็น list[str] เรียงลำดับ.
+
+    Compatibility helper — คืน path ของทุก reference ตามลำดับเดียวกับ build_reference_catalog.
+    **ผู้เรียกต้อง preflight ก่อน** (เรียก preflight_references บน catalog ก่อน helper นี้)
+    เพื่อจับ missing file / เกิน limit ก่อนยิง provider — helper นี้ไม่ preflight เอง.
 
     resource_paths ถูกเก็บแยกจาก asset_ids — ห้ามใช้ res_... แทน asset-library IDs.
-    รูปสินค้ามาก่อน (สำคัญกว่า — ต้องตรงรุ่น) แล้วเติมรูปแนบ จากนั้นถึง asset จนถึง max_refs_per_post.
-    ใช้ helper นี้ตัวเดียวในทุก call site ของ media_gen — ไม่ต่อ list เอง.
+    ลำดับ: product → user_resource → asset_library (เดียวกับ catalog ที่ Agent 4 เห็น).
     """
-    refs = list(product_paths)
+    catalog = build_reference_catalog(product_paths, asset_ids, resource_paths)
+    return [r["path"] for r in catalog if r.get("path")]
+
+
+def build_reference_catalog(
+    product_paths: list[str],
+    asset_ids: list[str],
+    resource_paths: list[str] | None = None,
+) -> list[dict]:
+    """สร้าง ordered reference catalog — mechanical fields เท่านั้น ไม่ตีความความหมายของรูป.
+
+    แต่ละ entry มีเฉพาะข้อมูลที่ runtime รู้อยู่แล้ว:
+      - ordinal: ลำดับที่ (1-based) — "Reference 1", "Reference 2", ...
+      - label: "Reference N" (stable identifier สำหรับ Agent 4 และ provider)
+      - provenance: "product_db" | "user_resource" | "asset_library" (source เพื่อ traceability)
+      - path: path จริงของไฟล์
+      - asset_id: asset library ID (ว่างถ้าไม่ใช่ asset)
+      - filename: ชื่อไฟล์
+      - metadata: Asset Library metadata ที่มี (subject/tags/description/type/user_note) —
+        pass-through ไม่ตีความ; ไม่มีก็เป็น {}
+
+    ลำดับคงที่: product → user_resource → asset_library.
+    ไม่ truncate ไม่ select — ถ้าเกิน limit ให้ preflight_references จับ.
+    """
+    entries: list[dict] = []
+
+    def _add(path: str, provenance: str, asset_id: str = "", metadata: dict | None = None):
+        entries.append({
+            "ordinal": len(entries) + 1,
+            "label": f"Reference {len(entries) + 1}",
+            "provenance": provenance,
+            "path": str(path),
+            "asset_id": asset_id,
+            "filename": Path(path).name if path else "",
+            "metadata": metadata or {},
+        })
+
+    # Product images — รูปสินค้าจาก product_db
+    for p in product_paths:
+        _add(str(p), "product_db")
+
+    # User resources (Quick Brief) — รูปที่ user แนบมาเอง
     if resource_paths:
-        refs.extend(str(p) for p in resource_paths)
+        for p in resource_paths:
+            _add(str(p), "user_resource")
+
+    # Asset Library — รูปจาก asset library ที่เลือก (เรียงตาม asset_ids order)
+    # ถ้าไฟล์ missing/unreadable ก็ยังใส่ entry ไว้ — preflight_references จับได้
+    # ห้าม drop เงียบๆ เพราะจะทำให้เลข Reference เลื่อน (renumbering)
     if asset_ids:
-        refs.extend(get_asset_paths(asset_ids))
+        for aid in asset_ids:
+            rec = get_asset(aid)
+            if not rec or rec.get("type") != "image":
+                continue
+            p = rec.get("path", "")
+            meta = {
+                k: rec.get(k)
+                for k in ("subject", "tags", "description", "type", "user_note")
+                if rec.get(k) not in (None, "", [])
+            }
+            _add(str(p), "asset_library", asset_id=aid, metadata=meta)
+
+    return entries
+
+
+def preflight_references(catalog: list[dict]) -> str | None:
+    """ตรวจ catalog ก่อนยิง provider — คืน error message หรือ None ถ้าผ่าน.
+
+    ตรวจเฉพาะสิ่งที่รู้เชิงกลไกได้:
+      - ไฟล์ missing/unreadable → error ระบุเลข Reference + path (ไม่ renumber ลำดับ)
+      - จำนวนเกิน max_refs_per_post → error (ไม่ truncate ไม่ select)
+
+    ไม่ตัดสินใจแทน user ว่าจะเก็บรูปไหน — ถ้าเกิน limit ให้ user แก้เอง.
+    """
+    if not catalog:
+        return None
+    for ref in catalog:
+        p = ref.get("path", "")
+        if not p or not Path(p).exists():
+            return f"{ref.get('label', 'Reference ?')} ({p or 'no path'}) is missing or unreadable."
     cfg = _load_config()
     max_refs = cfg.get("media", {}).get("max_refs_per_post", 5)
-    return refs[:max_refs]
+    if len(catalog) > max_refs:
+        return (f"{len(catalog)} references exceed provider limit "
+                f"(max_refs_per_post={max_refs}). Remove some references or increase the limit.")
+    return None
+
+
+def build_reference_remap(
+    full_catalog: list[dict],
+    item_asset_ids: list[str],
+    product_paths: list[str],
+    resource_paths: list[str] | None = None,
+) -> tuple[list[dict], dict[int, int]]:
+    """Build per-item catalog and a mapping from full-catalog ordinals to per-item ordinals.
+
+    Agent 4 sees the FULL catalog (all selected assets) with Reference 1..N.
+    Each media item may select only a subset of assets (item_asset_ids).
+    The per-item catalog has fewer entries → Reference numbers shift.
+
+    This function mechanically maps old→new ordinals by matching file paths
+    (not by interpreting what a reference means).
+
+    Returns (item_catalog, remap) where remap[old_ordinal] = new_ordinal.
+    Entries not in the per-item catalog are absent from remap (caller can detect).
+    """
+    item_catalog = build_reference_catalog(product_paths, item_asset_ids, resource_paths)
+    remap: dict[int, int] = {}
+    for item_entry in item_catalog:
+        item_path = item_entry.get("path", "")
+        for full_entry in full_catalog:
+            if full_entry.get("path", "") == item_path:
+                remap[full_entry["ordinal"]] = item_entry["ordinal"]
+                break
+    return item_catalog, remap
+
+
+def remap_reference_numbers(prompt: str, remap: dict[int, int]) -> str:
+    """Replace 'Reference N' in prompt with remapped number.
+
+    Mechanical text replacement — does not interpret what a reference means.
+    Caller must run preflight_reference_mentions first to reject dangling refs.
+    """
+    import re
+
+    def _replace(match: "re.Match[str]") -> str:
+        old_num = int(match.group(1))
+        new_num = remap.get(old_num, old_num)
+        return f"Reference {new_num}"
+
+    return re.sub(r"Reference (\d+)", _replace, prompt)
+
+
+def preflight_reference_mentions(
+    prompt: str,
+    full_catalog: list[dict],
+    remap: dict[int, int] | None,
+) -> str | None:
+    """Reject prompts that reference a full-catalog ordinal excluded from the per-item subset.
+
+    For every 'Reference N' in the prompt:
+      - If N was in the full catalog but is absent from remap (the reference was
+        excluded from this media item's provider input), it is a dangling reference.
+      - Return a visible error naming the missing Reference number(s).
+      - Do not silently retain the old number.
+      - Do not substitute another reference.
+
+    Mechanical text parsing only — does not interpret what a reference means.
+    Returns None if all referenced ordinals are present in the per-item subset.
+    """
+    import re
+
+    if not full_catalog:
+        return None
+    full_ordinals = {e["ordinal"] for e in full_catalog}
+    mentions = re.findall(r"Reference (\d+)", prompt)
+    if not mentions:
+        return None
+    # When remap is None (no subset selection), all full-catalog refs are present.
+    if remap is None:
+        return None
+    dangling: list[int] = []
+    for num_str in mentions:
+        num = int(num_str)
+        if num in full_ordinals and num not in remap:
+            if num not in dangling:
+                dangling.append(num)
+    if dangling:
+        dangling.sort()
+        names = ", ".join(f"Reference {n}" for n in dangling)
+        return (
+            f"Prompt mentions {names} but these were excluded from this "
+            f"media item's reference set. Cannot generate with dangling "
+            f"reference numbers."
+        )
+    return None
 
 
 # ------------------------------------------------------------------

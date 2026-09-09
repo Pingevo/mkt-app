@@ -654,6 +654,15 @@ class Orchestrator:
                     if vs_parts:
                         visual_style = (visual_style + "\n" if visual_style else "") + "\n".join(vs_parts)
 
+            image_paths = self._get_product_image_paths()
+            # Ordered reference catalog — รูปอ้างอิงทั้งหมด (product + user resources + selected
+            # assets) เรียงลำดับเดียวกับที่จะส่งให้ provider. ส่งให้ Agent 4 เห็นเลข Reference
+            # ก่อนเขียน prompt สื่อ — โมเดลเป็นคนตัดสินใจความหมาย โค้ดแค่ขนส่งลำดับ.
+            from . import asset_library as _al
+            selected_asset_ids = getattr(self, "_selected_asset_ids", [])
+            reference_catalog = _al.build_reference_catalog(
+                image_paths, selected_asset_ids, extra_image_paths,
+            )
             prompt = agent.build_prompt(
                 product_data, competitor_analysis, campaign_strategy,
                 media_capabilities=media_caps_text,
@@ -662,8 +671,9 @@ class Orchestrator:
                 asset_summary=asset_summary,
                 selected_pillar=selected_pillar,
                 content_pillars=content_pillars,
+                reference_catalog=reference_catalog,
+                brand_context=getattr(self, "_content_brand_context", ""),
             )
-            image_paths = self._get_product_image_paths()
             # ใช้ Structured Outputs — LLM คืน JSON ที่ตรง schema
             # แทนการ parse markdown ด้วย regex (ที่พังทุกครั้งที่ format เปลี่ยน)
             # LLM คืนแค่ posts (structured data) — เรา generate markdown เอง
@@ -787,6 +797,7 @@ class Orchestrator:
         from . import asset_library
         all_assets = asset_library.list_all()
         if not all_assets:
+            self._selected_asset_ids = []
             return ""
 
         import json as _json
@@ -844,9 +855,11 @@ class Orchestrator:
                 usage_hints = parsed.get("usage_hints", {})
             except Exception as e:
                 print(f"[Orchestrator] asset selection failed: {e}", flush=True)
+                self._selected_asset_ids = []
                 return ""
 
         if not selected_ids:
+            self._selected_asset_ids = []
             return ""
 
         # สร้างสรุป asset ที่เลือก (id + description + วิธีใช้)
@@ -863,7 +876,9 @@ class Orchestrator:
                     f"tags: {tags_str} | คำบรรยาย: {rec.get('description', '')}{hint_section}"
                 )
         if not summaries:
+            self._selected_asset_ids = []
             return ""
+        self._selected_asset_ids = list(selected_ids)
         return f"เหตุผลที่เลือก: {reason}\n" + "\n".join(summaries)
 
     # ------------------------------------------------------------------

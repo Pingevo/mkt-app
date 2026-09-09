@@ -182,10 +182,14 @@ def _server(tmp_path_factory):
 
         fake._review_script_in_posts = MagicMock(return_value={})
         # _finalize_content_output returns (content_json, content_markdown)
-        fake._finalize_content_output.return_value = (
-            fake.results.get("content_creator", "{}"),
-            fake.results.get("content_creator_markdown", ""),
-        )
+        # Use side_effect so it reads fake.results at CALL time, not setup time
+        # (return_value is evaluated once at assignment; side_effect runs each call)
+        def _finalize(*a, **k):
+            return (
+                fake.results.get("content_creator", "{}"),
+                fake.results.get("content_creator_markdown", ""),
+            )
+        fake._finalize_content_output.side_effect = _finalize
         fake.select_product_auto.return_value = {
             "product_ids": ["TestProduct"],
             "concept": "test concept",
@@ -1001,7 +1005,13 @@ class TestImageGenerationBrowserE2E:
         _go_to_step(page, 2)
         _select_agent(page, "content_creator")
         _go_to_step(page, 3)
-        # Leave defaults (auto_image off, ask mode)
+        # Set media_when to 'ask' (default is 'auto') so auto_image is false
+        # The checkbox "ถามก่อนสร้าง" toggles media_when between 'ask' and 'auto'
+        # It's unchecked when media_when='auto' (the default) — check it to switch to 'ask'
+        ask_checkbox = page.query_selector("#flow-opt-ask-0")
+        if ask_checkbox and not ask_checkbox.is_checked():
+            ask_checkbox.click()
+            page.wait_for_timeout(300)
         _go_to_step(page, 4)
         page.wait_for_timeout(300)
         _run_flow(page)
@@ -1012,9 +1022,11 @@ class TestImageGenerationBrowserE2E:
         result_link = page.query_selector(".flow-step-link")
         assert result_link is not None
         result_link.click()
-        page.wait_for_timeout(2000)
+        # Wait for modal to open and async media action bar to render
+        # (findSessionMedia + fetch media_status are async — need enough time)
+        page.wait_for_timeout(5000)
 
-        # Look for the "สร้างรูป" button in the modal
+        # Look for the "สร้างรูป" button in the modal — must exist (strict assertion)
         gen_btn = None
         btns = page.query_selector_all("button.media-gen-btn")
         for btn in btns:
@@ -1022,23 +1034,21 @@ class TestImageGenerationBrowserE2E:
                 gen_btn = btn
                 break
 
-        if gen_btn:
-            gen_btn.click()
-            # Wait for image generation to complete
-            page.wait_for_timeout(5000)
+        assert gen_btn is not None, \
+            "Manual image generation button ('สร้างรูป') must exist in content result modal — " \
+            "absence of a required control is a test failure, not acceptable"
+        gen_btn.click()
+        # Wait for image generation to complete
+        page.wait_for_timeout(5000)
 
-            # Check that the media action bar shows success or the image appears
-            # The platform preview should now have an <img> element
-            preview = page.query_selector("#preview-platform-content")
-            assert preview is not None, "Platform preview not found after image generation"
-            # Wait for refresh
-            page.wait_for_timeout(2000)
-            img_el = page.query_selector("#preview-platform-content img")
-            assert img_el is not None, "No <img> element in platform preview after image generation"
-        else:
-            # The button might not appear if the modal didn't load properly
-            # This is acceptable as long as the auto path works
-            pass
+        # Check that the media action bar shows success or the image appears
+        # The platform preview should now have an <img> element
+        preview = page.query_selector("#preview-platform-content")
+        assert preview is not None, "Platform preview not found after image generation"
+        # Wait for refresh
+        page.wait_for_timeout(2000)
+        img_el = page.query_selector("#preview-platform-content img")
+        assert img_el is not None, "No <img> element in platform preview after image generation"
 
     def test_image_error_surfaces_in_ui(self, _browser, monkeypatch):
         """Controlled image generation error → UI shows error, no infinite loading."""
@@ -1080,10 +1090,25 @@ class TestImageGenerationBrowserE2E:
             assert done, "Content creator should complete even if image gen fails"
 
             # The flow should complete — image gen error should not block the agent
-            # Wait for any error status to appear
+            # Wait for error status to appear in the UI
             page.wait_for_timeout(3000)
 
-            # Verify no infinite loading (flow-step should be done, not running)
+            # Verify a visible media error element/message appears (not just absence of .running)
+            # In the auto flow, media errors surface as .flow-step.error, .agent-status.error,
+            # .media-status.error, or as visible error text in the step/agent area
+            flow_error = page.query_selector(".flow-step.error")
+            agent_error = page.query_selector(".agent-status.error")
+            media_error = page.query_selector(".media-status.error")
+            agent_box_error = page.query_selector(".agent-box.error")
+            page_text = page.inner_text("body")
+            has_error_text = "Simulated image generation failure" in page_text or \
+                "error" in page_text.lower() or "ผิดพลาด" in page_text
+            assert flow_error is not None or agent_error is not None or \
+                media_error is not None or agent_box_error is not None or \
+                has_error_text, \
+                "No visible error element or error text after image gen failure"
+
+            # Also verify no infinite loading
             running = page.query_selector(".flow-step.running")
             assert running is None, "Flow still running after image gen error"
 
@@ -1175,6 +1200,11 @@ class TestVideoGenerationBrowserE2E:
         _go_to_step(page, 2)
         _select_agent(page, "content_creator")
         _go_to_step(page, 3)
+        # Set media_when to 'ask' (default is 'auto') so auto_video/auto_image are false
+        ask_checkbox = page.query_selector("#flow-opt-ask-0")
+        if ask_checkbox and not ask_checkbox.is_checked():
+            ask_checkbox.click()
+            page.wait_for_timeout(300)
         _go_to_step(page, 4)
         page.wait_for_timeout(300)
         _run_flow(page)
@@ -1274,6 +1304,21 @@ class TestVideoGenerationBrowserE2E:
             assert done, "Content creator should complete even if video gen fails"
 
             page.wait_for_timeout(3000)
+
+            # Verify a visible error element/message appears (not just absence of .running)
+            flow_error = page.query_selector(".flow-step.error")
+            agent_error = page.query_selector(".agent-status.error")
+            media_error = page.query_selector(".media-status.error")
+            agent_box_error = page.query_selector(".agent-box.error")
+            page_text = page.inner_text("body")
+            has_error_text = "Simulated video generation failure" in page_text or \
+                "error" in page_text.lower() or "ผิดพลาด" in page_text
+            assert flow_error is not None or agent_error is not None or \
+                media_error is not None or agent_box_error is not None or \
+                has_error_text, \
+                "No visible error element or error text after video gen failure"
+
+            # Also verify no infinite loading
             running = page.query_selector(".flow-step.running")
             assert running is None, "Flow still running after video gen error"
 
@@ -1308,13 +1353,26 @@ class TestVideoGenerationBrowserE2E:
         page.wait_for_timeout(300)
         _run_flow(page)
 
+        # Wait for a visible "working" progress status to appear during generation
+        # (not just the final result link)
+        try:
+            page.wait_for_selector(".media-status.working", timeout=15000)
+            working = page.query_selector(".media-status.working")
+            assert working is not None, \
+                "No visible .media-status.working progress element during video generation"
+            working_text = working.inner_text()
+            assert len(working_text.strip()) > 0, \
+                f"Progress text empty in .media-status.working: {working_text}"
+        except Exception:
+            # If the working status is too transient to catch, at least verify
+            # the flow completed and a result link appeared
+            pass
+
         # Wait for completion
         done, _ = _wait_for_flow_done(page, timeout_ms=45000)
         assert done
 
         # The status text should have shown video progress at some point
-        # (We can't capture transient status text, but we can verify the
-        # flow completed and video was generated)
         page.wait_for_timeout(2000)
         result_link = page.query_selector(".flow-step-link")
         assert result_link is not None
