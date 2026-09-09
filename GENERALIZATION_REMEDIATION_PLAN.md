@@ -1,5 +1,8 @@
 # Generalization Remediation Plan
 
+> **HISTORICAL / SUPERSEDED — preserved as evidence only.**
+> This document is preserved as historical planning/evidence. It must NOT be used to determine current next actions, model configuration, paid-call authorization, or readiness status. Current execution status lives in `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md`; readiness criteria live in `AGENT_PRODUCTION_READINESS_SPEC.md`.
+
 > **Revised direction (Product Owner decision):**
 > MKTApp is a **source-driven generic marketing engine**.
 > `category` is **optional metadata** for search/grouping/observability only.

@@ -2,6 +2,20 @@
 
 ระบบพนักงาน AI สำหรับทีมการตลาด — ใช้งานหลักผ่าน Web UI และรองรับ CLI สำหรับ automation/backward compatibility
 
+## Documentation authority
+
+เอกสารที่ใช้ตัดสินงานปัจจุบัน (อ่านตามลำดับนี้ก่อนเริ่มงาน):
+
+1. [`AGENTS.md`](AGENTS.md) — กฎวิศวกรรมที่ผูกพันทุกงานใน repo นี้
+2. [`AI_EMPLOYEE_PRODUCT_VISION.md`](AI_EMPLOYEE_PRODUCT_VISION.md) — ภาพผลิตภัณฑ์ “พนักงาน AI” ที่เสถียร
+3. [`AGENT_PRODUCTION_READINESS_SPEC.md`](AGENT_PRODUCTION_READINESS_SPEC.md) — เกณฑ์ Beta / Production Ready ราย Agent
+4. [`AGENT_ORCHESTRATION_SPEC.md`](AGENT_ORCHESTRATION_SPEC.md) — สถาปัตยกรรม team flow ในอนาคต (อ่านเมื่อทำ team flow เท่านั้น)
+5. [`AI_EMPLOYEE_BETA_EXECUTION_PLAN.md`](AI_EMPLOYEE_BETA_EXECUTION_PLAN.md) — **แผนส่งมอบและ Progress Ledger เพียงฉบับเดียวที่ใช้บอกงานถัดไป**
+
+เอกสารรายงาน/qualification ในอดีต (เช่น `M6_*`, `PAID_*`, `OFFLINE_*`, `audit_*`, `consult_*`) เป็นหลักฐานทางประวัติศาสตร์ที่ไม่เปลี่ยน — ห้ามใช้เป็นคำสั่งงานปัจจุบัน การตั้งค่าโมเดล การอนุญาต paid call หรือสถานะความพร้อม สถานะการส่งมอบปัจจุบันอยู่ใน `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md` และเกณฑ์ความพร้อมอยู่ใน `AGENT_PRODUCTION_READINESS_SPEC.md`
+
+โมเดล production ปัจจุบันสำหรับ text/reasoning อ่านจาก `config/agents.yaml` (ขณะนี้คือ `google/gemini-3.8-flash`) — อย่าคัดลอกชื่อโมเดลลงเอกสาร ให้อ้าง config
+
 ## Product documents
 
 - [`AI_EMPLOYEE_PRODUCT_VISION.md`](AI_EMPLOYEE_PRODUCT_VISION.md) — ภาพผลิตภัณฑ์ “พนักงาน AI”, วิธีใช้งานจริง และเหตุผลด้านความคุ้มค่า
@@ -103,7 +117,7 @@ python main.py pipeline --raw-file data/raw.txt --competitor-file data/comp.txt 
 python main.py pipeline --raw-file data/raw.txt
 ```
 
-ถ้าไม่ระบุ `--competitor-file` หรือ `--competitor-text` CompetitorAnalysisAgent จะค้นหาข้อมูลคู่แข่งจาก web อัตโนมัติ (ใช้ model `perplexity/sonar-large-32k-online` ที่มี web search built-in)
+ถ้าไม่ระบุ `--competitor-file` หรือ `--competitor-text` CompetitorAnalysisAgent จะค้นหาข้อมูลคู่แข่งจาก web อัตโนมัติ โดยใช้โมเดลของ Agent (อ่านจาก `config/agents.yaml`) ร่วมกับ OpenRouter agentic web search tool (ตั้งค่า engine/parameters ใน `config/web_search.yaml`)
 
 ### เพิ่มรูปภาพสินค้าเพิ่มเติม
 

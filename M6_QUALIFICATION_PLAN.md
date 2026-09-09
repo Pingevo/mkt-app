@@ -1,11 +1,15 @@
 # M6 Qualification Plan — Forward Plan
 
-**Purpose:** Describe the CURRENT forward qualification plan for MKTApp
-Agent 1–4. This is the canonical source of truth for the plan we are
-now following, not historical evidence.
+> **HISTORICAL / SUPERSEDED — preserved as evidence only.**
+> This document is preserved as historical planning/evidence. It must NOT be used to determine current next actions, model configuration, paid-call authorization, or readiness status. Current execution status lives in `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md`; readiness criteria live in `AGENT_PRODUCTION_READINESS_SPEC.md`.
 
-**Status:** Active. Supersedes prior M6 remediation designs for
-forward-planning purposes.
+**Purpose:** Describe the CURRENT forward qualification plan for MKTApp
+Agent 1–4. ~~This is the canonical source of truth for the plan we are
+now following, not historical evidence.~~ *(Superseded — see
+HISTORICAL / SUPERSEDED notice at top of this document.)*
+
+**Status:** ~~Active. Supersedes prior M6 remediation designs for
+forward-planning purposes.~~ *(Superseded — see notice at top.)*
 
 **Strategy pivot (2026-09-05):** The primary qualification question has
 changed from external Frontier comparison to **same-model product uplift**.

@@ -17,7 +17,9 @@
 5. **Brand examples for one product must not transfer their facts to another product.**
 6. **Any stage that mutates content after review must be followed by final grounding before persistence.**
 
-### Final Grounding Gate (Checkpoint A — implemented, pending approval)
+### Final Grounding Gate (Checkpoint A — implemented, frozen at `65ed8c7`)
+
+> Status: The gate is an implemented safeguard, not a current-model qualification. Agents 1–4 must still be re-qualified against the current production model (`google/gemini-3.8-flash`, migrated at `c39f596`) before any Beta declaration. Checkpoint A is no longer "pending approval."
 
 The final grounding gate is wired into the smallest common pre-persistence seam for all Agents 1–4:
 - `run_product_spec` → `_ground_and_store("product_spec", ...)`
@@ -210,7 +212,7 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 ### Current classification
 
-**NOT READY — ต้อง requalify.** Output ล่าสุดขยาย camera/audio/accelerometer/Class Disable/Geo-Fence facts เกิน product source ต้องผ่าน Checkpoint A (generic final-output truth boundary) ก่อน requalify
+**NOT READY — ต้อง requalify.** Output ล่าสุดขยาย camera/audio/accelerometer/Class Disable/Geo-Fence facts เกิน product source. Checkpoint A implemented/frozen (`65ed8c7`); ต้อง requalify กับ current model (`google/gemini-3.8-flash`)
 
 ## Agent 2 — Competitor Analyst (`competitor_analysis`)
 
@@ -240,7 +242,7 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 ### Current classification
 
-**NOT READY — ต้องแก้ user-facing rendering + ลบ unsupported factual premises.** Fail-closed drop ของ unverified evidence_based recommendations แก้แล้ว (commit `f50ec8e`) แต่ user-facing rendering ยังมี internal phrases ("ค่าที่จับคู่ได้", "evidence", "inference/recommendation") และยังไม่ลบ concrete premises ที่หลุดผ่าน. ต้องผ่าน Checkpoint A + B ก่อน requalify
+**NOT READY — ต้องแก้ user-facing rendering + ลบ unsupported factual premises.** Fail-closed drop ของ unverified evidence_based recommendations แก้แล้ว (commit `f50ec8e`) แต่ user-facing rendering ยังมี internal phrases ("ค่าที่จับคู่ได้", "evidence", "inference/recommendation") และยังไม่ลบ concrete premises ที่หลุดผ่าน. Checkpoint A implemented/frozen; ต้องผ่าน Checkpoint B ก่อน requalify
 
 ## Agent 3 — Campaign Strategist (`campaign_strategy`)
 
@@ -273,7 +275,7 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 ### Current classification
 
-**NOT READY — ต้อง requalify.** Brand/Audience values (age 25–45, Working Mom, selected channels) เป็น legitimate user settings แต่ K9/video-call examples ต้องไม่กลายเป็น K5 capabilities. Internal pending-validation language รั่วออกสู่ report. ต้องผ่าน Checkpoint A + B ก่อน requalify
+**NOT READY — ต้อง requalify.** Brand/Audience values (age 25–45, Working Mom, selected channels) เป็น legitimate user settings แต่ K9/video-call examples ต้องไม่กลายเป็น K5 capabilities. Internal pending-validation language รั่วออกสู่ report. Checkpoint A implemented/frozen; ต้องผ่าน Checkpoint B ก่อน requalify
 
 ## Agent 4 — Content Creator (`content_creator`)
 
@@ -308,7 +310,7 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 ### Current classification
 
-**NOT READY — final grounding หลัง post-review mutation ยังไม่ qualified.** Script generation + review path ใช้งานได้ (10 calls, 4 script reviews, all finish=stop) แต่ final persisted output ยังมี unsupported claims ("24 ชั่วโมง", "โปรโมชั่นพิเศษวันนี้", voice-message capability, game-addiction claims). source_context ส่งถึง script_reviewer แล้ว แต่ fail-closed มีเฉพาะ empty second review ไม่ cover semantically unsupported revision. ต้องผ่าน Checkpoint A + C ก่อน requalify
+**NOT READY — final grounding หลัง post-review mutation ยังไม่ qualified.** Script generation + review path ใช้งานได้ (10 calls, 4 script reviews, all finish=stop) แต่ final persisted output ยังมี unsupported claims ("24 ชั่วโมง", "โปรโมชั่นพิเศษวันนี้", voice-message capability, game-addiction claims). source_context ส่งถึง script_reviewer แล้ว แต่ fail-closed มีเฉพาะ empty second review ไม่ cover semantically unsupported revision. Checkpoint A implemented/frozen. Final-grounding/text requalification belongs to Checkpoint E; visual fidelity belongs to Media Capability Coverage (C2).
 
 ## Manager — internal component
 
@@ -339,19 +341,25 @@ Product Owner/ผู้ใช้สายงานตรวจ output จริ�
 
 ## Current evidence snapshot
 
-- Remediation checkpoint: commit `f50ec8e` on `origin/dev` (2026-09-08)
+> Reconciled 2026-09-09. Historical UAT/probe artifacts below remain immutable evidence of past runs, not current PASS. No Agent 1–4 is Beta-ready without current-model qualification.
+
+- Checkpoint A — final grounding boundary: implemented/frozen at `65ed8c7` (safeguard only; not yet re-qualified against current model).
+- Gemini 3.8 migration: production text/reasoning workload migrated to `google/gemini-3.8-flash` at `c39f596`. Current production text/reasoning model is read from `config/agents.yaml` and is presently `google/gemini-3.8-flash`.
+- Media Core (C1, mechanical reference transport): frozen at `5cc4724` + `06157af` — 60 focused backend tests + 8 browser media tests passed, `git diff --check` clean. Transport only; visual **Media Capability Coverage (C2)** (product/logo/mascot fidelity, provider fallback, cost-aware tool selection) remains unqualified.
+- Scheduler: implementation complete at `421bb40` (misfire_grace_time fix); real scheduled-fire qualification remains unqualified (paid run requires separate Product Owner approval).
 - Original failed UAT (immutable): `evaluation_artifacts/real_uat_20260908_083822_FAILED_PARTIAL/`
-- Image probes: `evaluation_artifacts/image_probe_20260908_092915/` — no-ref OK (10s), one-normalized-ref OK (11s), three-raw-refs TIMEOUT (200s, 6.6MB request)
-- Final Agent 4 UAT: `evaluation_artifacts/final_agent4_uat_20260908_094512/` — flow done, 10 calls, 4 script reviews, all finish=stop, but final output still contains unsupported claims ("24 ชั่วโมง", "โปรโมชั่นพิเศษวันนี้", voice-message capability, game-addiction claims)
+- Image probes (immutable): `evaluation_artifacts/image_probe_20260908_092915/` — no-ref OK (10s), one-normalized-ref OK (11s), three-raw-refs TIMEOUT (200s, 6.6MB request)
+- Final Agent 4 UAT (immutable, pre-Checkpoint-A): `evaluation_artifacts/final_agent4_uat_20260908_094512/` — flow done, 10 calls, 4 script reviews, all finish=stop, but final output still contained unsupported claims ("24 ชั่วโมง", "โปรโมชั่นพิเศษวันนี้", voice-message capability, game-addiction claims). This is historical evidence, not a current PASS.
+- Pre-subset-fix real UAT (immutable): `output/uat_media_20260909_125427/uat_report.json` — real image/video execution succeeded before the subset correction, but exposed extra-reference contamination; `06157af` fixed the defect offline. This is not post-fix fidelity/subset-isolation acceptance; do not rerun without separate Product Owner approval.
 - Product ingestion + 3 K5 images to model calls: **PASS**
-- Agent 1: **ต้อง requalify** — persisted output ขยาย camera/audio/accelerometer/Class Disable/Geo-Fence facts เกิน source
-- Agent 2: **ต้องแก้ user-facing rendering + ลบ unsupported factual premises** — fail-closed drop ของ unverified evidence_based recommendations แก้แล้ว แต่ user-facing rendering ยังมี internal language
-- Agent 3: **ต้อง requalify** — Brand/Audience values (age 25–45, Working Mom, channels) เป็น legitimate user settings แต่ K9/video-call examples ต้องไม่กลายเป็น K5 capabilities; internal pending-validation language ต้องไม่ leak
-- Agent 4: **Script path ใช้ได้ แต่ final grounding หลัง post-review mutation ยังไม่ qualified** — source_context ส่งถึง script_reviewer แล้ว แต่ model ยังแนะนำ unsupported claims; fail-closed มีเฉพาะ empty second review ไม่ cover semantically unsupported revision
-- Image generation: **PARTIAL** — no-ref PASS, one-normalized-ref PASS, three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix
-- Real video generation: **NOT QUALIFIED**
-- Scheduler: **NOT QUALIFIED** — unit tests ไม่พอพิสูจน์ UI save → scheduled fire → execution → history
-- Overall: **NOT FREEZE-READY**
+- Agent 1: **ต้อง requalify** — persisted output ขยาย camera/audio/accelerometer/Class Disable/Geo-Fence facts เกิน source (Checkpoint A implemented; requalification pending → Checkpoint E)
+- Agent 2: **ต้องแก้ user-facing rendering + ลบ unsupported factual premises** — fail-closed drop ของ unverified evidence_based recommendations แก้แล้ว แต่ user-facing rendering ยังมี internal language (Checkpoint B `PLANNED`, open)
+- Agent 3: **ต้อง requalify** — Brand/Audience values (age 25–45, Working Mom, channels) เป็น legitimate user settings แต่ K9/video-call examples ต้องไม่กลายเป็น K5 capabilities; internal pending-validation language ต้องไม่ leak (Checkpoint B `PLANNED`, open)
+- Agent 4: **Script path ใช้ได้ แต่ final grounding หลัง post-review mutation ยังไม่ qualified** — Checkpoint A implemented; final-grounding/text requalification → Checkpoint E; visual fidelity → Media Capability Coverage (C2)
+- Image generation: **PARTIAL** — no-ref PASS, one-normalized-ref PASS, three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix → Media Capability Coverage (C2)
+- Real video generation: **NOT QUALIFIED** → Media Capability Coverage (C2)
+- Scheduler: **Implementation complete; real scheduled-fire qualification NOT QUALIFIED**
+- Overall: **NOT FREEZE-READY** — no Agent 1–4 declared Beta-ready without current qualification evidence
 
 Automated tests เป็นหลักฐาน reliability ของ code path ไม่ใช่ใบรับรองคุณภาพ frontier model output
 
@@ -366,31 +374,32 @@ Automated tests เป็นหลักฐาน reliability ของ code pat
 
 ไม่มี Agent ตัวใด Beta หรือ Production Ready จากหลักฐานปัจจุบัน รวมถึง:
 
+- Media Core transport: frozen (`5cc4724` + `06157af`); visual Media Capability Coverage remains unqualified
 - Image generation: PARTIAL (no-ref + one-normalized-ref PASS; three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix)
 - Real video generation: NOT QUALIFIED
-- Scheduler: NOT QUALIFIED (unit tests ไม่พอพิสูจน์ UI save → scheduled fire → execution → history)
+- Scheduler: implementation complete (`421bb40`); real scheduled-fire qualification NOT QUALIFIED (paid run requires separate Product Owner approval)
 
-**Overall: NOT FREEZE-READY** จนกว่า Checkpoints A–E ผ่านครบ
+**Overall: NOT FREEZE-READY** จนกว่า Checkpoints B / D / E และ Media Capability Coverage ผ่านครบ
 
 ## Agent 2 — Known Limitations (current cycle)
 
 - User-facing rendering ยังมี internal phrases ("ค่าที่จับคู่ได้", "evidence", "inference/recommendation") — ต้องแก้ใน Checkpoint B
 - Concrete premises ที่หลุดผ่านหลัง URL validation fail ต้องลบ ไม่เก็บไว้โดย relabel เป็น hypothesis — แก้ส่วน drop แล้ว แต่ต้อง verify ใน requalify
-- ต้องผ่าน Checkpoint A + B ก่อน requalify
+- ต้องผ่าน Checkpoint B ก่อน requalify (Checkpoint A implemented/frozen)
 
 ## Agent 3 — Known Limitations (current cycle)
 
-- K9/video-call examples ต้องไม่กลายเป็น K5 capabilities — ต้องแก้ใน Checkpoint A
+- K9/video-call examples ต้องไม่กลายเป็น K5 capabilities — ต้อง verify ใน requalify (Checkpoint A implemented/frozen)
 - Internal pending-validation language รั่วออกสู่ report — ต้องแก้ใน Checkpoint B
 - Brand/Audience values (age 25–45, Working Mom, channels) เป็น legitimate user settings — ไม่ต้องลบ
-- ต้องผ่าน Checkpoint A + B ก่อน requalify
+- ต้องผ่าน Checkpoint B ก่อน requalify (Checkpoint A implemented/frozen)
 
 ## Agent 4 — Known Limitations (current cycle)
 
-- Final grounding หลัง post-review mutation ยังไม่ qualified — source_context ส่งถึง script_reviewer แล้ว แต่ model ยังแนะนำ unsupported claims
-- Fail-closed มีเฉพาะ empty second review ไม่ cover semantically unsupported revision — ต้องแก้ใน Checkpoint A
-- Unsupported claims ใน final output: "24 ชั่วโมง", "โปรโมชั่นพิเศษวันนี้", voice-message capability, game-addiction claims
-- ต้องผ่าน Checkpoint A + C ก่อน requalify
+- Final grounding หลัง post-review mutation ยังไม่ qualified — source_context ส่งถึง script_reviewer แล้ว แต่ model ยังแนะนำ unsupported claims → Checkpoint E (final-grounding/text requalification)
+- Fail-closed มีเฉพาะ empty second review ไม่ cover semantically unsupported revision — ต้อง verify ใน requalify (Checkpoint A implemented/frozen) → Checkpoint E
+- Unsupported claims ใน final output: "24 ชั่วโมง", "โปรโมชั่นพิเศษวันนี้", voice-message capability, game-addiction claims → Checkpoint E
+- Visual fidelity (product/logo/mascot consistency, provider fallback) → Media Capability Coverage (C2)
 
 ## Definition of Done
 

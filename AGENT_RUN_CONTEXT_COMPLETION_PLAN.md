@@ -1,5 +1,8 @@
 # Agent Run Context Completion Plan
 
+> **HISTORICAL / SUPERSEDED — preserved as evidence only.**
+> This document is preserved as historical planning/evidence. It must NOT be used to determine current next actions, model configuration, paid-call authorization, or readiness status. Current execution status lives in `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md`; readiness criteria live in `AGENT_PRODUCTION_READINESS_SPEC.md`.
+
 ## 1. เป้าหมาย
 
 ทำให้การแนบไฟล์สำหรับ agent เดี่ยวสมบูรณ์ทั้ง Manual และ Auto mode โดยทุกจุดที่ LLM ใช้ตัดสินใจหรือสร้างผลลัพธ์สามารถเข้าถึง Quick Brief และ resources ของงานชุดเดียวกันได้อย่างสม่ำเสมอ

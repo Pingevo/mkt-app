@@ -1,5 +1,8 @@
 # M6 Status
 
+> **HISTORICAL / SUPERSEDED — preserved as evidence only.**
+> This document is preserved as historical planning/evidence. It must NOT be used to determine current next actions, model configuration, paid-call authorization, or readiness status. Current execution status lives in `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md`; readiness criteria live in `AGENT_PRODUCTION_READINESS_SPEC.md`.
+
 **Canonical current-state document for M6 qualification and remediation.**
 Last updated: 2026-09-05 (Same-model uplift qualification result recorded; benchmark levels defined; S3 root-cause investigation completed; Web/Browser E2E implemented and passing with Playwright).
 
@@ -334,8 +337,9 @@ and are **superseded** by this canonical status document:
 - `M6_GENERIC_REMEDIATION_REBASE.md` — documents the harness hardening
   process; valid as historical record
 
-This `M6_STATUS.md` is the **single source of truth** for the current
-M6.1 qualification result and remediation constraints.
+~~This `M6_STATUS.md` is the **single source of truth** for the current
+M6.1 qualification result and remediation constraints.~~ *(Superseded —
+see HISTORICAL / SUPERSEDED notice at top of this document.)*
 
 ---
 
@@ -551,9 +555,9 @@ Testing Layers.
 
 ### Canonical forward plan
 
-`M6_QUALIFICATION_PLAN.md` is now the canonical forward qualification
+~~`M6_QUALIFICATION_PLAN.md` is now the canonical forward qualification
 plan. This document (`M6_STATUS.md`) remains the factual current-state
-record.
+record.~~ *(Superseded — see HISTORICAL / SUPERSEDED notice at top.)*
 
 ---
 

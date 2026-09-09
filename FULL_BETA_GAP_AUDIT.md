@@ -1,5 +1,8 @@
 # MKTApp Full Beta Gap Audit — Engineering Decision Document
 
+> **HISTORICAL / SUPERSEDED — preserved as evidence only.**
+> This document is preserved as historical planning/evidence. It must NOT be used to determine current next actions, model configuration, paid-call authorization, or readiness status. Current execution status lives in `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md`; readiness criteria live in `AGENT_PRODUCTION_READINESS_SPEC.md`.
+
 - **HEAD (source of truth):** `09e3ba8bdb078ac6d31d9e9a060f5ce9f05c777d`
 - **Worktree status:** `?? FULL_BETA_GAP_AUDIT.md` (untracked, not committed)
 - **Mode:** read-only, no production code changes, no paid API calls, no tests run, no commit

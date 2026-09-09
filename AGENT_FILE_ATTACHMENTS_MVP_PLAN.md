@@ -1,5 +1,8 @@
 # Agent File Attachments — Urgent Single-Agent MVP Plan
 
+> **HISTORICAL / SUPERSEDED — preserved as evidence only.**
+> This document is preserved as historical planning/evidence. It must NOT be used to determine current next actions, model configuration, paid-call authorization, or readiness status. Current execution status lives in `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md`; readiness criteria live in `AGENT_PRODUCTION_READINESS_SPEC.md`.
+
 ## 1. เป้าหมาย
 
 เพิ่มความสามารถให้ user แนบไฟล์ประกอบ Quick Brief ของแต่ละ Flow และให้ agent เดี่ยวที่เลือกอ่านไฟล์ร่วมกับ Quick Brief ได้ทันที โดยออกแบบ contract และ storage ให้ต่อยอดเป็น multi-step orchestration ได้ภายหลังโดยไม่ต้องรื้อระบบแนบไฟล์ใหม่

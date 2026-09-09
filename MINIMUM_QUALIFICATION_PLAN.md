@@ -1,6 +1,9 @@
 # Minimum Necessary Qualification Plan (M2–M5)
 
-**Mode:** Offline only — no paid API, web search, image/video generation, OpenRouter free model, production code/config change, or commit.  
+> **HISTORICAL / SUPERSEDED — preserved as evidence only.**
+> This document is preserved as historical planning/evidence. It must NOT be used to determine current next actions, model configuration, paid-call authorization, or readiness status. Current execution status lives in `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md`; readiness criteria live in `AGENT_PRODUCTION_READINESS_SPEC.md`.
+
+**Mode:** Offline only — no paid API, web search, image/video generation, OpenRouter free model, production code/config change, or commit.
 **Goal:** Identify the smallest set of real-model qualification runs still needed to claim Full Beta, and the exact UI scope to hide if we choose a smaller Limited Beta.  
 **Date:** 2026-09-02
 

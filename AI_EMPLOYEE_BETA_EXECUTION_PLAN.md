@@ -22,21 +22,25 @@
 
 ## Current fast-track status (overrides the broad phase sequence below)
 
-สถานะปัจจุบันหลัง remediation checkpoint `f50ec8e`:
+สถานะปัจจุบันหลัง Media Core freeze (`06157af`):
 
 | Capability | สถานะล่าสุด | งานที่ต้องทำต่อ |
 |---|---|---|
 | Product ingestion + 3 K5 images to model calls | **PASS** | — |
-| Agent 1 Product Analyst | **ต้อง requalify** — output ขยาย camera/audio/accelerometer/Class Disable/Geo-Fence facts เกิน source | Requalify หลัง Checkpoint A |
-| Agent 2 Competitor Analyst | **ต้องแก้ user-facing rendering + ลบ unsupported factual premises** | Checkpoint A + B |
-| Agent 3 Campaign Strategist | **ต้อง requalify** — Brand/Audience values (age 25–45, Working Mom, channels) เป็น user settings ที่ถูกต้อง แต่ K9/video-call examples ต้องไม่กลายเป็น K5 capabilities; internal pending-validation language ต้องไม่ leak | Checkpoint A + B |
-| Agent 4 Content Creator | **Script generation + review path ใช้งานได้ แต่ final grounding หลัง post-review mutation ยังไม่ qualified** | Checkpoint A + C |
-| Image generation | **PARTIAL** — no-ref PASS, one-normalized-ref PASS, three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix | Checkpoint C |
-| Real video generation | **NOT QUALIFIED** | Checkpoint C |
-| Scheduler | **NOT QUALIFIED** — unit tests ไม่พอพิสูจน์ UI save → scheduled fire → execution → history | Checkpoint D |
-| Overall | **NOT FREEZE-READY** จนกว่า Checkpoints A–E ผ่านครบ | — |
+| Agent 1 Product Analyst | **ต้อง requalify** — output ขยาย camera/audio/accelerometer/Class Disable/Geo-Fence facts เกิน source | Requalify หลัง Checkpoint A (A implemented/frozen; requalification pending) |
+| Agent 2 Competitor Analyst | **ต้องแก้ user-facing rendering + ลบ unsupported factual premises** | Checkpoint B (`PLANNED`, open) |
+| Agent 3 Campaign Strategist | **ต้อง requalify** — Brand/Audience values (age 25–45, Working Mom, channels) เป็น user settings ที่ถูกต้อง แต่ K9/video-call examples ต้องไม่กลายเป็น K5 capabilities; internal pending-validation language ต้องไม่ leak | Checkpoint B (`PLANNED`, open) |
+| Agent 4 Content Creator | **Script generation + review path ใช้งานได้ แต่ final grounding หลัง post-review mutation ยังไม่ qualified** | Final-grounding/text requalification → Checkpoint E; visual fidelity → Media Capability Coverage (C2) |
+| Checkpoint A — Final grounding boundary | **ACCEPTED / FROZEN** (`65ed8c7`) | Requalify Agents 1–4 against current model |
+| Gemini 3.8 migration | **ACCEPTED / FROZEN** (`c39f596`) | — |
+| Media Core (C1, mechanical transport) | **ACCEPTED / FROZEN** (`5cc4724` + `06157af`) | — |
+| Media Capability Coverage (C2) | **PLANNED** | Product/logo/mascot fidelity, provider fallback, cost-aware tool selection |
+| Image generation | **PARTIAL** — no-ref PASS, one-normalized-ref PASS, three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix | Media Capability Coverage (C2) |
+| Real video generation | **NOT QUALIFIED** | Media Capability Coverage (C2) |
+| Scheduler | **Implementation complete (`421bb40`); real scheduled-fire qualification NOT QUALIFIED** | Checkpoint D (paid run pending Product Owner approval) |
+| Overall | **NOT FREEZE-READY** — no Agent 1–4 declared Beta-ready without current qualification evidence | Checkpoint B / D / E + Media Capability Coverage (C2) |
 
-ห้ามย้อนกลับไปทำ Phase 1–6 ทั้งชุดโดยอัตโนมัติ ลำดับกว้างด้านล่างเป็นแผน Production/ความสมบูรณ์ระยะยาว งานเร่งด่วนตอนนี้คือ Checkpoints A–E
+ห้ามย้อนกลับไปทำ Phase 1–6 ทั้งชุดโดยอัตโนมัติ ลำดับกว้างด้านล่างเป็นแผน Production/ความสมบูรณ์ระยะยาว Checkpoint A และ Media Core (C1) แช่แข็งแล้ว; เฟสถัดไปคือ Media Capability Coverage (C2)
 
 ## เป้าหมาย Beta รอบนี้
 
@@ -358,6 +362,8 @@ Beta ผ่านเมื่อ MKTApp ไม่ด้อยกว่า fronti
 
 ### Checkpoint A — Generic final-output truth boundary
 
+> Status: `ACCEPTED / FROZEN` at `65ed8c7`. Implemented safeguard; Agents 1–4 requalification against current model still pending (Checkpoint E).
+
 Implement the smallest generic architecture fix so the final persisted output is grounded after all mutation stages.
 
 - No K5-, video-call-, "24 ชั่วโมง"-, promotion-, or keyword-specific production logic.
@@ -371,6 +377,8 @@ Implement the smallest generic architecture fix so the final persisted output is
 
 ### Checkpoint B — User-facing presentation
 
+> Status: `PLANNED` (open). No accepted closure evidence yet.
+
 Separate machine-readable status from user-facing language.
 
 - Agent 2: keep verified/unverified/inference state internally; replace internal phrases ("ค่าที่จับคู่ได้", "evidence", "inference/recommendation") with concise natural Thai; omit non-informative rows or use a short natural missing-data note; remove concrete premises whose supporting evidence fails validation.
@@ -379,25 +387,29 @@ Separate machine-readable status from user-facing language.
 
 ### Checkpoint C — Media completion
 
-1. Prove three normalized K5 references at the provider boundary.
-2. Record original sizes, normalized sizes, total request size, duration, provider response, and generated file.
-3. Run one real image through the actual UI manual-generation path: elapsed status visible; per-image error visible if it fails; final status not stuck; one real output image exists and is displayed; generated media cost is recorded.
-4. Do not generate two images when one representative image is sufficient.
-5. After Agent 4 final script is grounded, generate one representative real video and verify saved file, status, duration/model parameters, cost, and UI visibility.
+> Status split into C1 (frozen) and C2 (planned). Any provider UAT requires separate Product Owner approval.
+
+**C1 — Media Core (mechanical reference transport):** `ACCEPTED / FROZEN` at `5cc4724` + `06157af` (60 focused + 8 browser tests passed; `git diff --check` clean). Do not reopen speculative media plumbing.
+
+**C2 — Media Capability Coverage:** `PLANNED`. Scope: product fidelity, logo/brand fidelity, mascot/person/child consistency, provider fallback, cost-aware tool selection. No K5-specific forward instructions; no real image/video run is authorized without separate Product Owner approval.
 
 ### Checkpoint D — Scheduler qualification
+
+> Status: Implementation complete at `421bb40` (misfire_grace_time fix). Real scheduled-fire qualification `BLOCKED` — paid run requires separate Product Owner approval.
 
 - UI flow serialization into schedule save; one-time job save/list; recurring job save/list; invalid schedule returns error and is not persisted; toggle off/on; deletion; server restart reload; missed job and stuck-run recovery; manual run-now; history and rerun; failure status; full parity of selected product, Agent, Quick Brief, Agent Settings, platform, content count, media mode, attachments/resource references, and auto/manual media consent.
 - Real representative proof: one low-cost scheduled one-time flow with media generation OFF; schedule for near-future time and let APScheduler fire it naturally; verify UI/API save → registered next_run → timed fire → real Agent output → run history → cost/trace; confirm scheduled Agent receives the same runtime contract as manual flow; delete test schedule after preserving evidence.
 
 ### Checkpoint E — Qualification and test rule
 
+> Status: `BLOCKED` (open). No current-model qualification evidence; no Agent 1–4 declared Beta-ready. Paid UAT requires separate Product Owner approval. Agent 4 final-grounding/text requalification belongs here; Agent 4 visual fidelity belongs to Media Capability Coverage (C2).
+
 1. Direct unit tests for the changed seam.
 2. Affected integration groups.
 3. Read every final persisted output completely.
 4. One representative paid UAT per Agent only after offline tests pass.
-5. One real image and one real video only.
-6. One real scheduled run.
+5. One real image and one real video only — each requires separate Product Owner approval.
+6. One real scheduled run — requires separate Product Owner approval.
 7. Run the full suite once, immediately before the final freeze decision, because shared production code changed.
 
 Do not repeatedly run the full suite after small edits. Do not accept a run based only on finish_reason=stop, call counts, or absence of one previously observed phrase. For every real UAT, compare the complete final output against the exact runtime inputs and classify every questionable statement. No remediation is allowed during a qualification run. Preserve failed runs as immutable evidence.
@@ -408,14 +420,20 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 
 | Field | Current value |
 |---|---|
-| Current phase | Remediation cycle — Checkpoints A–E |
-| Current objective | Generic final-output truth boundary + user-facing presentation + media completion + scheduler qualification + final qualification |
-| Completed | Checkpoint commit `f50ec8e` pushed to `origin/dev`: post-review mutation seam (source_context to script_reviewer), Agent 2 fail-closed drop of unverified evidence_based recommendations, streaming cost extraction test replacement, image probe diagnosis (3 probes), UI elapsed timer, image auto-resize |
-| Evidence | Image probes: `evaluation_artifacts/image_probe_20260908_092915/`; Final Agent 4 UAT: `evaluation_artifacts/final_agent4_uat_20260908_094512/`; Original failed UAT preserved: `evaluation_artifacts/real_uat_20260908_083822_FAILED_PARTIAL/` |
-| Blocking owner decision | ไม่มี — Product Owner อนุญาต paid testing และ autonomous remediation ผ่าน Checkpoints A–E |
-| Paid calls allowed now | Yes — สำหรับ Checkpoint C (1 image + 1 video), Checkpoint D (1 scheduled run), และ Checkpoint E (1 UAT ต่อ Agent) |
-| Next exact action | Checkpoint A — implement generic final-output truth boundary for all Agents 1–4 |
-| Last updated | 2026-09-08 |
+| Current phase | Media Capability Coverage — planning |
+| Current objective | Prepare a bounded, generic Media Capability Coverage plan for Product Owner/Codex review |
+| Checkpoint A — Final grounding boundary | `ACCEPTED / FROZEN` at `65ed8c7`. Generic final-output truth boundary wired into the smallest common pre-persistence seam for Agents 1–4; model reasoning for semantic entailment; no keyword/regex lists. Implemented safeguard — not yet re-qualified against current model. |
+| Gemini 3.8 migration | `ACCEPTED / FROZEN` at `c39f596`. Production text/reasoning workloads migrated to `google/gemini-3.8-flash` (read from `config/agents.yaml`). |
+| Checkpoint C1 — Media Core (mechanical transport) | `ACCEPTED / FROZEN` at `5cc4724` + `06157af`. Per-item product+asset reference selection via `extract_reference_ordinals`/`filter_catalog_by_ordinals`/`selected_reference_ordinals` in `compose_media_input`; `preflight_reference_mentions` rejects unknown/out-of-range ordinals and empty-catalog mentions. Reviewed and accepted by Codex. Do not reopen speculative media plumbing. |
+| Checkpoint C2 — Media Capability Coverage | `PLANNED`. Scope: product fidelity, logo/brand fidelity, mascot/person/child consistency, provider fallback, cost-aware tool selection. No implementation details invented here. |
+| Checkpoint B — User-facing presentation | `PLANNED` (open). Agent 2/3 user-facing rendering still has internal phrases / pending-validation leakage; no accepted closure evidence. |
+| Scheduler (Checkpoint D) | Implementation complete at `421bb40` (misfire_grace_time fix). Real scheduled-fire qualification `BLOCKED` (pending separate Product Owner approval for paid run). |
+| Checkpoint E — Final qualification | `BLOCKED` (open). No current-model qualification evidence; no Agent 1–4 declared Beta-ready. Agent 4 final-grounding/text requalification belongs here; visual fidelity belongs to C2. |
+| Evidence (Media Core) | `tests/test_media_gen_provider_flow.py tests/test_phase4_media_wiring.py` = 60 passed, 0 failed; `tests/test_browser_e2e.py::TestImageGenerationBrowserE2E + TestVideoGenerationBrowserE2E + TestMediaPersistenceBrowserE2E` = 8 passed, 0 failed; `git diff --check` clean at acceptance. Regression fixtures: `test_uat_regression_unrelated_product_ref_not_sent`, `test_unknown_reference_ordinal_rejected_via_real_sequence`, `test_reference_mention_with_empty_full_catalog_rejected`. |
+| Evidence (historical, immutable) | Image probes: `evaluation_artifacts/image_probe_20260908_092915/`; Final Agent 4 UAT: `evaluation_artifacts/final_agent4_uat_20260908_094512/`; Original failed UAT preserved: `evaluation_artifacts/real_uat_20260908_083822_FAILED_PARTIAL/`; Pre-subset-fix real UAT: `output/uat_media_20260909_125427/uat_report.json` — real image/video execution succeeded before the subset correction, but exposed extra-reference contamination; `06157af` fixed the defect offline; this is not post-fix fidelity/subset-isolation acceptance; do not rerun without separate Product Owner approval. These remain evidence, not current PASS. |
+| Paid calls allowed now | No. No paid/model/web/media/provider UAT is authorized unless the Product Owner approves it separately. |
+| Next exact action | Prepare a bounded, generic Media Capability Coverage plan for Product Owner/Codex review. |
+| Last updated | 2026-09-09 |
 
 ## Post-Beta Backlog
 
