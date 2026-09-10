@@ -237,6 +237,44 @@ def get_model_capabilities(model_id: str, kind: str = "video") -> dict[str, Any]
     return {}
 
 
+def _format_pricing_skus(skus: dict[str, Any]) -> tuple[list[str], bool, bool]:
+    """Format provider pricing SKUs into Agent-usable cost guidance.
+
+    Returns (parts, has_per_second, has_token_pricing).
+
+    Recognized families (from real OpenRouter video-models API):
+      duration_seconds*  — direct USD per second → ~$X/วินาที
+      cents_per_second*  — cents per second → convert to dollars → ~$X/วินาที
+      video_tokens*      — per-token pricing → $X.XX/M (no fake per-second)
+      other              — generic fallback: sku: $price
+    """
+    parts: list[str] = []
+    has_per_second = False
+    has_token_pricing = False
+    for sku, price in skus.items():
+        if sku.startswith("duration_seconds"):
+            parts.append(f"~${price}/วินาที")
+            has_per_second = True
+        elif "cents_per_second" in sku or "cents_per_video_output_second" in sku:
+            try:
+                dollars = float(price) / 100
+                parts.append(f"~${dollars:.2f}/วินาที")
+                has_per_second = True
+            except (ValueError, TypeError):
+                parts.append(f"{sku}: ${price}")
+        elif "video_tokens" in sku:
+            try:
+                per_million = float(price) * 1_000_000
+                label = sku.replace("video_tokens", "tokens")
+                parts.append(f"{label}: ${per_million:.2f}/M")
+                has_token_pricing = True
+            except (ValueError, TypeError):
+                parts.append(f"{sku}: ${price}")
+        else:
+            parts.append(f"{sku}: ${price}")
+    return parts, has_per_second, has_token_pricing
+
+
 def format_capabilities_for_prompt(model_id: str, kind: str = "video") -> str:
     """สร้างข้อความบอก agent ว่า model นี้ทำได้อะไร — ใส่ใน prompt.
 
@@ -257,14 +295,12 @@ def format_capabilities_for_prompt(model_id: str, kind: str = "video") -> str:
     if caps.get("generate_audio"):
         parts.append("audio: สร้างเสียงได้")
     if caps.get("pricing_skus"):
-        sku_parts = []
-        for sku, price in caps["pricing_skus"].items():
-            if sku == "per-video-second":
-                sku_parts.append(f"~${price}/วินาที")
-            else:
-                sku_parts.append(f"{sku}: ${price}")
+        sku_parts, has_per_second, has_token_pricing = _format_pricing_skus(caps["pricing_skus"])
         if sku_parts:
-            parts.append(f"cost โดยประมาณ (provider-advertised): {' | '.join(sku_parts)}")
+            cost_line = f"cost โดยประมาณ (provider-advertised): {' | '.join(sku_parts)}"
+            if has_token_pricing and not has_per_second:
+                cost_line += " (ระยะเวลาที่ยาวขึ้น = ค่าใช้จ่ายสูงขึ้น)"
+            parts.append(cost_line)
     if not parts:
         return ""
     return f"Model {model_id} รองรับ: {' | '.join(parts)}"

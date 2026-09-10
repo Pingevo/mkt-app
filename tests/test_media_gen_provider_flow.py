@@ -1831,7 +1831,7 @@ def test_format_capabilities_includes_per_second_cost_when_present(monkeypatch, 
         "aspect_ratios": ["16:9"],
         "resolutions": ["720p"],
         "generate_audio": True,
-        "pricing_skus": {"per-video-second": "0.1028"},
+        "pricing_skus": {"duration_seconds": "0.1028"},
     })
 
     text = media_gen.format_capabilities_for_prompt("bytedance/seedance-2.0-fast", kind="video")
