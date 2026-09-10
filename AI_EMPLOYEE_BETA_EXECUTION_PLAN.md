@@ -451,6 +451,24 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 | Next exact action | Prepare a bounded, generic Media Capability Coverage plan for Product Owner/Codex review. |
 | Last updated | 2026-09-09 (Checkpoint D accepted/frozen) |
 
+## Progress Ledger — ARCH-CLEANUP-01 (Manager removal)
+
+| Field | Value |
+|---|---|
+| Phase ID | ARCH-CLEANUP-01 |
+| Product Owner decision | MKTApp does not want or need a Manager agent. `select_product_auto` and asset selection must remain orchestration helpers, not represented/named/configured/logged as a Manager. |
+| Files deleted | `src/agents/manager.py` |
+| Files edited | `src/agents/__init__.py`, `src/orchestrator.py`, `config/agents.yaml`, `main.py`, `tests/test_model_migration.py`, `tests/test_browser_upload_real_source.py`, `tests/test_manager_removal_contract.py` (new), `AGENT_PRODUCTION_READINESS_SPEC.md`, `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md` (this ledger) |
+| Tests added | `tests/test_manager_removal_contract.py` (9 focused offline contract tests) |
+| Behavior preserved | Agent 1–4 standalone capability; `/api/run_auto` contract; `select_product_auto` / `_select_assets_for_content` semantics; Checkpoint A grounding; C1 reference transport; Scheduler. Auto-selection model/temperature/retry migrated from removed `manager` config section to `auto_mode`. |
+| Behavior removed | `ManagerAgent` class; `Orchestrator.run_manager()`; `Orchestrator.get_products_state()` (dead Manager-era helper); `Orchestrator.llm_chat_raw()` (Manager-only); `manager` config section; CLI no-subcommand interactive Manager mode and its unused helpers (`list_products`, `has_files_in_data_root`, `show_product_info`, `list_all_products`, `_agent_display_name`, `AGENTS`); unused imports (`datetime`, `Prompt`, `Confirm`, `detect_data_files`). |
+| No replacement | No new router/coordinator/manager class, abstraction, schema, dependency, feature flag, or deprecation alias was introduced. |
+| Paid calls | 0. No LLM, embedding, web, image, video, provider, UI qualification, or network calls. Budget: $0. |
+| Tests (offline, rerun) | `pytest tests/test_manager_removal_contract.py tests/test_model_migration.py` = 49 passed, 0 failed. `pytest tests/test_orchestrator_campaign_integration.py tests/test_orchestrator_visual_style_types.py` = 17 passed, 0 failed. `pytest tests/test_media_gen_provider_flow.py tests/test_pricing_format.py tests/test_qual_c2_launcher.py` = 105 passed, 0 failed. Combined total: 171 passed, 0 failed. |
+| Tests (browser, rerun) | `pytest tests/test_browser_e2e.py -k "ImageGenerationBrowserE2E or VideoGenerationBrowserE2E or MediaPersistenceBrowserE2E"` = 8 passed, 0 failed (rerun during this revision; confirms `/api/run_auto` still reaches `run_content_creator_auto()` and media generation). |
+| Tests (pre-existing failures, unchanged) | `tests/test_browser_upload_real_source.py` = 33 failed (require real source files not present in worktree; identical to baseline before ARCH-CLEANUP-01). |
+| Next single action | Codex/Product Owner freeze review of the diff. Do not commit until reviewed. |
+
 ## Post-Beta Backlog
 
 - multi-Agent team flow และ artifact chaining

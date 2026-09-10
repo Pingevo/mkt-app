@@ -1,24 +1,3 @@
-manager:
-  model: google/gemini-3.8-flash
-  temperature: 0.3
-  max_tokens: 2048
-  max_retry_limit: 3
-  max_review_iterations: 0
-  system_prompt: "คุณคือ \"Manager\" ของทีมการตลาด รับคำสั่งจาก user แล้ววางแผนสั่ง\
-    \ agent ทำงาน\n\nทีมมี 4 ตำแหน่ง ทำตามลำดับ:\n1. product_spec — สร้างสเปคสินค้าจากข้อมูลดิบ\n\
-    2. competitor_analysis — วิเคราะห์คู่แข่ง (ค้นหา web เอง) ต้องมี product_spec\
-    \ ก่อน\n3. campaign_strategy — วางกลยุทธ์แคมเปญ ต้องมี product_spec + competitor_analysis\
-    \ ก่อน\n4. content_creator — สร้างคอนเทนต์ ต้องมีทั้ง 3 อย่างก่อน\n\nคุณจะเห็นรายชื่อสินค้าและสถานะของแต่ละตัวใน\
-    \ prompt\nห้ามเดา product_id ถ้า user ไม่ได้พูดชื่อสินค้า ต้องตั้ง product_id\
-    \ เป็น null\nถ้า user ไม่ได้ระบุสินค้า → action=\"ask\", product_id=null, ใน reply\
-    \ บอกสินค้าที่มีแล้วถามว่าจะทำตัวไหน\nถ้า user ระบุสินค้าชัดเจน → action=\"run\"\
-    , สั่งทำเลย ไม่ต้องถามซ้ำ\nถ้า user ตอบ \"ใช่\" หรือ \"ทำเลย\" หรือ \"ได้\" →\
-    \ action=\"run\" ทันที ห้ามถามซ้ำ\nถ้า user ถามว่าทำอะไรได้บ้าง → action=\"none\"\
-    , บอกความสามารถของระบบทั้ง 4 อย่าง\n\nส่งคืนเป็น JSON เท่านั้น:\n{\n  \"reply\"\
-    : \"ข้อความตอบ user (ภาษาไทย)\",\n  \"action\": \"run\" | \"ask\" | \"none\",\n\
-    \  \"agents\": [\"product_spec\", \"competitor_analysis\", ...],\n  \"product_id\"\
-    : \"ชื่อสินค้า\" หรือ [\"สินค้า1\", \"สินค้า2\"] หรือ null,\n  \"missing\": [\"\
-    สิ่งที่ขาด\"]\n}\n"
 defaults:
   base_url: https://openrouter.ai/api/v1
   model: google/gemini-3.8-flash
@@ -40,6 +19,9 @@ defaults:
   repair_prompt: 'ผลงานข้างต้นไม่ตรงตามรูปแบบที่กำหนด: {error}\nกรุณาแก้ไขให้ตรงรูปแบบโดยไม่เปลี่ยนเนื้อหา
     ส่งเฉพาะผลงานฉบับสุดท้ายเท่านั้น'
 auto_mode:
+  model: google/gemini-3.8-flash
+  temperature: 0.3
+  max_retry_limit: 3
   max_iterations: 10
   max_tokens: 4096
   product_count_max: 50

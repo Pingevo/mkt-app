@@ -312,11 +312,9 @@ Beta ผ่านเมื่อไม่มี critical defect และผล�
 
 **NOT READY — final grounding หลัง post-review mutation ยังไม่ qualified.** Script generation + review path ใช้งานได้ (10 calls, 4 script reviews, all finish=stop) แต่ final persisted output ยังมี unsupported claims ("24 ชั่วโมง", "โปรโมชั่นพิเศษวันนี้", voice-message capability, game-addiction claims). source_context ส่งถึง script_reviewer แล้ว แต่ fail-closed มีเฉพาะ empty second review ไม่ cover semantically unsupported revision. Checkpoint A implemented/frozen. Final-grounding/text requalification belongs to Checkpoint E; visual fidelity belongs to Media Capability Coverage (C2).
 
-## Manager — internal component
+## Manager — removed (ARCH-CLEANUP-01)
 
-Manager ไม่เป็น user-facing Beta Agent. ขอบเขตปัจจุบันคือ parse intent/resolve product สำหรับ Auto paths และคืน structured selection/error โดยห้ามเปลี่ยน UI selection หรือเพิ่ม Agent โดย user ไม่รู้
-
-เมื่อ team flow เปิดใช้ Manager อาจเสนอ flow template ได้ แต่ไม่ควร route แบบ autonomous โดยอัตโนมัติใน v1
+Product Owner decision: MKTApp does not use a Manager agent. The former `ManagerAgent`, `Orchestrator.run_manager()`, the `manager` config section, and the Manager-based CLI interactive mode were removed. Auto product/asset selection (`select_product_auto`, `_select_assets_for_content`) remains as orchestration helpers and now reads its model/temperature/retry params from the `auto_mode` config section. No replacement router/coordinator class was introduced.
 
 ## Test strategy with a stopping rule
 

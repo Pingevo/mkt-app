@@ -23,12 +23,10 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
 from rich.table import Table
 
 from src.data_loader import detect_data_files
@@ -187,262 +185,6 @@ def cmd_pipeline(args: argparse.Namespace) -> None:
     console.print()
 
 
-# ---------------------------------------------------------------------
-#  Interactive prompt mode
-# ---------------------------------------------------------------------
-
-def list_products() -> list[str]:
-    """List product directories in data/ that have raw data files."""
-    project_root = Path(__file__).resolve().parent
-    data_dir = project_root / "data"
-    if not data_dir.exists():
-        return []
-    products = []
-    for item in sorted(data_dir.iterdir()):
-        if not item.is_dir() or item.name.startswith("."):
-            continue
-        detected = detect_data_files(product_id=item.name)
-        if detected["raw"]:
-            products.append(item.name)
-    return products
-
-
-def has_files_in_data_root() -> bool:
-    """Check if there are raw data files directly in data/ (no subdirectory)."""
-    detected = detect_data_files(product_id=None)
-    return detected["raw"] is not None
-
-
-def show_product_info(product_id: str | None) -> None:
-    """Show detected files for a product."""
-    detected = detect_data_files(product_id=product_id)
-    label = product_id if product_id else "data/ (โฟลเดอร์หลัก)"
-    table = Table(title=f"ไฟล์ของ {label}", show_header=True, header_style="bold cyan")
-    table.add_column("ประเภท", style="white")
-    table.add_column("ไฟล์", style="dim")
-    
-    # ข้อมูลดิบ
-    if detected["raw"]:
-        table.add_row("ข้อมูลดิบ", detected["raw"])
-    else:
-        if product_id:
-            table.add_row("ข้อมูลดิบ", f"[red]ไม่พบ — โยนไฟล์ (txt, pdf) ลง data/{product_id}/ ก่อน[/red]")
-        else:
-            table.add_row("ข้อมูลดิบ", "[red]ไม่พบ — โยนไฟล์ (txt, pdf) ลง data/ ก่อน[/red]")
-    
-    # รูปภาพ
-    if detected["images"]:
-        for img in detected["images"]:
-            table.add_row("รูปภาพสินค้า", img)
-    else:
-        table.add_row("รูปภาพสินค้า", "[dim]ไม่มี (optional)[/dim]")
-    
-    # ข้อมูลพร้อมใช้ (ready/)
-    if detected["product_spec"]:
-        table.add_row("สเปคสินค้า (ready)", detected["product_spec"])
-    else:
-        table.add_row("สเปคสินค้า (ready)", "[dim]ยังไม่มี — รัน Agent 1 ก่อน[/dim]")
-    
-    if detected["competitor"]:
-        table.add_row("วิเคราะห์คู่แข่ง (ready)", detected["competitor"])
-    else:
-        table.add_row("วิเคราะห์คู่แข่ง (ready)", "[dim]ยังไม่มี — รัน Agent 2 ก่อน[/dim]")
-    
-    console.print(table)
-
-
-AGENTS = [
-    ("1", "product-spec", "นักวิเคราะห์สินค้า", "สร้างสเปคสินค้าจากข้อมูลดิบ"),
-    ("2", "competitor", "นักวิเคราะห์คู่แข่ง", "วิเคราะห์เปรียบเทียบคู่แข่ง"),
-    ("3", "campaign", "นักวางกลยุทธ์แคมเปญ", "คิดแคมเปญ + ราคาแนะนำ"),
-    ("4", "content", "นักสร้างคอนเทนต์", "สร้าง content + prompt + hashtag"),
-    ("5", "pipeline", "รันทั้ง 4 Agent", "รัน pipeline ทั้งหมดตามลำดับ"),
-]
-
-
-def list_all_products() -> list[str]:
-    """List all product directories in data/."""
-    project_root = Path(__file__).resolve().parent
-    data_dir = project_root / "data"
-    if not data_dir.exists():
-        return []
-    products = []
-    for item in sorted(data_dir.iterdir()):
-        if item.is_dir() and not item.name.startswith(".") and item.name != "ready":
-            products.append(item.name)
-    return products
-
-
-def _agent_display_name(key: str) -> str:
-    names = {
-        "product_spec": "นักวิเคราะห์สินค้า",
-        "competitor_analysis": "นักวิเคราะห์คู่แข่ง",
-        "campaign_strategy": "นักวางกลยุทธ์แคมเปญ",
-        "content_creator": "นักสร้างคอนเทนต์",
-    }
-    return names.get(key, key)
-
-
-def interactive_mode() -> None:
-    """Chat-based interface — คุยกับ Manager สั่งงานเป็นภาษาธรรมดา."""
-    console.print(Panel(
-        "[bold cyan]Marketing Agent System[/bold cyan]\n\n"
-        "[bold]ทีมของคุณมี 4 ตำแหน่ง:[/bold]\n"
-        "  1. นักวิเคราะห์สินค้า — สร้างสเปคสินค้าจากข้อมูลดิบ\n"
-        "  2. นักวิเคราะห์คู่แข่ง — วิเคราะห์เปรียบเทียบคู่แข่ง (ค้นหา web เอง)\n"
-        "  3. นักวางกลยุทธ์แคมเปญ — คิดแคมเปญ + ราคาแนะนำ\n"
-        "  4. นักสร้างคอนเทนต์ — สร้าง content + prompt + hashtag\n\n"
-        "พิมพ์เป็นภาษาไทยได้เลย สั่งงานอะไรก็ได้ที่ทีมทำได้\n"
-        "พิมพ์ 'exit' เพื่อออก",
-        border_style="cyan",
-    ))
-    
-    orch = Orchestrator(brand_dir="brand")
-    conversation: list[dict[str, str]] = []
-    session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    while True:
-        console.print()
-        user_input = Prompt.ask("[bold green]คุณ[/bold green]")
-        
-        if user_input.strip().lower() in ("exit", "quit", "ออก", "bye"):
-            console.print("[dim]ลาก่อน[/dim]")
-            break
-        
-        if not user_input.strip():
-            continue
-        
-        conversation.append({"role": "user", "content": user_input})
-        
-        # Manager วิเคราะห์
-        console.print("\n[cyan]Manager กำลังวิเคราะห์...[/cyan]\n")
-        
-        try:
-            plan = orch.run_manager(user_input, conversation)
-        except Exception as e:
-            console.print(f"[red]เกิดข้อผิดพลาด: {e}[/red]")
-            continue
-        
-        reply = plan.get("reply", "")
-        action = plan.get("action", "none")
-        agents_to_run = plan.get("agents", [])
-        product_id = plan.get("product_id")
-        missing = plan.get("missing", [])
-        
-        conversation.append({"role": "manager", "content": reply})
-        
-        if reply:
-            console.print(f"[bold cyan]Manager:[/bold cyan] {reply}")
-        
-        if missing:
-            console.print(f"[yellow]ขาด: {', '.join(missing)}[/yellow]")
-        
-        if action != "run" or not agents_to_run:
-            continue
-        
-        if not product_id:
-            console.print("[yellow]ไม่ระบุสินค้า ลองใหม่[/yellow]")
-            continue
-        
-        # ตรวจข้อมูลก่อนรัน
-        detected = detect_data_files(product_id=product_id)
-        output_dir = Path("output") / session_ts
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # รันตามลำดับที่ manager สั่ง
-        for agent_key in agents_to_run:
-            console.print(f"\n[bold]กำลังรัน: {_agent_display_name(agent_key)}[/bold]\n")
-            
-            try:
-                if agent_key == "product_spec":
-                    if not detected["raw"]:
-                        console.print(f"[red]ไม่พบข้อมูลดิบสำหรับ {product_id}[/red]")
-                        break
-                    raw_data = load_file(detected["raw"])
-                    product_images = detected["images"] or []
-                    orch.product_id = product_id
-                    orch.product_images = product_images
-                    result = orch.run_product_spec(raw_data, product_images)
-                    orch.results["product_spec"] = result
-                    saved = orch.save_results(str(output_dir))
-                    _print_result("สเปคสินค้า", result, saved.get("product_spec"))
-                    detected = detect_data_files(product_id=product_id)
-                
-                elif agent_key == "competitor_analysis":
-                    if not detected["product_spec"]:
-                        console.print("[yellow]ต้องรัน product_spec ก่อน[/yellow]")
-                        break
-                    product_spec = load_file(detected["product_spec"])
-                    result = orch.run_competitor_analysis(product_spec, None)
-                    orch.results["competitor_analysis"] = result
-                    saved = orch.save_results(str(output_dir))
-                    _print_result("วิเคราะห์คู่แข่ง", result, saved.get("competitor_analysis"))
-                    detected = detect_data_files(product_id=product_id)
-                
-                elif agent_key == "campaign_strategy":
-                    if not detected["product_spec"]:
-                        console.print("[yellow]ต้องรัน product_spec ก่อน[/yellow]")
-                        break
-                    product_spec = load_file(detected["product_spec"])
-                    comp_file = output_dir / "02_competitor_analysis.md"
-                    if detected["competitor"]:
-                        analysis = load_file(detected["competitor"])
-                    elif comp_file.exists():
-                        analysis = comp_file.read_text(encoding="utf-8")
-                    else:
-                        console.print("[yellow]ต้องรัน competitor_analysis ก่อน[/yellow]")
-                        break
-                    result = orch.run_campaign_strategy(product_spec, analysis)
-                    orch.results["campaign_strategy"] = result
-                    saved = orch.save_results(str(output_dir))
-                    _print_result("แคมเปญ + ราคาแนะนำ", result, saved.get("campaign_strategy"))
-                
-                elif agent_key == "content_creator":
-                    if not detected["product_spec"]:
-                        console.print("[yellow]ต้องรัน product_spec ก่อน[/yellow]")
-                        break
-                    product_spec = load_file(detected["product_spec"])
-                    comp_file = output_dir / "02_competitor_analysis.md"
-                    camp_file = output_dir / "03_campaign_strategy.md"
-                    if detected["competitor"]:
-                        analysis = load_file(detected["competitor"])
-                    elif comp_file.exists():
-                        analysis = comp_file.read_text(encoding="utf-8")
-                    else:
-                        console.print("[yellow]ต้องรัน competitor_analysis ก่อน[/yellow]")
-                        break
-                    if not camp_file.exists():
-                        console.print("[yellow]ต้องรัน campaign_strategy ก่อน[/yellow]")
-                        break
-                    campaign = camp_file.read_text(encoding="utf-8")
-                    result = orch.run_content_creator(product_spec, analysis, campaign)
-                    orch.results["content_creator"] = result
-                    saved = orch.save_results(str(output_dir))
-                    _print_result("คอนเทนต์ + Prompt", result, saved.get("content_creator"))
-                
-                else:
-                    console.print(f"[yellow]ไม่รู้จัก agent: {agent_key}[/yellow]")
-            
-            except Exception as e:
-                console.print(f"\n[red]เกิดข้อผิดพลาด: {e}[/red]")
-                break
-        
-        console.print("\n[bold green]✓ เสร็จสิ้น[/bold green]")
-        
-        # Manager สรุปผลงาน
-        completed = [a for a in agents_to_run if a in orch.results]
-        if completed:
-            summary_msg = f"เพิ่งทำงานเสร็จ: {', '.join(completed)} สำหรับสินค้า {product_id} สรุปผลให้ user สั้นๆ"
-            try:
-                console.print("\n[cyan]Manager กำลังสรุป...[/cyan]")
-                summary_plan = orch.run_manager(summary_msg, conversation)
-                summary_reply = summary_plan.get("reply", "")
-                if summary_reply:
-                    console.print(f"\n[bold cyan]Manager:[/bold cyan] {summary_reply}")
-                    conversation.append({"role": "manager", "content": summary_reply})
-            except Exception:
-                pass
-
 
 # ---------------------------------------------------------------------
 #  CLI parser
@@ -515,9 +257,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    
+
     if not getattr(args, "command", None):
-        interactive_mode()
+        parser.print_help()
+        sys.exit(1)
     else:
         args.func(args)
 

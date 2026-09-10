@@ -254,8 +254,10 @@ def _server(tmp_path_factory):
     _prod_agents_path = Path(__file__).resolve().parent.parent / "config" / "agents.yaml"
     with open(_prod_agents_path, encoding="utf-8") as _f:
         _prod_agents = _yaml.safe_load(_f)
-    # Override model names to "fake" so FakeLLM is used
-    for _section in ("manager", "defaults", "product_spec", "competitor_analysis",
+    # Override model names to "fake" so FakeLLM is used.
+    # auto_mode is included because product/asset selection reads its model from there
+    # (migrated from the removed `manager` section by ARCH-CLEANUP-01).
+    for _section in ("defaults", "auto_mode", "product_spec", "competitor_analysis",
                      "campaign_strategy", "content_creator"):
         if _section in _prod_agents and isinstance(_prod_agents[_section], dict):
             _prod_agents[_section]["model"] = "fake"

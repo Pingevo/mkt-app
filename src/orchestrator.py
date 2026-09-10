@@ -24,13 +24,12 @@ from .agents import (
     CampaignStrategyAgent,
     CompetitorAnalysisAgent,
     ContentCreatorAgent,
-    ManagerAgent,
     ProductSpecAgent,
 )
 from .brand_loader import load_brand_rules, load_brand_reference, load_brand_visual, load_product_profile, build_multi_product_profile_context
 from .brand_priority import load_brand_priority
 from .config_loader import get_agent_config, load_config
-from .data_loader import detect_data_files, get_agent_data
+from .data_loader import get_agent_data
 from .llm_client import LLMClient
 from .run_context import StepRunContext, build_multimodal_content
 from .flow_context import set_usage_reference, set_usage_metadata, clear_usage_context
@@ -191,69 +190,6 @@ class Orchestrator:
             return data.get(agent_name, {})
         except Exception:
             return {}
-
-    def get_products_state(self) -> list[dict[str, Any]]:
-        """Get current state of all products for manager to analyze.
-
-        ดึงสถานะจาก product DB ไม่ใช่จาก cache/ อีกต่อไป
-        แยกชัด: product_spec/competitor ใน cache/ = deliverable สำหรับ user (ไม่ใช่ data source)
-        """
-        products = product_db.get_all_products()
-        state = []
-        for p in products:
-            pid = p.get("product_id", "")
-            if not pid or pid.startswith("."):
-                continue
-            detected = detect_data_files(product_id=pid)
-            state.append({
-                "name": pid,
-                "status": p.get("status", product_db.STATUS_EMPTY),
-                "raw": detected["raw"],
-                "images": detected["images"],
-                "videos": detected["videos"],
-                "audios": detected["audios"],
-                "has_product_spec": detected["product_spec"] is not None,  # deliverable มีไหม
-                "has_competitor": detected["competitor"] is not None,      # deliverable มีไหม
-                "raw_text_preview": (p.get("raw_text", "") or "")[:500],   # ส่ง preview ให้ manager เห็น
-            })
-        return state
-
-    def run_manager(
-        self,
-        user_message: str,
-        conversation_history: list[dict[str, str]] | None = None,
-        llm: LLMClient | None = None,
-    ) -> dict[str, Any]:
-        """Run manager agent to analyze user intent and plan execution."""
-        own = llm is None
-        if own:
-            llm = self.make_client()
-        try:
-            agent = self._make_agent("manager", ManagerAgent, llm)
-            products = self.get_products_state()
-            prompt = agent.build_prompt(user_message, products, conversation_history)
-            system_prompt = agent._build_system_prompt()
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ]
-            response = self.llm_chat_raw(llm, messages, agent.config)
-            return agent.parse_response(response)
-        finally:
-            if own:
-                llm.close()
-
-    def llm_chat_raw(self, llm: LLMClient, messages: list[dict[str, str]], config: dict) -> str:
-        """Call LLM without streaming (for manager)."""
-        return llm.chat(
-            messages,
-            model=config.get("model"),
-            temperature=config.get("temperature", 0.7),
-            max_tokens=config.get("max_tokens", 4096),
-            max_retry_limit=config.get("max_retry_limit", 3),
-            stream=False,
-            source="orchestrator.manager",
-        )
 
     # ------------------------------------------------------------------
     #  Individual agent runners
@@ -801,10 +737,9 @@ class Orchestrator:
             return ""
 
         import json as _json
-        from .config_loader import get_section, get_agent_config
+        from .config_loader import get_section
 
         auto_cfg = get_section(self.config, "auto_mode")
-        manager_cfg = get_agent_config(self.config, "manager")
 
         # ถ้า select_product_auto เลือก asset มาแล้ว → ใช้เลย ไม่เรียก LLM ซ้ำ
         if preselected_asset_ids:
@@ -841,10 +776,10 @@ class Orchestrator:
                     messages,
                     tools=tools,
                     tool_handlers=tool_handlers,
-                    model=manager_cfg.get("model"),
-                    temperature=manager_cfg.get("temperature", 0.7),
+                    model=auto_cfg.get("model"),
+                    temperature=auto_cfg.get("temperature", 0.7),
                     max_tokens=auto_cfg.get("max_tokens", 4096),
-                    max_retry_limit=manager_cfg.get("max_retry_limit", 3),
+                    max_retry_limit=auto_cfg.get("max_retry_limit", 3),
                     max_iterations=auto_cfg.get("max_iterations", 10),
                     source="orchestrator.select_assets",
                 )
@@ -1597,15 +1532,14 @@ class Orchestrator:
             ]
 
             # --- tool calling loop (ค่าจาก config) ---
-            manager_cfg = get_agent_config(self.config, "manager")
             response = llm.chat_with_tools(
                 messages,
                 tools=tools,
                 tool_handlers=tool_handlers,
-                model=manager_cfg.get("model"),
-                temperature=manager_cfg.get("temperature", 0.7),
+                model=auto_cfg.get("model"),
+                temperature=auto_cfg.get("temperature", 0.7),
                 max_tokens=auto_cfg.get("max_tokens", 4096),
-                max_retry_limit=manager_cfg.get("max_retry_limit", 3),
+                max_retry_limit=auto_cfg.get("max_retry_limit", 3),
                 max_iterations=auto_cfg.get("max_iterations", 10),
                 source="orchestrator.select_product_auto",
             )

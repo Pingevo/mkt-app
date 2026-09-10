@@ -48,9 +48,11 @@ def _merged_config() -> dict:
 # Config-level model resolution (raw YAML)
 # ---------------------------------------------------------------------------
 
-def test_manager_model_is_38():
+def test_auto_mode_model_is_38():
+    # The former `manager` agent config section was removed (ARCH-CLEANUP-01);
+    # auto product/asset selection now reads model/temperature/retry from auto_mode.
     cfg = _agents_yaml()
-    assert cfg.get("manager", {}).get("model") == "google/gemini-3.8-flash"
+    assert cfg.get("auto_mode", {}).get("model") == "google/gemini-3.8-flash"
 
 
 def test_defaults_model_is_38():
