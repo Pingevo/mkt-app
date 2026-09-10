@@ -1355,8 +1355,9 @@ def main() -> int:
     if args.execute:
         # Load .env via dotenv (same as m6_judge_runner.py — never prints values)
         import dotenv
+        from src.openrouter_gateway import get_api_key as _gate_get_api_key
         dotenv.load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
-        api_key = os.environ.get("OPENROUTER_API_KEY")
+        api_key = _gate_get_api_key()
         if not api_key:
             print("ERROR: OPENROUTER_API_KEY not set for paid execution.", file=sys.stderr)
             return 2

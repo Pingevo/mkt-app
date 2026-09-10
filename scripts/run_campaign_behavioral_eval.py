@@ -42,7 +42,8 @@ class DryRunLLM:
 
 def _new_llm_for_free_preflight() -> Any:
     from src.llm_client import LLMClient
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    from src.openrouter_gateway import get_api_key as _gate_get_api_key
+    api_key = _gate_get_api_key()
     if not api_key:
         raise SystemExit(
             "ERROR: OPENROUTER_API_KEY is required for --free-preflight (openrouter/free). "

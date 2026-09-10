@@ -46,8 +46,12 @@ def _stub_media_env(monkeypatch):
     """Stub API key, usage logging, and capabilities so no real network call
     is made and clamping is skipped."""
     from src import media_gen
+    from src import openrouter_gateway
     monkeypatch.setattr(media_gen, "_get_api_key", lambda: "fake-api-key")
+    monkeypatch.setattr(openrouter_gateway, "get_api_key", lambda: "fake-api-key")
     monkeypatch.setattr(media_gen, "_log_media_usage", lambda *a, **k: None)
+    # Gateway owns accounting for image+video — stub the Hub seam too
+    monkeypatch.setattr(openrouter_gateway, "record_ai_usage", lambda entry: None)
     monkeypatch.setattr(media_gen, "get_model_capabilities", lambda *a, **k: {})
 
 
@@ -1793,8 +1797,10 @@ def test_video_capability_parsing_preserves_pricing_skus(monkeypatch, tmp_path):
     """get_model_capabilities must preserve pricing_skus from the video-models
     API response so Agent 4 can reason about cost vs. duration."""
     from src import media_gen
+    from src import openrouter_gateway
 
     monkeypatch.setattr(media_gen, "_get_api_key", lambda: "fake-api-key")
+    monkeypatch.setattr(openrouter_gateway, "get_api_key", lambda: "fake-api-key")
     monkeypatch.setattr(media_gen, "_CAPABILITIES_CACHE", {})
     monkeypatch.setattr(media_gen, "_CAPABILITIES_CACHE_DIR", tmp_path)
 
@@ -1879,8 +1885,10 @@ def test_stale_cache_without_pricing_refreshes_to_include_pricing(monkeypatch, t
     not permanently block pricing metadata from reaching the Agent. The cache
     refresh path must re-fetch and include the new field."""
     from src import media_gen
+    from src import openrouter_gateway
 
     monkeypatch.setattr(media_gen, "_get_api_key", lambda: "fake-api-key")
+    monkeypatch.setattr(openrouter_gateway, "get_api_key", lambda: "fake-api-key")
     monkeypatch.setattr(media_gen, "_CAPABILITIES_CACHE", {})
     monkeypatch.setattr(media_gen, "_CAPABILITIES_CACHE_DIR", tmp_path)
 

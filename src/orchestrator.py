@@ -151,16 +151,14 @@ class Orchestrator:
 
     def make_client(self) -> LLMClient:
         defaults = self.config.get("defaults", {})
-        from .config_loader import get_env
+        from .openrouter_gateway import get_api_key as _gate_get_api_key
 
-        api_key = get_env("OPENROUTER_API_KEY")
-        if not api_key:
+        if not _gate_get_api_key():
             raise RuntimeError(
                 "OPENROUTER_API_KEY not found. "
                 "Set it in .env file or environment variable."
             )
         return LLMClient(
-            api_key=api_key,
             base_url=defaults.get("base_url", "https://openrouter.ai/api/v1"),
             default_model=defaults.get("model", "google/gemini-3.8-flash"),
             timeout=defaults.get("timeout_seconds", 120),

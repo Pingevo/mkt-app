@@ -536,19 +536,13 @@ def wizard_ui_js() -> Response:
 @app.get("/api/credits")
 def api_credits() -> JSONResponse:
     """Fetch remaining credits and usage from OpenRouter."""
-    import os
-    api_key = get_env("OPENROUTER_API_KEY", "")
-    if not api_key:
+    from src.openrouter_gateway import get_api_key as _gate_get_api_key, key_get as _gate_key_get
+    if not _gate_get_api_key():
         return JSONResponse({"error": "no API key"}, status_code=500)
     try:
-        import httpx
-        resp = httpx.get(
-            "https://openrouter.ai/api/v1/key",
-            headers={"Authorization": f"Bearer {api_key}"},
+        data = _gate_key_get(
             timeout=int(_sys_cfg().get("api_timeout_credits", 10)),
         )
-        resp.raise_for_status()
-        data = resp.json().get("data", {})
         return JSONResponse({
             "limit": data.get("limit"),
             "limit_remaining": data.get("limit_remaining"),

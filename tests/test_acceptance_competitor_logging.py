@@ -218,7 +218,8 @@ def test_acceptance_runner_logging_failure_does_not_break_run(monkeypatch):
         raise RuntimeError("hub down")
 
     try:
-        monkeypatch.setattr(llm_client, "record_ai_usage", _boom)
+        from src import openrouter_gateway
+        monkeypatch.setattr(openrouter_gateway, "record_ai_usage", _boom)
         monkeypatch.setattr(ai_usage, "_read_hub_credentials", lambda: (None, None))
         runner = _make_fixture_runner(path)
 

@@ -314,8 +314,9 @@ def test_usage_log_records_actual_model():
     content = src.read_text()
     # The chat method must use `model or self._default_model`
     assert "used_model = model or self._default_model" in content
-    # The usage log must record the actual model
-    assert "record_ai_usage" in content
+    # Accounting is delegated to the OpenRouter gate (single-gate architecture).
+    # LLMClient must call the gate's accounting seam, not record_ai_usage directly.
+    assert "_gate_account" in content
 
 
 # ---------------------------------------------------------------------------

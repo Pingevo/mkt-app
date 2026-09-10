@@ -13,10 +13,11 @@ from rich.console import Console
 from rich.live import Live
 from rich.text import Text
 
-try:
-    from .ai_usage import record_ai_usage, make_entry
-except ImportError:
-    from ai_usage import record_ai_usage, make_entry  # type: ignore
+from .openrouter_gateway import get_api_key as _gate_get_api_key
+from .openrouter_gateway import account as _gate_account
+from .openrouter_gateway import chat_post as _gate_chat_post
+from .openrouter_gateway import chat_stream_open as _gate_chat_stream_open
+from .openrouter_gateway import chat_completions_create as _gate_chat_completions_create
 
 console = Console()
 
@@ -56,23 +57,25 @@ class LLMClient:
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None = None,
         base_url: str = "https://openrouter.ai/api/v1",
         default_model: str = "anthropic/claude-sonnet-4",
         timeout: float = 120,
     ) -> None:
-        self._api_key = api_key
+        # The gate owns key access.  If api_key is not provided, the gate
+        # reads OPENROUTER_API_KEY.  If provided (tests / backward compat),
+        # it is passed through to the gate's operation functions.
+        self._api_key = api_key if api_key is not None else _gate_get_api_key()
+        if not self._api_key:
+            raise RuntimeError(
+                "OPENROUTER_API_KEY not found. "
+                "Set it in .env file or environment variable."
+            )
         self._base_url = base_url.rstrip("/")
         self._default_model = default_model
         self._timeout = timeout
-        self._client = httpx.Client(
-            base_url=self._base_url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            timeout=timeout,
-        )
+        # No persistent authenticated client — the gate owns all provider
+        # HTTP execution.  Each operation creates its own short-lived client.
         self._aborted = False
         self._attempt_lock = threading.Lock()
         self._active_attempts: list[Any] = []
@@ -190,11 +193,19 @@ class LLMClient:
             try:
                 if stream:
                     text, usage, request_id = self._chat_stream(payload)
-                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id, finish_reason=self._last_finish_reason, truncated=self.last_truncated)
+                    # The gate's ChatStreamHandle already performed accounting
+                    # on stream exit (success or error).  No separate _log_usage.
                 else:
-                    resp = self._client.post("/chat/completions", json=payload)
-                    resp.raise_for_status()
-                    data = resp.json()
+                    result = _gate_chat_post(
+                        payload,
+                        timeout=self._timeout,
+                        source=source,
+                        model=used_model,
+                        attempt=attempt,
+                        api_key=self._api_key,
+                        base_url=self._base_url,
+                    )
+                    data = result.data
                     self._last_raw_response = data
                     request_id = data.get("id")
                     usage = data.get("usage")
@@ -205,7 +216,9 @@ class LLMClient:
                         cost = usage.get("cost")
                         if cost is not None:
                             self._last_cost_usd = float(cost)
-                    self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id, finish_reason=self._last_finish_reason, truncated=self.last_truncated)
+                    # Preserve guard audit on the LLMClient for Judge runner access
+                    self._m6_last_audit = result.audit
+                    self._m6_last_raw = result.raw
                     msg = choice0["message"]
                     text = msg.get("content", "")
                     self._last_raw_annotations_count = len(msg.get("annotations") or [])
@@ -228,32 +241,31 @@ class LLMClient:
 
             except (_EmptyResponseError, httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
                 last_error = exc
-                # log error path ด้วย — empty response ใช้ status "error" เดิม + message บอกสาเหตุ
+                # The gate already performed accounting for HTTP/timeout errors.
+                # For _EmptyResponseError, the gate accounted the successful HTTP
+                # call; the retry will be a new call with its own accounting.
+                # We only extract the error message for the final RuntimeError.
+                # Preserve guard audit attached by the gate (for Judge runner).
+                if hasattr(exc, "_m6_audit"):
+                    self._m6_last_audit = exc._m6_audit
+                    self._m6_last_raw = getattr(exc, "_m6_raw", None)
                 if isinstance(exc, _EmptyResponseError):
-                    status = "error"
-                    http_status = None
-                    request_id = None
                     error_message = str(exc)
                 else:
-                    status = "timeout" if isinstance(exc, httpx.TimeoutException) else "error"
-                    http_status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-                    request_id = None
                     error_message = str(exc)
                     if isinstance(exc, httpx.HTTPStatusError):
                         try:
                             body = exc.response.json()
-                            request_id = body.get("id")
                             provider_error = body.get("error", {})
                             if isinstance(provider_error, dict):
                                 detail = provider_error.get("message", "")
                             else:
                                 detail = str(provider_error)
                             if detail:
-                                error_message = f"OpenRouter {http_status}: {detail}"
+                                error_message = f"OpenRouter {exc.response.status_code}: {detail}"
                                 last_error_message = error_message
                         except Exception:
                             pass
-                self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status=status, http_status=http_status, error_message=error_message, request_id=request_id)
                 if self._aborted:
                     raise RuntimeError("Request aborted")
                 if attempt < max_retry_limit:
@@ -261,7 +273,12 @@ class LLMClient:
                     time.sleep(wait)
                 continue
 
-        raise RuntimeError(f"LLM request failed after {max_retry_limit} retries: {last_error_message or last_error}")
+        final_err = RuntimeError(f"LLM request failed after {max_retry_limit} retries: {last_error_message or last_error}")
+        # Preserve guard audit from the last HTTP error (attached by the gate)
+        if last_error is not None and hasattr(last_error, "_m6_audit"):
+            final_err._m6_audit = last_error._m6_audit  # type: ignore[attr-defined]
+            final_err._m6_raw = getattr(last_error, "_m6_raw", None)  # type: ignore[attr-defined]
+        raise final_err
 
     @staticmethod
     def _extract_url_annotations(raw_annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -307,49 +324,23 @@ class LLMClient:
         """ยิง log ไป AI Usage Hub + เซฟ local — fire-and-forget.
 
         ห้ามให้ error ใน logging ทำลาย LLM call หลัก — wrap ด้วย try/except
-        """
-        try:
-            entry = make_entry(
-                provider="openrouter",
-                model=model,
-                operation="chat.completions",
-                source=source,
-                request_id=request_id,
-                duration_ms=duration_ms,
-                attempt=attempt,
-                status=status,
-                http_status=http_status,
-                error_message=error_message,
-                raw_usage=usage,
-                finish_reason=finish_reason,
-                truncated=truncated,
-            )
-            if usage:
-                if usage.get("prompt_tokens") is not None:
-                    entry["prompt_tokens"] = usage.get("prompt_tokens")
-                if usage.get("completion_tokens") is not None:
-                    entry["completion_tokens"] = usage.get("completion_tokens")
-                cost = usage.get("cost")
-                if cost is not None:
-                    entry["cost_usd"] = float(cost)
-            record_ai_usage(entry)
-        except Exception:
-            pass  # fire-and-forget — ไม่ให้ logging error ทำลาย main flow
 
-    def _make_attempt_client(self) -> httpx.Client:
-        """Create a per-attempt httpx client with same config as the main client.
-
-        แยก client ต่อ attempt เพื่อให้ watchdog ปิด socket ของ attempt นี้ได้โดยไม่ทำลาย
-        client ของ retry ถัดไปหรือ parallel flow อื่น — ค่าใช้จ่ายคือเปิด connection ใหม่
-        ต่อ streaming attempt ซึ่งยอมรับได้สำหรับจำนวน request ของโปรเจกต์
+        Accounting is delegated to the OpenRouter gate so all paid chat
+        operations flow through one accounting seam.
         """
-        return httpx.Client(
-            base_url=self._base_url,
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            timeout=self._timeout,
+        _gate_account(
+            model=model,
+            source=source,
+            operation="chat.completions",
+            usage=usage,
+            duration_ms=duration_ms,
+            attempt=attempt,
+            status=status,
+            http_status=http_status,
+            error_message=error_message,
+            request_id=request_id,
+            finish_reason=finish_reason,
+            truncated=truncated,
         )
 
     def _register_attempt(self, attempt_client: Any) -> None:
@@ -365,15 +356,19 @@ class LLMClient:
 
     def _stream_attempt(
         self, payload: dict[str, Any], *, attempt_timeout: float, progress_timeout: float,
+        source: str = "llm_client.chat_stream",
     ):
         """หนึ่ง stream attempt พร้อม watchdog ที่ interrupt blocked read ได้จริง.
 
-        สร้าง httpx.Client แยกสำหรับ attempt นี้ แล้วปล่อย watchdog daemon thread คอยนับเวลา
+        สร้าง ChatStreamHandle ผ่าน gate แล้วปล่อย watchdog daemon thread คอยนับเวลา
         สองแบบ: total attempt deadline และ no-model-progress deadline เมื่อถึง deadline
-        watchdog ปิด attempt client เพื่อ interrupt socket read ที่ block อยู่ใน iter_lines()
+        watchdog ปิด transport ของ handle นี้เพื่อ interrupt socket read ที่ block อยู่
 
         ค่า "model progress" รีเซ็ตเฉพาะเมื่อได้รับ content/reasoning/tool-call delta จริง
         ไม่รีเซ็ตจาก SSE comment (: OPENROUTER PROCESSING) หรือ usage-only chunk
+
+        The gate owns the authenticated client.  Accounting is done automatically
+        by the ChatStreamHandle on context exit (success or error).
 
         Yields (event_type, value) tuples:
             ("content", str) — content delta จาก model
@@ -385,8 +380,15 @@ class LLMClient:
             httpx.ReadTimeout — watchdog ปิด connection เพราะ total หรือ progress deadline
             httpx.RemoteProtocolError — mid-stream error event หรือ dropped connection
         """
-        attempt_client = self._make_attempt_client()
-        self._register_attempt(attempt_client)
+        handle = _gate_chat_stream_open(
+            payload,
+            timeout=self._timeout,
+            source=source,
+            model=payload.get("model", self._default_model),
+            api_key=self._api_key,
+            base_url=self._base_url,
+        )
+        self._register_attempt(handle)
 
         done_event = threading.Event()
         state = _WatchdogState()
@@ -404,7 +406,7 @@ class LLMClient:
                     break
             if state.timeout_reason:
                 try:
-                    attempt_client.close()
+                    handle.close_transport()
                 except Exception:
                     pass
             done_event.set()
@@ -413,12 +415,13 @@ class LLMClient:
         watchdog_thread.start()
 
         try:
-            with attempt_client.stream("POST", "/chat/completions", json=payload) as resp:
+            with handle:
+                resp = handle.response
                 resp.raise_for_status()
                 saw_done = False
                 saw_finish_reason = False
 
-                for line in resp.iter_lines():
+                for line in handle.iter_lines():
                     if not line:
                         continue
                     if not line.startswith("data: "):
@@ -439,12 +442,14 @@ class LLMClient:
                         raise httpx.RemoteProtocolError(f"OpenRouter stream error: {msg}")
 
                     if chunk.get("id"):
+                        handle.actual_request_id = chunk["id"]
                         yield ("request_id", chunk["id"])
 
                     if chunk.get("model"):
                         yield ("model", chunk["model"])
 
                     if chunk.get("usage"):
+                        handle.usage = chunk["usage"]
                         yield ("usage", chunk["usage"])
 
                     choices = chunk.get("choices", [])
@@ -459,6 +464,7 @@ class LLMClient:
                             raise httpx.RemoteProtocolError(
                                 "stream terminated with finish_reason=error"
                             )
+                        handle.finish_reason = finish_reason
                         yield ("finish", finish_reason)
 
                     delta = choice.get("delta", {})
@@ -482,10 +488,10 @@ class LLMClient:
         finally:
             done_event.set()
             try:
-                attempt_client.close()
+                handle.close_transport()
             except Exception:
                 pass
-            self._unregister_attempt(attempt_client)
+            self._unregister_attempt(handle)
             watchdog_thread.join(timeout=5)
 
     def _chat_stream(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None, str | None]:
@@ -588,6 +594,7 @@ class LLMClient:
                 yielded_any = False
                 for event_type, value in self._stream_attempt(
                     payload, attempt_timeout=attempt_timeout, progress_timeout=progress_timeout,
+                    source=source,
                 ):
                     if event_type == "content":
                         yielded_any = True
@@ -598,31 +605,16 @@ class LLMClient:
                         request_id = value
                     elif event_type == "finish":
                         self._last_finish_reason = value
-                self._log_usage(used_model, source, usage, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, request_id=request_id, finish_reason=self._last_finish_reason, truncated=self.last_truncated)
+                # The gate's ChatStreamHandle already performed accounting.
                 if not yielded_any:
                     raise _EmptyResponseError("empty response (no content from stream)")
                 return
             except (_EmptyResponseError, httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError) as exc:
                 last_error = exc
                 # หลัง yield content แล้ว = committed — ห้าม retry เพราะจะส่งข้อความซ้ำ
+                # The gate already accounted the error on stream exit.
                 if yielded_any:
-                    status = "timeout" if isinstance(exc, httpx.TimeoutException) else "error"
-                    self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status=status, error_message=str(exc), request_id=request_id)
                     raise
-                if isinstance(exc, _EmptyResponseError):
-                    status = "error"
-                    http_status = None
-                    request_id = None
-                else:
-                    status = "timeout" if isinstance(exc, httpx.TimeoutException) else "error"
-                    http_status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-                    request_id = None
-                    if isinstance(exc, httpx.HTTPStatusError):
-                        try:
-                            request_id = exc.response.json().get("id")
-                        except Exception:
-                            pass
-                self._log_usage(used_model, source, None, duration_ms=int((time.time() - t0) * 1000), attempt=attempt, status=status, http_status=http_status, error_message=str(exc), request_id=request_id)
                 if self._aborted:
                     raise RuntimeError("Request aborted")
                 if attempt < max_retry_limit:
@@ -639,7 +631,7 @@ class LLMClient:
                 except Exception:
                     pass
             self._active_attempts.clear()
-        self._client.close()
+        # No persistent client to close — the gate owns all provider clients.
 
     def chat_with_tools(
         self,
@@ -679,13 +671,6 @@ class LLMClient:
         Returns:
             ข้อความตอบสุดท้ายของ LLM (หลังใช้ tool จนจบ)
         """
-        from openai import OpenAI
-
-        client = OpenAI(
-            base_url=self._base_url,
-            api_key=self._api_key,
-            timeout=self._timeout,
-        )
         used_model = model or self._default_model
         # Reset per-call metadata so a failed or skipped call cannot leak stale data.
         self._last_finish_reason = None
@@ -700,12 +685,17 @@ class LLMClient:
                 pre_model_hook(iteration)
             t0 = time.time()
             try:
-                response = client.chat.completions.create(
+                response = _gate_chat_completions_create(
                     model=used_model,
                     messages=convo,
                     tools=tools,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    timeout=self._timeout,
+                    source=source,
+                    attempt=iteration + 1,
+                    api_key=self._api_key,
+                    base_url=self._base_url,
                 )
                 msg = response.choices[0].message
                 usage = response.usage
@@ -720,9 +710,6 @@ class LLMClient:
                     if cost is not None:
                         turn_cost = float(cost)
                         self._last_cost_usd = turn_cost
-                self._log_usage(used_model, source, usage.model_dump() if usage else None,
-                                duration_ms=int((time.time() - t0) * 1000), attempt=iteration + 1, request_id=request_id,
-                                finish_reason=self._last_finish_reason, truncated=self.last_truncated)
 
                 # Post-turn hook: commit per-turn actual spend immediately
                 if post_model_hook is not None:
@@ -775,12 +762,7 @@ class LLMClient:
 
             except Exception as exc:
                 last_error = exc
-                http_status = getattr(exc, "status_code", None)
-                status = "timeout" if "timeout" in type(exc).__name__.lower() else "error"
-                self._log_usage(used_model, source, None,
-                                duration_ms=int((time.time() - t0) * 1000),
-                                attempt=iteration + 1, status=status, http_status=http_status,
-                                error_message=str(exc))
+                # The gate already performed accounting for the error.
                 if iteration < max_retry_limit:
                     time.sleep(2 ** (iteration + 1))
                     continue
@@ -798,13 +780,50 @@ class LLMClient:
                 except Exception:
                     pass
             self._active_attempts.clear()
-        try:
-            self._client.close()
-        except Exception:
-            pass
+        # No persistent client to close — the gate owns all provider clients.
 
     def __enter__(self) -> "LLMClient":
         return self
 
     def __exit__(self, *args: Any) -> None:
         self.close()
+
+
+# ============================================================
+# Canonical embedding seam — OpenRouter /embeddings
+# (transport + accounting delegated to src.openrouter_gateway)
+# ============================================================
+
+
+def generate_embedding(
+    text: str,
+    *,
+    model: str = "openai/text-embedding-3-small",
+    timeout: float = 30,
+    source: str = "embedding.generate",
+) -> list[float] | None:
+    """Generate embedding via OpenRouter /api/v1/embeddings with accounting.
+
+    Canonical embedding seam.  Credential access, authenticated transport,
+    and accounting are owned by the OpenRouter gate's embeddings_post
+    operation — this function owns none of those responsibilities directly.
+
+    Returns embedding vector or None on error (graceful degradation).
+    """
+    # Preserve prior behavior: no key → silent None, no Hub event.
+    if not _gate_get_api_key():
+        return None
+    try:
+        from .openrouter_gateway import embeddings_post as _gate_embeddings_post
+    except ImportError:
+        from openrouter_gateway import embeddings_post as _gate_embeddings_post  # type: ignore
+    try:
+        data = _gate_embeddings_post(
+            {"model": model, "input": text[:8000]},
+            timeout=timeout,
+            source=source,
+            model=model,
+        )
+        return data["data"][0]["embedding"]
+    except Exception:
+        return None

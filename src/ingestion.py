@@ -423,9 +423,9 @@ def _generate_product_profile(product_id: str, llm=None) -> None:
 
 def _make_llm() -> LLMClient | None:
     """สร้าง LLM client สำหรับ ingestion (ใช้สำหรับ image/video/field extraction)."""
-    from .config_loader import get_env, load_config, get_section
-    api_key = get_env("OPENROUTER_API_KEY")
-    if not api_key:
+    from .config_loader import load_config, get_section
+    from .openrouter_gateway import get_api_key as _gate_get_api_key
+    if not _gate_get_api_key():
         return None
     try:
         cfg = load_config()
@@ -433,7 +433,6 @@ def _make_llm() -> LLMClient | None:
     except Exception:
         ing_cfg = {}
     return LLMClient(
-        api_key=api_key,
         base_url="https://openrouter.ai/api/v1",
         default_model=ing_cfg.get("model", "google/gemini-3.8-flash"),
         timeout=ing_cfg.get("timeout_seconds", 180),

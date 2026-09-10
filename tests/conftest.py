@@ -39,3 +39,20 @@ def _isolate_ai_usage_hub(monkeypatch, tmp_path):
 
     log_path = tmp_path / "llm_usage.jsonl"
     monkeypatch.setattr("src.ai_usage.USAGE_LOG_PATH", log_path)
+
+
+@pytest.fixture(autouse=True)
+def _restore_gate_make_client(monkeypatch):
+    """Restore openrouter_gateway._make_client and record_ai_usage after each test.
+
+    Some test helpers (e.g. in test_llm_client.py) directly assign to
+    openrouter_gateway._make_client to inject mock clients.  This fixture
+    ensures the original is restored after each test so patches don't leak
+    into subsequent tests.
+    """
+    from src import openrouter_gateway
+    original_make_client = openrouter_gateway._make_client
+    original_record = openrouter_gateway.record_ai_usage
+    yield
+    openrouter_gateway._make_client = original_make_client
+    openrouter_gateway.record_ai_usage = original_record

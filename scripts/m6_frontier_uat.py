@@ -34,6 +34,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
 
 from src.llm_client import LLMClient
+from src.openrouter_gateway import get_api_key as _gate_get_api_key
 from src.orchestrator import Orchestrator
 from src import product_db
 from src.run_context import build_multimodal_content
@@ -497,7 +498,7 @@ def _run_frontier_scenario(scenario: dict, guard: M6FrontierGuard, dry_run: bool
             evidence={"messages": messages, "image_paths": image_paths, "tools": tools},
         )
 
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    api_key = _gate_get_api_key()
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY not set")
 
@@ -814,7 +815,7 @@ def _write_evidence(
 
 
 def _preflight_check() -> None:
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    api_key = _gate_get_api_key()
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY not set")
     # Ensure product data exists

@@ -30,6 +30,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from src import product_db
+from src.llm_client import LLMClient
+from src.openrouter_gateway import get_api_key as _gate_get_api_key
 from src.run_context import build_multimodal_content
 
 JUDGE_MODEL = "openai/gpt-5.6-sol"
@@ -507,112 +509,133 @@ def _call_judge_raw(
     api_key: str,
     budget_guard_fn: Any | None = None,
 ) -> dict[str, Any]:
-    """Make the paid API call and return the provider response + audit.
+    """Make the paid API call via the canonical LLMClient and return audit.
 
-    This function ONLY makes the HTTP call and extracts audit fields via
-    best-effort. It does NOT call raise_for_status(), parse the content,
-    or validate the schema — all of that happens in run_judge AFTER the
-    audit is captured and persisted, so a post-call failure can never
-    discard a charged response.
+    Routes through LLMClient.chat() so AI Usage Hub accounting is
+    automatic (accounting-by-construction).  The M6JudgeGuard still
+    patches httpx.Client.post at the class level, so it intercepts
+    LLMClient's internal call for budget enforcement and audit extraction.
 
-    If ``budget_guard_fn`` is provided, it is called BEFORE the HTTP
-    request.  It may raise (e.g. BudgetExceededError) to prevent the
-    paid call.  This is the real Judge budget interception seam.
+    This function ONLY makes the call and extracts audit fields via
+    best-effort. It does NOT validate the schema — all of that happens
+    in run_judge AFTER the audit is captured and persisted, so a
+    post-call failure can never discard a charged response.
+
+    If ``budget_guard_fn`` is provided, it is called BEFORE the paid
+    call.  It may raise (e.g. BudgetExceededError) to prevent the call.
+    This is the real Judge budget interception seam.
     """
     # Budget preflight — raises if denied, preventing the paid call
     if budget_guard_fn is not None:
         budget_guard_fn()
 
-    client = httpx.Client(base_url="https://openrouter.ai/api/v1")
-    payload = {
-        "model": JUDGE_MODEL,
-        "messages": messages,
-        "max_tokens": MAX_TOKENS,
-        "temperature": 0.3,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://mktapp.local",
-        "X-Title": "M6 Judge",
-    }
-    # Make the call — do NOT call raise_for_status() here
-    r = client.post("/chat/completions", json=payload, headers=headers, timeout=180)
+    llm = LLMClient(api_key=api_key, timeout=180)
+    text: str | None = None
+    exc: Exception | None = None
+    try:
+        text = llm.chat(
+            messages,
+            model=JUDGE_MODEL,
+            max_tokens=MAX_TOKENS,
+            temperature=0.3,
+            response_format={"type": "json_object"},
+            max_retry_limit=1,
+            source="m6_judge",
+        )
+    except Exception as e:
+        # LLMClient already logged the error to AI Usage Hub.
+        exc = e
+    finally:
+        llm.close()
 
-    # Get the best-effort audit from the guard (stored on client)
-    audit = getattr(client, "_m6_last_audit", None) or {}
-    raw = getattr(client, "_m6_last_raw", {}) or {}
+    # The guard stores audit on the gate's internal httpx.Client BEFORE
+    # raise_for_status, so it is available even when LLMClient raised.  The
+    # gate extracts the audit and returns it via ChatPostResult; LLMClient
+    # stores it as self._m6_last_audit.  If the guard raised pre-call (no
+    # audit stored), re-raise so run_judge knows no call was made
+    # (uncharged).  If the guard made the call (audit stored), the
+    # response is charged — preserve it.
+    guard_audit = getattr(llm, "_m6_last_audit", None) or {}
+    guard_raw = getattr(llm, "_m6_last_raw", None) or {}
 
-    # If guard wasn't active, build audit from the response directly
-    if not audit:
-        # Best-effort extraction without the guard
-        audit = {
-            "data": None,
-            "raw_text": None,
-            "model": "unknown",
-            "request_id": "unknown",
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "cost": None,
-            "http_status": r.status_code,
-            "extraction_errors": [],
-            "pre_call_reserve": 0.0,  # no guard, no reserve
-        }
-        try:
-            audit["raw_text"] = r.text
-        except Exception:
-            pass
-        try:
-            data = r.json()
-            audit["data"] = data
-            if isinstance(data, dict):
-                usage = data.get("usage") or {}
-                audit["model"] = data.get("model", "unknown") or "unknown"
-                audit["request_id"] = data.get("id", "unknown") or "unknown"
-                audit["prompt_tokens"] = (usage or {}).get("prompt_tokens", 0) or 0
-                audit["completion_tokens"] = (usage or {}).get("completion_tokens", 0) or 0
-                cost = data.get("cost") or (usage or {}).get("cost")
-                if cost is not None:
-                    audit["cost"] = round(float(cost), 6)
-        except Exception as e:
-            audit["extraction_errors"].append(f"json_parse: {e}")
+    # Also check exception-attached audit (gate attaches _m6_audit to errors)
+    if not guard_audit and exc is not None:
+        guard_audit = getattr(exc, "_m6_audit", None) or {}
+        guard_raw = getattr(exc, "_m6_raw", None) or {}
 
-    # Compute cost with correct cost_source (same logic as guard)
-    cost = audit.get("cost")
-    cost_source = audit.get("cost_source")
-    pre_call_reserve = audit.get("pre_call_reserve", 0.0)
+    if exc is not None and not guard_audit:
+        # Pre-call rejection (guard raised before any HTTP call) — propagate
+        raise exc
 
-    if cost_source is None:
+    if guard_audit:
+        # Guard was active — use its audit directly
+        cost = guard_audit.get("cost")
+        cost_source = guard_audit.get("cost_source")
+        pre_call_reserve = guard_audit.get("pre_call_reserve", 0.0)
+        model = guard_audit.get("model", "unknown")
+        request_id = guard_audit.get("request_id", "unknown")
+        prompt_tokens = guard_audit.get("prompt_tokens", 0)
+        completion_tokens = guard_audit.get("completion_tokens", 0)
+        http_status = guard_audit.get("http_status")
+        extraction_errors = guard_audit.get("extraction_errors", [])
+        if exc is not None:
+            extraction_errors = list(extraction_errors) + [str(exc)]
+        raw_provider_response = guard_raw if isinstance(guard_raw, dict) else {}
+        raw_text = guard_audit.get("raw_text") if exc is not None else text
+    else:
+        # Guard was not active — extract from LLMClient's per-call metadata
+        raw = llm._last_raw_response or {}
+        usage = raw.get("usage") or {}
+        model = raw.get("model", "unknown") or "unknown"
+        request_id = raw.get("id", "unknown") or "unknown"
+        prompt_tokens = usage.get("prompt_tokens", 0) or 0
+        completion_tokens = usage.get("completion_tokens", 0) or 0
+        pre_call_reserve = 0.0
+        http_status = 200 if exc is None else None
+        extraction_errors = [str(exc)] if exc is not None else []
+        raw_provider_response = raw
+        raw_text = text
+
+        cost = llm._last_cost_usd
+        if cost is None:
+            cost = raw.get("cost")
+            if cost is not None:
+                cost = round(float(cost), 6)
+
         if cost is not None:
             cost_source = "provider_reported"
+        elif prompt_tokens > 0 or completion_tokens > 0:
+            cost = round(prompt_tokens * PROMPT_PRICE + completion_tokens * COMPLETION_PRICE, 6)
+            cost_source = "token_computed"
         else:
-            pt = audit.get("prompt_tokens", 0) or 0
-            ct = audit.get("completion_tokens", 0) or 0
-            if pt > 0 or ct > 0:
-                cost = round(pt * PROMPT_PRICE + ct * COMPLETION_PRICE, 6)
-                cost_source = "token_computed"
-            else:
-                cost = pre_call_reserve
-                cost_source = "pre_call_reserve"
-
-    # The HTTP response object (for raise_for_status in run_judge)
-    audit["http_response"] = r
+            cost = pre_call_reserve
+            cost_source = "pre_call_reserve"
 
     return {
-        "raw_provider_response": audit.get("data") or raw or {},
-        "raw_text": audit.get("raw_text"),
-        "model": audit.get("model", "unknown"),
-        "request_id": audit.get("request_id", "unknown"),
-        "prompt_tokens": audit.get("prompt_tokens", 0),
-        "completion_tokens": audit.get("completion_tokens", 0),
+        "raw_provider_response": raw_provider_response,
+        "raw_text": raw_text,
+        "model": model,
+        "request_id": request_id,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
         "cost": cost,
         "cost_source": cost_source,
         "pre_call_reserve": pre_call_reserve,
-        "http_status": audit.get("http_status"),
-        "extraction_errors": audit.get("extraction_errors", []),
-        "http_response": r,
-        "audit": audit,
+        "http_status": http_status,
+        "extraction_errors": extraction_errors,
+        "http_response": None,  # LLMClient already called raise_for_status
+        "audit": guard_audit or {
+            "data": raw_provider_response,
+            "model": model,
+            "request_id": request_id,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cost": cost,
+            "cost_source": cost_source,
+            "pre_call_reserve": pre_call_reserve,
+            "http_status": http_status,
+            "extraction_errors": extraction_errors,
+        },
     }
 
 
@@ -1380,7 +1403,7 @@ def main() -> int:
     args = parser.parse_args()
 
     dotenv.load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    api_key = _gate_get_api_key()
     if not api_key and not args.no_judge:
         print("OPENROUTER_API_KEY not set", file=sys.stderr)
         return 1

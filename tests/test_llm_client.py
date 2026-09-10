@@ -22,11 +22,43 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def _make_client():
-    """Build LLMClient without touching network — httpx.Client is mocked."""
+    """Build LLMClient without touching network — gate operations are mocked."""
     from src.llm_client import LLMClient
+    from src import openrouter_gateway
+    # Prevent real HTTP and Hub calls during tests
+    openrouter_gateway.record_ai_usage = lambda entry: None
     client = LLMClient(api_key="test-key", default_model="test-model")
-    client._client = MagicMock()
     return client
+
+
+def _patch_gate_make_client(client, clients):
+    """Patch openrouter_gateway._make_client to return the given clients in order.
+
+    Returns the mock so tests can inspect call_count.
+    """
+    from src import openrouter_gateway
+    mock = MagicMock(side_effect=list(clients))
+    client._gate_make_client_mock = mock
+    openrouter_gateway._make_client = mock
+    return mock
+
+
+def _make_post_client(responses):
+    """Create a mock httpx.Client whose .post() returns the given responses in order."""
+    c = MagicMock()
+    c.post = MagicMock(side_effect=list(responses))
+    c.close = MagicMock()
+    return c
+
+
+def _patch_nonstream_responses(client, responses):
+    """Patch _make_client to return one mock client per response (for non-stream retries).
+
+    Each chat_post call creates its own client via _make_client, so we need
+    one mock client per retry attempt, each with a single .post() response.
+    """
+    clients = [_make_post_client([r]) for r in responses]
+    return _patch_gate_make_client(client, clients)
 
 
 def _stream_lines(chunks):
@@ -124,12 +156,14 @@ class _AttemptClient:
 
 
 def _patch_attempt_clients(client, attempt_clients):
-    """Patch ``_make_attempt_client`` to return the given clients in order.
+    """Patch openrouter_gateway._make_client to return the given clients in order.
 
     Returns the list of clients so tests can inspect them (e.g. assert close was called).
     """
+    from src import openrouter_gateway
     clients = list(attempt_clients)
-    client._make_attempt_client = MagicMock(side_effect=clients)
+    client._gate_make_client_mock = MagicMock(side_effect=clients)
+    openrouter_gateway._make_client = client._gate_make_client_mock
     return clients
 
 
@@ -160,7 +194,7 @@ def test_empty_stream_content_retries_then_returns_nonempty():
         )
 
     assert result == "hello world"
-    assert client._make_attempt_client.call_count == 2
+    assert client._gate_make_client_mock.call_count == 2
 
 
 def test_empty_stream_exhausts_retries_then_raises():
@@ -180,7 +214,7 @@ def test_empty_stream_exhausts_retries_then_raises():
             )
 
     assert "empty" in str(exc.value).lower() or "no content" in str(exc.value).lower()
-    assert client._make_attempt_client.call_count == 3
+    assert client._gate_make_client_mock.call_count == 3
 
 
 def test_empty_nonstream_content_retries_then_returns_nonempty():
@@ -203,7 +237,7 @@ def test_empty_nonstream_content_retries_then_returns_nonempty():
         "choices": [{"message": {"content": "real output"}}],
     })
 
-    client._client.post = MagicMock(side_effect=[empty_resp, good_resp])
+    _patch_nonstream_responses(client, [empty_resp, good_resp])
 
     with patch('time.sleep'):
         result = client.chat(
@@ -213,7 +247,7 @@ def test_empty_nonstream_content_retries_then_returns_nonempty():
         )
 
     assert result == "real output"
-    assert client._client.post.call_count == 2
+    assert client._gate_make_client_mock.call_count == 2
 
 
 def test_empty_nonstream_exhausts_retries_then_raises():
@@ -228,7 +262,7 @@ def test_empty_nonstream_exhausts_retries_then_raises():
         "choices": [{"message": {"content": ""}}],
     })
 
-    client._client.post = MagicMock(side_effect=[empty_resp] * 3)
+    _patch_nonstream_responses(client, [empty_resp] * 3)
 
     with patch('time.sleep'):
         with pytest.raises(RuntimeError) as exc:
@@ -239,7 +273,7 @@ def test_empty_nonstream_exhausts_retries_then_raises():
             )
 
     assert "empty" in str(exc.value).lower() or "no content" in str(exc.value).lower()
-    assert client._client.post.call_count == 3
+    assert client._gate_make_client_mock.call_count == 3
 
 
 def test_empty_response_with_annotations_still_retries():
@@ -262,7 +296,7 @@ def test_empty_response_with_annotations_still_retries():
         "choices": [{"message": {"content": "real output", "annotations": []}}],
     })
 
-    client._client.post = MagicMock(side_effect=[empty_resp, good_resp])
+    _patch_nonstream_responses(client, [empty_resp, good_resp])
 
     with patch('time.sleep'):
         text, annotations = client.chat(
@@ -273,7 +307,7 @@ def test_empty_response_with_annotations_still_retries():
 
     assert text == "real output"
     assert annotations == []
-    assert client._client.post.call_count == 2
+    assert client._gate_make_client_mock.call_count == 2
 
 
 def test_nonempty_response_does_not_retry():
@@ -288,7 +322,7 @@ def test_nonempty_response_does_not_retry():
         "choices": [{"message": {"content": "ok"}}],
     })
 
-    client._client.post = MagicMock(side_effect=[good_resp])
+    _patch_nonstream_responses(client, [good_resp])
 
     result = client.chat(
         [{"role": "user", "content": "hi"}],
@@ -297,7 +331,7 @@ def test_nonempty_response_does_not_retry():
     )
 
     assert result == "ok"
-    assert client._client.post.call_count == 1
+    assert client._gate_make_client_mock.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +357,7 @@ def test_blocked_stream_is_closed_at_progress_deadline_and_retried():
     assert result == "hello after retry"
     # First attempt client was closed by watchdog
     assert clients[0].close.called, "watchdog should have closed the blocked attempt client"
-    assert client._make_attempt_client.call_count == 2
+    assert client._gate_make_client_mock.call_count == 2
 
 
 def test_keepalive_does_not_reset_progress_deadline():
@@ -344,7 +378,7 @@ def test_keepalive_does_not_reset_progress_deadline():
         )
 
     assert result == "ok"
-    assert client._make_attempt_client.call_count == 2
+    assert client._gate_make_client_mock.call_count == 2
 
 
 def test_model_content_resets_progress_deadline():
@@ -368,7 +402,7 @@ def test_model_content_resets_progress_deadline():
         )
 
     assert result == "part1"
-    assert client._make_attempt_client.call_count == 1
+    assert client._gate_make_client_mock.call_count == 1
 
 
 def test_total_deadline_closes_continuously_progressing_stream():
@@ -393,7 +427,7 @@ def test_total_deadline_closes_continuously_progressing_stream():
         )
 
     # Should have retried because total deadline closed the first attempt
-    assert client._make_attempt_client.call_count == 2
+    assert client._gate_make_client_mock.call_count == 2
 
 
 def test_midstream_error_event_retries_buffered_chat():
@@ -421,7 +455,7 @@ def test_midstream_error_event_retries_buffered_chat():
 
     # _chat_stream buffers, so partial content from first attempt is discarded
     assert result == "full response"
-    assert client._make_attempt_client.call_count == 2
+    assert client._gate_make_client_mock.call_count == 2
 
 
 def test_eof_without_done_or_finish_reason_retries():
@@ -445,7 +479,7 @@ def test_eof_without_done_or_finish_reason_retries():
         )
 
     assert result == "complete response"
-    assert client._make_attempt_client.call_count == 2
+    assert client._gate_make_client_mock.call_count == 2
 
 
 def test_finish_reason_allows_eof_without_done():
@@ -469,7 +503,7 @@ def test_finish_reason_allows_eof_without_done():
         )
 
     assert result == "hello"
-    assert client._make_attempt_client.call_count == 1
+    assert client._gate_make_client_mock.call_count == 1
 
 
 def test_empty_choices_usage_chunk_is_preserved():
@@ -497,7 +531,7 @@ def test_empty_choices_usage_chunk_is_preserved():
         )
 
     assert result == "text"
-    assert client._make_attempt_client.call_count == 1
+    assert client._gate_make_client_mock.call_count == 1
 
 
 def test_yield_stream_does_not_retry_after_partial_content():
@@ -528,7 +562,7 @@ def test_yield_stream_does_not_retry_after_partial_content():
     # Only the partial content from first attempt should be yielded
     assert chunks == ["partial"]
     # Second attempt must NOT have been started
-    assert client._make_attempt_client.call_count == 1
+    assert client._gate_make_client_mock.call_count == 1
 
 
 def test_abort_closes_active_attempt_client():
@@ -567,11 +601,13 @@ def test_abort_closes_active_attempt_client():
 def test_payload_includes_provider_when_given():
     """provider=require_parameters must appear in the OpenRouter payload."""
     client = _make_client()
-    client._client.post.return_value.json.return_value = {
+    post_client = _make_post_client([MagicMock()])
+    post_client.post.return_value.json.return_value = {
         "id": "req-1",
         "usage": {"total_tokens": 10},
         "choices": [{"message": {"content": "{}"}}],
     }
+    _patch_gate_make_client(client, [post_client])
 
     client.chat(
         [{"role": "user", "content": "hi"}],
@@ -580,7 +616,7 @@ def test_payload_includes_provider_when_given():
         stream=False,
     )
 
-    payload = client._client.post.call_args.kwargs["json"]
+    payload = post_client.post.call_args.kwargs["json"]
     assert payload["provider"] == {"require_parameters": True}
     assert payload["response_format"] == {"type": "json_schema"}
 
@@ -588,18 +624,20 @@ def test_payload_includes_provider_when_given():
 def test_payload_omits_provider_when_not_given():
     """No provider field is sent unless explicitly requested."""
     client = _make_client()
-    client._client.post.return_value.json.return_value = {
+    post_client = _make_post_client([MagicMock()])
+    post_client.post.return_value.json.return_value = {
         "id": "req-2",
         "usage": {"total_tokens": 10},
         "choices": [{"message": {"content": "hi"}}],
     }
+    _patch_gate_make_client(client, [post_client])
 
     client.chat(
         [{"role": "user", "content": "hi"}],
         stream=False,
     )
 
-    payload = client._client.post.call_args.kwargs["json"]
+    payload = post_client.post.call_args.kwargs["json"]
     assert "provider" not in payload
 
 
@@ -610,13 +648,15 @@ def test_routing_failure_422_is_clear_and_not_repaired():
     client = _make_client()
     req = Request("POST", "http://test")
     resp = Response(422, json={"error": {"message": "No provider available"}}, request=req)
-    client._client.post.side_effect = HTTPStatusError("routing failure", request=req, response=resp)
+    post_client = _make_post_client([])
+    post_client.post.side_effect = HTTPStatusError("routing failure", request=req, response=resp)
+    _patch_gate_make_client(client, [post_client])
 
     with pytest.raises(RuntimeError, match="No provider available"):
         client.chat([{"role": "user", "content": "hi"}], max_retry_limit=1, stream=False)
 
     # Only one attempt; no repair/output fabrication.
-    assert client._client.post.call_count == 1
+    assert client._gate_make_client_mock.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -633,7 +673,7 @@ def test_nonstream_finish_reason_length_marks_truncated():
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
         "choices": [{"message": {"content": "partial output"}, "finish_reason": "length"}],
     })
-    client._client.post = MagicMock(side_effect=[resp])
+    _patch_nonstream_responses(client, [resp])
 
     result = client.chat(
         [{"role": "user", "content": "hi"}],
@@ -656,7 +696,7 @@ def test_nonstream_finish_reason_stop_not_truncated():
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
         "choices": [{"message": {"content": "complete output"}, "finish_reason": "stop"}],
     })
-    client._client.post = MagicMock(side_effect=[resp])
+    _patch_nonstream_responses(client, [resp])
 
     result = client.chat(
         [{"role": "user", "content": "hi"}],
@@ -679,7 +719,7 @@ def test_nonstream_no_finish_reason_means_none():
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
         "choices": [{"message": {"content": "output"}}],
     })
-    client._client.post = MagicMock(side_effect=[resp])
+    _patch_nonstream_responses(client, [resp])
 
     client.chat(
         [{"role": "user", "content": "hi"}],
@@ -755,7 +795,7 @@ def test_finish_reason_reset_between_calls():
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
         "choices": [{"message": {"content": "no finish reason"}}],
     })
-    client._client.post = MagicMock(side_effect=[truncated_resp, no_finish_resp])
+    _patch_nonstream_responses(client, [truncated_resp, no_finish_resp])
 
     client.chat([{"role": "user", "content": "first"}], max_retry_limit=1, stream=False)
     assert client.last_finish_reason == "length"
@@ -775,7 +815,7 @@ def test_annotations_path_preserves_finish_reason():
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
         "choices": [{"message": {"content": "text", "annotations": []}, "finish_reason": "length"}],
     })
-    client._client.post = MagicMock(side_effect=[resp])
+    _patch_nonstream_responses(client, [resp])
 
     text, annotations = client.chat(
         [{"role": "user", "content": "hi"}],

@@ -20,9 +20,23 @@ import httpx
 import yaml
 
 try:
-    from .ai_usage import record_ai_usage, make_entry
+    from .openrouter_gateway import (
+        get_api_key as _gate_get_api_key,
+        account as _gate_account,
+        image_post as _gate_image_post,
+        video_generate as _gate_video_generate,
+        video_download_artifact as _gate_video_download,
+        capability_get as _gate_capability_get,
+    )
 except ImportError:
-    from ai_usage import record_ai_usage, make_entry  # type: ignore
+    from openrouter_gateway import (  # type: ignore
+        get_api_key as _gate_get_api_key,
+        account as _gate_account,
+        image_post as _gate_image_post,
+        video_generate as _gate_video_generate,
+        video_download_artifact as _gate_video_download,
+        capability_get as _gate_capability_get,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +153,8 @@ def _load_media_config() -> dict[str, Any]:
 
 
 def _get_api_key() -> str:
-    key = get_env("OPENROUTER_API_KEY", "")
+    """Credential access is owned by the OpenRouter gate."""
+    key = _gate_get_api_key()
     if not key:
         raise RuntimeError("OPENROUTER_API_KEY not found — ตั้งใน .env")
     return key
@@ -192,20 +207,18 @@ def get_model_capabilities(model_id: str, kind: str = "video") -> dict[str, Any]
             except Exception:
                 pass  # ไฟล์เสีย → ดึงใหม่
 
-    # 3. ดึงจาก API
-    api_key = _get_api_key()
+    # 3. ดึงจาก API — transport owned by the gate
     endpoint = (
         "https://openrouter.ai/api/v1/videos/models"
         if kind == "video"
         else "https://openrouter.ai/api/v1/images/models"
     )
-    headers = {"Authorization": f"Bearer {api_key}"}
 
     try:
-        with httpx.Client(timeout=int(_system_cfg().get("api_timeout_capabilities", 30))) as client:
-            resp = client.get(endpoint, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+        data = _gate_capability_get(
+            endpoint,
+            timeout=int(_system_cfg().get("api_timeout_capabilities", 30)),
+        )
     except Exception:
         # ดึงไม่ได้ → คืน {} (caller ใช้ default)
         return {}
@@ -468,7 +481,6 @@ def generate_image(
         aspect_ratio = mcfg.get("image_aspect_ratio", "16:9")
     if timeout is None:
         timeout = float(mcfg.get("image_timeout_seconds", 180))
-    api_key = _get_api_key()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -508,12 +520,8 @@ def generate_image(
         if refs:
             payload["input_references"] = refs
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
     t0 = time.time()
+    units = {"images_generated": n}
     try:
         # Finer-grained timeouts: connect fast (30s) so connection issues are
         # detected quickly, but allow the full read timeout for generation.
@@ -524,22 +532,12 @@ def generate_image(
             write=float(mcfg.get("image_connect_timeout_seconds", 30)),
             pool=float(mcfg.get("image_connect_timeout_seconds", 30)),
         )
-        with httpx.Client(timeout=httpx_timeout) as client:
-            resp = client.post(
-                "https://openrouter.ai/api/v1/images",
-                headers=headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-        # log usage ไป AI Usage Hub
-        _log_media_usage(
-            "image", model, data.get("usage"),
-            request_id=data.get("id"),
-            duration_ms=int((time.time() - t0) * 1000),
-            attempt=attempt,
-            units={"images_generated": n},
+        # The gateway owns accounting (success + all error paths).
+        # No caller-side _log_media_usage — the gate already accounted.
+        data = _gate_image_post(
+            payload, timeout=httpx_timeout,
+            model=model, source="media_gen.generate_image",
+            attempt=attempt, units=units,
         )
 
         images = data.get("data", [])
@@ -572,17 +570,14 @@ def generate_image(
             "warnings": warnings,
         }
     except httpx.HTTPStatusError as e:
-        _log_media_usage("image", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
-                         http_status=e.response.status_code, attempt=attempt, units={"images_generated": n},
-                         error_message=str(e))
+        # Gateway already accounted this error.
         _err_len = int(_system_cfg().get("error_preview_length", 200))
         et, ec = _parse_error_response(e.response.text)
         return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:_err_len]}",
                 "error_type": et, "error_code": ec, "http_status": e.response.status_code,
                 "model": model, "prompt": prompt, "warnings": warnings}
     except Exception as e:
-        _log_media_usage("image", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
-                         attempt=attempt, units={"images_generated": n}, error_message=str(e))
+        # Gateway already accounted this error.
         return {"ok": False, "error": str(e), "model": model, "prompt": prompt, "warnings": warnings}
 
 
@@ -631,7 +626,6 @@ def generate_video(
         poll_interval = float(mcfg.get("video_poll_interval_seconds", 5.0))
     if max_wait is None:
         max_wait = float(mcfg.get("video_max_wait_seconds", 600.0))
-    api_key = _get_api_key()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -691,126 +685,72 @@ def generate_video(
         if frames:
             payload["frame_images"] = frames
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
     units = {"videos_generated": 1, "duration_seconds": duration, "resolution": resolution, "aspect_ratio": aspect_ratio}
-    job_id: str | None = None
 
-    t0 = time.time()
+    # The gateway owns the complete paid lifecycle: submit → poll → terminal
+    # → accounting.  We call video_generate and handle only the media-specific
+    # concerns: artifact download, file saving, and result formatting.
+    # Accounting is already done by the gateway — no separate _log_media_usage.
+    gen_result = _gate_video_generate(
+        payload,
+        model=model,
+        source="media_gen.generate_video",
+        poll_interval=poll_interval,
+        max_wait=max_wait,
+        poll_timeout=int(_system_cfg().get("api_timeout_video", 60)),
+        submit_timeout=int(_system_cfg().get("api_timeout_video", 60)),
+        attempt=attempt,
+        units=units,
+        on_status=on_status,
+    )
+
+    if not gen_result.ok:
+        return {
+            "ok": False,
+            "error": gen_result.error or "video generation failed",
+            "model": model,
+            "prompt": prompt,
+            "job_id": gen_result.job_id,
+            "warnings": warnings,
+            "http_status": gen_result.http_status,
+        }
+
+    # Download the artifact — post-accounting retrieval.
+    # Download failure does not affect the cost event (already accounted).
+    if on_status:
+        on_status("downloading")
+    download_timeout = int(_system_cfg().get("api_timeout_video_download", 120))
+    max_download_retries = int(_system_cfg().get("video_download_retries", 3))
+    download_delay = float(_system_cfg().get("video_download_retry_delay_seconds", 2.0))
     try:
-        if on_status:
-            on_status("submitting")
-        with httpx.Client(timeout=int(_system_cfg().get("api_timeout_video", 60))) as client:
-            resp = client.post(
-                "https://openrouter.ai/api/v1/videos",
-                headers=headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            result = resp.json()
-
-        job_id = result.get("id")
-        polling_url = result.get("polling_url")
-        if not job_id or not polling_url:
-            _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
-                             request_id=job_id, attempt=attempt, units=units, error_message="no job_id")
-            return {"ok": False, "error": f"API ไม่คืน job_id: {result}", "model": model, "prompt": prompt}
-
-        # OpenRouter คืน polling_url เป็น relative path (เช่น "/api/v1/videos/<jobId>")
-        # httpx ต้องการ absolute URL — เติม base URL ถ้าเป็น relative
-        if not polling_url.startswith("http"):
-            polling_url = "https://openrouter.ai" + polling_url
-
-        # Poll จนเสร็จ
-        elapsed = 0.0
-        with httpx.Client(timeout=int(_system_cfg().get("api_timeout_video", 60))) as client:
-            while elapsed < max_wait:
-                if on_status:
-                    on_status(f"generating ({int(elapsed)}s)")
-                time.sleep(poll_interval)
-                elapsed += poll_interval
-
-                poll = client.get(polling_url, headers=headers)
-                poll.raise_for_status()
-                status_data = poll.json()
-                status = status_data.get("status", "")
-
-                if status == "completed":
-                    urls = status_data.get("unsigned_urls") or status_data.get("urls") or []
-                    if not urls:
-                        _log_media_usage("video", model, status_data.get("usage"),
-                                         duration_ms=int((time.time() - t0) * 1000), status="error",
-                                         request_id=job_id, attempt=attempt, units=units,
-                                         error_message="completed but no url")
-                        return {"ok": False, "error": "completed แต่ไม่มี url", "model": model, "prompt": prompt, "warnings": warnings}
-                    # log usage จาก poll response
-                    _log_media_usage("video", model, status_data.get("usage"),
-                                     duration_ms=int((time.time() - t0) * 1000),
-                                     request_id=job_id, attempt=attempt, units=units)
-                    # download — retry retrieval of the completed job (not new generation)
-                    # provider บางตัว e.g. bytedance ต้องการ bearer token
-                    if on_status:
-                        on_status("downloading")
-                    download_timeout = int(_system_cfg().get("api_timeout_video_download", 120))
-                    max_download_retries = int(_system_cfg().get("video_download_retries", 3))
-                    download_delay = float(_system_cfg().get("video_download_retry_delay_seconds", 2.0))
-                    download_error: str | None = None
-                    for dl_attempt in range(max_download_retries):
-                        try:
-                            video_resp = httpx.get(
-                                urls[0],
-                                headers={"Authorization": f"Bearer {api_key}"},
-                                timeout=download_timeout,
-                            )
-                            video_resp.raise_for_status()
-                            output_path.write_bytes(video_resp.content)
-                            return {
-                                "ok": True,
-                                "path": str(output_path),
-                                "model": model,
-                                "prompt": prompt,
-                                "url": urls[0],
-                                "job_id": job_id,
-                                "warnings": warnings,
-                            }
-                        except Exception as dl_err:
-                            download_error = str(dl_err)
-                            if dl_attempt < max_download_retries - 1:
-                                if on_status:
-                                    on_status(f"download retry {dl_attempt + 1}/{max_download_retries}")
-                                time.sleep(download_delay)
-                    # download failed after all retries — return error with job_id for later retry
-                    return {"ok": False, "error": f"download failed after {max_download_retries} retries: {download_error}",
-                            "model": model, "prompt": prompt, "url": urls[0], "job_id": job_id,
-                            "warnings": warnings}
-                elif status == "failed":
-                    err = status_data.get("error", "unknown")
-                    _log_media_usage("video", model, status_data.get("usage"),
-                                     duration_ms=int((time.time() - t0) * 1000), status="error",
-                                     request_id=job_id, attempt=attempt, units=units,
-                                     error_message=str(err))
-                    return {"ok": False, "error": f"video gen failed: {err}", "model": model, "prompt": prompt, "warnings": warnings}
-
-        _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="timeout",
-                         request_id=job_id, attempt=attempt, units=units,
-                         error_message=f"timeout after {max_wait}s")
-        return {"ok": False, "error": f"timeout after {max_wait}s", "model": model, "prompt": prompt, "warnings": warnings}
-    except httpx.HTTPStatusError as e:
-        _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
-                         request_id=job_id, attempt=attempt, units=units,
-                         http_status=e.response.status_code, error_message=str(e))
-        _err_len = int(_system_cfg().get("error_preview_length", 200))
-        et, ec = _parse_error_response(e.response.text)
-        return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:_err_len]}",
-                "error_type": et, "error_code": ec, "http_status": e.response.status_code,
-                "model": model, "prompt": prompt, "warnings": warnings}
-    except Exception as e:
-        _log_media_usage("video", model, None, duration_ms=int((time.time() - t0) * 1000), status="error",
-                         request_id=job_id, attempt=attempt, units=units, error_message=str(e))
-        return {"ok": False, "error": str(e), "model": model, "prompt": prompt, "warnings": warnings}
+        video_bytes = _gate_video_download(
+            gen_result.urls[0],
+            timeout=download_timeout,
+            max_retries=max_download_retries,
+            retry_delay=download_delay,
+        )
+        output_path.write_bytes(video_bytes)
+        return {
+            "ok": True,
+            "path": str(output_path),
+            "model": model,
+            "prompt": prompt,
+            "url": gen_result.urls[0],
+            "job_id": gen_result.job_id,
+            "warnings": warnings,
+        }
+    except Exception as dl_err:
+        # Download failed — cost already accounted by the gateway.
+        # Return error with job_id and url for later retry.
+        return {
+            "ok": False,
+            "error": f"download failed: {dl_err}",
+            "model": model,
+            "prompt": prompt,
+            "url": gen_result.urls[0],
+            "job_id": gen_result.job_id,
+            "warnings": warnings,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -830,7 +770,11 @@ def _log_media_usage(
     request_id: str | None = None,
     units: dict[str, Any] | None = None,
 ) -> None:
-    """บันทึก image/video generation usage — fire-and-forget."""
+    """บันทึก image/video generation usage — fire-and-forget.
+
+    Accounting is delegated to the OpenRouter gate so all paid media
+    operations flow through one accounting seam.
+    """
     operation = "images.generate" if media_type == "image" else "videos.generate"
     cost_usd: float | None = None
     prompt_tokens: int | None = None
@@ -841,24 +785,22 @@ def _log_media_usage(
             cost_usd = float(cost)
         prompt_tokens = usage.get("prompt_tokens")
         completion_tokens = usage.get("completion_tokens")
-    entry = make_entry(
-        provider="openrouter",
+    _gate_account(
         model=model,
-        operation=operation,
         source=f"media_gen.generate_{media_type}",
-        request_id=request_id,
+        operation=operation,
+        usage=usage,
         duration_ms=duration_ms,
         attempt=attempt,
         status=status,
         http_status=http_status,
         error_message=error_message,
+        request_id=request_id,
+        units=units,
         cost_usd=cost_usd,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        raw_usage=usage,
-        units=units,
     )
-    record_ai_usage(entry)
 
 
 # ---------------------------------------------------------------------------

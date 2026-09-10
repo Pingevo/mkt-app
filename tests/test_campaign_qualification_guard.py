@@ -22,7 +22,7 @@ from src.llm_client import LLMClient
 @pytest.fixture(autouse=True)
 def _disable_hub_logging(monkeypatch: pytest.MonkeyPatch) -> None:
     # AI Usage Hub POST is not the LLM call we are budgeting; silence it in tests.
-    monkeypatch.setattr("src.llm_client.record_ai_usage", lambda *a, **k: None)
+    monkeypatch.setattr("src.openrouter_gateway.record_ai_usage", lambda *a, **k: None)
 
 
 class _FakeResponse:
@@ -205,7 +205,7 @@ def test_hub_post_is_not_counted_as_paid_attempt(monkeypatch: pytest.MonkeyPatch
 
 def _capture_usage(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     captured: list[dict[str, Any]] = []
-    monkeypatch.setattr("src.llm_client.record_ai_usage", captured.append)
+    monkeypatch.setattr("src.openrouter_gateway.record_ai_usage", captured.append)
     return captured
 
 
@@ -253,21 +253,72 @@ def test_repair_usage_is_recorded_separately(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_usage_logging_failure_is_non_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(httpx.Client, "post", MagicMock(return_value=_FakeResponse("ok")))
-    monkeypatch.setattr("src.llm_client.record_ai_usage", MagicMock(side_effect=RuntimeError("hub down")))
+    monkeypatch.setattr("src.openrouter_gateway.record_ai_usage", MagicMock(side_effect=RuntimeError("hub down")))
     client = LLMClient(api_key="test-key")
     text = client.chat([{"role": "user", "content": "hello"}], max_retry_limit=1, stream=False)
     assert text == "ok"
 
 
 def test_streaming_call_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Streaming path still logs usage when the SSE response contains usage."""
+    """Streaming path still logs usage when the SSE response contains usage.
+
+    In the single-gate architecture, the gateway's chat_stream_open owns both
+    the authenticated HTTP call and the accounting.  We mock the gate operation
+    so no real HTTP is made, and verify that record_ai_usage is called with the
+    provider usage from the stream.
+    """
     captured = _capture_usage(monkeypatch)
-    client = LLMClient(api_key="test-key")
+
+    class _FakeStreamHandle:
+        """Minimal mock of gate.ChatStreamHandle that accounts on exit."""
+        def __init__(self, usage, request_id, finish_reason="stop"):
+            self.usage = usage
+            self.actual_request_id = request_id
+            self.finish_reason = finish_reason
+            self.response = MagicMock()
+            self.response.raise_for_status = MagicMock()
+            self._lines = iter([
+                'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n',
+                'data: [DONE]\n',
+            ])
+            self._client = None
+
+        def iter_lines(self):
+            for line in self._lines:
+                yield line
+
+        def close_transport(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            # Mirror the real handle: account on exit
+            from src import openrouter_gateway as gate
+            gate.account(
+                model="openrouter/free",
+                source="campaign_strategy.generate",
+                operation="chat.completions",
+                usage=self.usage,
+                duration_ms=10,
+                request_id=self.actual_request_id,
+                finish_reason=self.finish_reason,
+                status="success" if not exc[0] else "error",
+            )
+            return False
+
+    def _fake_chat_stream_open(payload, **kwargs):
+        return _FakeStreamHandle(
+            usage={"prompt_tokens": 8, "completion_tokens": 3, "cost": 0.001},
+            request_id="req-stream",
+        )
+
     monkeypatch.setattr(
-        client,
-        "_chat_stream",
-        lambda _payload: ("ok", {"prompt_tokens": 8, "completion_tokens": 3}, "req-stream"),
+        "src.llm_client._gate_chat_stream_open",
+        _fake_chat_stream_open,
     )
+    client = LLMClient(api_key="test-key")
     text = client.chat(
         [{"role": "user", "content": "hello"}],
         model="openrouter/free",

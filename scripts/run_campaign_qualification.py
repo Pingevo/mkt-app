@@ -35,6 +35,7 @@ from src.evaluation.campaign_qualification import (
 )
 from src.flow_context import set_usage_metadata, set_usage_reference, clear_usage_context
 from src.llm_client import LLMClient
+from src.openrouter_gateway import get_api_key as _gate_get_api_key
 from src.ai_usage import (
     _read_hub_credentials,
     flush_usage_log,
@@ -84,7 +85,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    api_key = _gate_get_api_key()
     if not api_key:
         print("ERROR: OPENROUTER_API_KEY is not set", file=sys.stderr)
         return 1

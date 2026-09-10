@@ -53,7 +53,8 @@ def _load_plan(path: Path) -> dict:
 
 
 def _make_client() -> LLMClient:
-    api_key = os.getenv(REQUIRED_ENV_VAR)
+    from src.openrouter_gateway import get_api_key as _gate_get_api_key
+    api_key = _gate_get_api_key()
     if not api_key:
         raise RuntimeError(
             f"{REQUIRED_ENV_VAR} is not set. "

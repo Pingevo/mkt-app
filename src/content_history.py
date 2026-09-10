@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import math
 import threading
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -37,11 +36,6 @@ from typing import Any
 # Global lock — กัน race condition เมื่อหลาย flow รันพร้อมกัน
 # ทั้ง read (get_recent_entries) และ write (record_entry) ต้องผ่าน lock นี้
 _history_lock = threading.RLock()
-
-try:
-    from .ai_usage import record_ai_usage, make_entry
-except ImportError:
-    from ai_usage import record_ai_usage, make_entry  # type: ignore
 
 # Default config — ใช้ตอนที่ไม่มี config ส่งเข้ามา (backward compat)
 _DEFAULTS = {
@@ -296,92 +290,24 @@ def format_product_history_for_prompt(
     return "\n".join(lines)
 
 
-def _log_embedding(
-    model: str,
-    usage: dict[str, Any] | None,
-    *,
-    duration_ms: int,
-    status: str = "success",
-    http_status: int | None = None,
-    error_message: str | None = None,
-    request_id: str | None = None,
-) -> None:
-    """บันทึก embeddings usage — fire-and-forget."""
-    entry = make_entry(
-        provider="openrouter",
-        model=model,
-        operation="embeddings.create",
-        source="content_history.generate_embedding",
-        request_id=request_id,
-        duration_ms=duration_ms,
-        status=status,
-        http_status=http_status,
-        error_message=error_message,
-        raw_usage=usage,
-    )
-    if usage:
-        cost = usage.get("cost") or usage.get("total_cost")
-        if cost is not None:
-            entry["cost_usd"] = float(cost)
-        if usage.get("prompt_tokens") is not None:
-            entry["prompt_tokens"] = usage.get("prompt_tokens")
-    record_ai_usage(entry)
-
-
 # ============================================================
 # Embeddings dedup — ตามมาตรฐานตลาด
 # ============================================================
 
 def _generate_embedding(text: str, config: dict[str, Any]) -> list[float] | None:
-    """Generate embedding vector for text using OpenRouter embeddings API.
+    """Generate embedding vector for text using the canonical embedding seam.
 
     Uses the model specified in config (dedup_model).
     Returns None if API call fails (graceful degradation).
+    Accounting is owned by the canonical seam (llm_client.generate_embedding).
     """
-    model = config.get("dedup_model", "openai/text-embedding-3-small")
-    t0 = time.time()
     try:
-        import os
-        from dotenv import load_dotenv
-        load_dotenv()
-        api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
-            return None
+        from .llm_client import generate_embedding
+    except ImportError:
+        from llm_client import generate_embedding  # type: ignore
 
-        import httpx
-        with httpx.Client(timeout=30) as client:
-            resp = client.post(
-                "https://openrouter.ai/api/v1/embeddings",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "input": text[:8000],  # embedding API จำกัด input length
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            # log usage (Hub + local)
-            _log_embedding(model, data.get("usage"), request_id=data.get("id"),
-                           duration_ms=int((time.time() - t0) * 1000))
-            return data["data"][0]["embedding"]
-    except Exception as e:
-        http_status: int | None = None
-        request_id: str | None = None
-        if isinstance(e, httpx.HTTPStatusError):
-            http_status = e.response.status_code
-            try:
-                request_id = e.response.json().get("id")
-            except Exception:
-                pass
-        status = "timeout" if isinstance(e, httpx.TimeoutException) else "error"
-        _log_embedding(model, None, request_id=request_id,
-                       duration_ms=int((time.time() - t0) * 1000), status=status,
-                       http_status=http_status, error_message=str(e))
-        # Graceful degradation — ถ้า embedding API ไม่ได้ ก็ไม่เก็บ embedding
-        return None
+    model = config.get("dedup_model", "openai/text-embedding-3-small")
+    return generate_embedding(text, model=model, source="content_history.generate_embedding")
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:

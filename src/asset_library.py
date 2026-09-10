@@ -57,17 +57,15 @@ def make_llm():
     คืน LLMClient หรือ None ถ้าไม่มี API key.
     """
     try:
-        import os
         from dotenv import load_dotenv
         load_dotenv()
-        api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
+        from src.openrouter_gateway import get_api_key as _gate_get_api_key
+        if not _gate_get_api_key():
             return None
         from src.llm_client import LLMClient
         cfg = _load_config()
         tag_cfg = cfg.get("tagging", {})
         return LLMClient(
-            api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
             default_model=tag_cfg.get("model", "google/gemini-3.8-flash"),
             timeout=180,
@@ -254,91 +252,19 @@ def _strip_embedding(record: dict) -> dict:
 # default embedder — ใช้ OpenRouter embeddings API แบบเดียวกับ content_history
 # log ด้วย source ของ asset_library เพื่อแยกจาก content_history ใน logs/llm_usage.jsonl
 def _default_embedder(text: str, config: dict) -> list[float] | None:
-    """Generate embedding vector for text using OpenRouter embeddings API.
+    """Generate embedding vector for text using the canonical embedding seam.
 
     Uses the model specified in config (embedding.model).
     Returns None if API call fails (graceful degradation).
-    Logs to ai_usage with source='asset_library.embedding'.
+    Accounting is owned by the canonical seam (llm_client.generate_embedding).
     """
-    import os
-    import time as _time
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
-        from .ai_usage import record_ai_usage, make_entry
+        from .llm_client import generate_embedding
     except ImportError:
-        try:
-            from ai_usage import record_ai_usage, make_entry  # type: ignore
-        except ImportError:
-            record_ai_usage = make_entry = None
+        from llm_client import generate_embedding  # type: ignore
 
     model = config.get("embedding", {}).get("model", "openai/text-embedding-3-small")
-    t0 = _time.time()
-    try:
-        import os
-        api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
-            return None
-
-        import httpx
-        with httpx.Client(timeout=30) as client:
-            resp = client.post(
-                "https://openrouter.ai/api/v1/embeddings",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "input": text[:8000],
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            # log usage (Hub + local) — source ของ asset_library
-            if make_entry:
-                usage = data.get("usage")
-                cost = usage.get("cost") if usage else None
-                cost_usd = float(cost) if cost is not None else None
-                entry = make_entry(
-                    provider="openrouter",
-                    model=model,
-                    operation="embeddings.create",
-                    source="asset_library.embedding",
-                    request_id=data.get("id"),
-                    duration_ms=int((_time.time() - t0) * 1000),
-                    cost_usd=cost_usd,
-                    raw_usage=usage,
-                )
-                if usage:
-                    entry["prompt_tokens"] = usage.get("prompt_tokens")
-                    entry["total_tokens"] = usage.get("total_tokens")
-                record_ai_usage(entry)
-            return data["data"][0]["embedding"]
-    except Exception as e:
-        if make_entry:
-            http_status: int | None = None
-            request_id: str | None = None
-            if isinstance(e, httpx.HTTPStatusError):
-                http_status = e.response.status_code
-                try:
-                    request_id = e.response.json().get("id")
-                except Exception:
-                    pass
-            status = "timeout" if isinstance(e, httpx.TimeoutException) else "error"
-            entry = make_entry(
-                provider="openrouter",
-                model=model,
-                operation="embeddings.create",
-                source="asset_library.embedding",
-                request_id=request_id,
-                duration_ms=int((_time.time() - t0) * 1000),
-                status=status,
-                http_status=http_status,
-                error_message=str(e)[:200],
-            )
-            record_ai_usage(entry)
-        return None
+    return generate_embedding(text, model=model, source="asset_library.embedding")
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
