@@ -34,9 +34,9 @@
 | Checkpoint A — Final grounding boundary | **ACCEPTED / FROZEN** (`65ed8c7`) | Requalify Agents 1–4 against current model |
 | Gemini 3.8 migration | **ACCEPTED / FROZEN** (`c39f596`) | — |
 | Media Core (C1, mechanical transport) | **ACCEPTED / FROZEN** (`5cc4724` + `06157af`) | — |
-| Media Capability Coverage (C2) | **PLANNED** | Product/logo/mascot fidelity, provider fallback, cost-aware tool selection |
+| Media Capability Coverage (C2) | **PARTIAL** — video/reference-fidelity sub-checkpoint PASS; image capability and other C2 criteria remain open | Image capability, logo/brand fidelity, mascot/person/child consistency, provider fallback, cost-aware tool selection |
 | Image generation | **PARTIAL** — no-ref PASS, one-normalized-ref PASS, three-raw-refs TIMEOUT; three-normalized-refs ยังไม่พิสูจน์; real UI path ยังไม่ได้ผลิตภาพหลัง fix | Media Capability Coverage (C2) |
-| Real video generation | **NOT QUALIFIED** | Media Capability Coverage (C2) |
+| Real video generation | **PARTIAL** — Wan 2.7 direct-reference Browser E2E PASS (sub-checkpoint); full C2 scope remains open | Media Capability Coverage (C2) |
 | Scheduler | **ACCEPTED / FROZEN** (`5781fd8`) — offline 72 tests + 1 browser E2E + real UI wall-clock qualification passed | — |
 | Overall | **NOT FREEZE-READY** — no Agent 1–4 declared Beta-ready without current qualification evidence | Checkpoint B / E + Media Capability Coverage (C2) |
 
@@ -387,11 +387,15 @@ Separate machine-readable status from user-facing language.
 
 ### Checkpoint C — Media completion
 
-> Status split into C1 (frozen) and C2 (planned). Any provider UAT requires separate Product Owner approval.
+> Status split into C1 (frozen) and C2 (partial/open). Any provider UAT requires separate Product Owner approval.
 
 **C1 — Media Core (mechanical reference transport):** `ACCEPTED / FROZEN` at `5cc4724` + `06157af` (60 focused + 8 browser tests passed; `git diff --check` clean). Do not reopen speculative media plumbing.
 
-**C2 — Media Capability Coverage:** `PLANNED`. Scope: product fidelity, logo/brand fidelity, mascot/person/child consistency, provider fallback, cost-aware tool selection. No K5-specific forward instructions; no real image/video run is authorized without separate Product Owner approval.
+**C2 — Media Capability Coverage:** `PARTIAL` (open). Scope: product fidelity, logo/brand fidelity, mascot/person/child consistency, provider fallback, cost-aware tool selection. No K5-specific forward instructions; no real image/video run is authorized without separate Product Owner approval.
+
+**C2 video/reference-fidelity sub-checkpoint:** `PASS` (2026-09-10). Browser UI → production Media path → accepted OpenRouter Gateway → `alibaba/wan-2.7`. Five original references (3 K5 product images + child a_0007 + logo a_0008) delivered as `input_references` (not image-first). Request `aTo9OCZ5KlcV3Ld1r1nY`: 10 seconds, $1.00, status `success`. Video persisted (`video_1.mp4`, 9.5 MB, h264+aac) and playable in UI. K5, child, and logo references visibly used. Accepted by Product Owner as PASS with known output-quality limitations. This sub-checkpoint does not close C2 — image capability and other C2 criteria remain open.
+
+**Known issue — aspect-ratio mismatch (no production fix, needs investigation):** Requested and app-side-composed as 9:16; returned artifact is 1280×720. The responsible upstream layer—OpenRouter normalization versus Wan provider behavior—is not yet proven.
 
 ### Checkpoint D — Scheduler qualification
 
@@ -436,20 +440,20 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 
 | Field | Current value |
 |---|---|
-| Current phase | Media Capability Coverage — planning |
-| Current objective | Prepare a bounded, generic Media Capability Coverage plan for Product Owner/Codex review |
+| Current phase | Media Capability Coverage (C2) — video/reference-fidelity sub-checkpoint PASS; C2 remains PARTIAL/open |
+| Current objective | Codex review of the narrow Wan 2.7 config-switch diff before commit; then continue C2 image capability and remaining criteria |
 | Checkpoint A — Final grounding boundary | `ACCEPTED / FROZEN` at `65ed8c7`. Generic final-output truth boundary wired into the smallest common pre-persistence seam for Agents 1–4; model reasoning for semantic entailment; no keyword/regex lists. Implemented safeguard — not yet re-qualified against current model. |
 | Gemini 3.8 migration | `ACCEPTED / FROZEN` at `c39f596`. Production text/reasoning workloads migrated to `google/gemini-3.8-flash` (read from `config/agents.yaml`). |
 | Checkpoint C1 — Media Core (mechanical transport) | `ACCEPTED / FROZEN` at `5cc4724` + `06157af`. Per-item product+asset reference selection via `extract_reference_ordinals`/`filter_catalog_by_ordinals`/`selected_reference_ordinals` in `compose_media_input`; `preflight_reference_mentions` rejects unknown/out-of-range ordinals and empty-catalog mentions. Reviewed and accepted by Codex. Do not reopen speculative media plumbing. |
-| Checkpoint C2 — Media Capability Coverage | `PLANNED`. Scope: product fidelity, logo/brand fidelity, mascot/person/child consistency, provider fallback, cost-aware tool selection. No implementation details invented here. |
+| Checkpoint C2 — Media Capability Coverage | `PARTIAL` (open). Video/reference-fidelity sub-checkpoint: `PASS` (2026-09-10). Browser UI → production Media → accepted OpenRouter Gateway → `alibaba/wan-2.7`; five original references (3 K5 product + child a_0007 + logo a_0008) delivered as `input_references`; request `aTo9OCZ5KlcV3Ld1r1nY`, 10 s, $1.00, `success`; video persisted and playable in UI; K5/child/logo visibly used. Known issue: requested 9:16, returned 1280×720 — responsible upstream layer (OpenRouter normalization vs Wan provider behavior) not yet proven. Image capability and other C2 criteria remain open. |
 | Checkpoint B — User-facing presentation | `PLANNED` (open). Agent 2/3 user-facing rendering still has internal phrases / pending-validation leakage; no accepted closure evidence. |
 | Scheduler (Checkpoint D) | **ACCEPTED / FROZEN** at `5781fd8`. Offline: 72 focused tests + 1 browser E2E passed. Real UI wall-clock qualification: one one-time `product_spec` job fired autonomously at `2026-09-09T16:06:00+07:00`, status `success`, 2 LLM calls, cost `$0.03216`, 0 media calls. Known non-blocking: `auto_image=true` serialized by UI defaults but no media path executes for `product_spec`-only flow; `session_ts` empty in run record but output/history/cost all functioned. |
 | Checkpoint E — Final qualification | `BLOCKED` (open). No current-model qualification evidence; no Agent 1–4 declared Beta-ready. Agent 4 final-grounding/text requalification belongs here; visual fidelity belongs to C2. |
 | Evidence (Media Core) | `tests/test_media_gen_provider_flow.py tests/test_phase4_media_wiring.py` = 60 passed, 0 failed; `tests/test_browser_e2e.py::TestImageGenerationBrowserE2E + TestVideoGenerationBrowserE2E + TestMediaPersistenceBrowserE2E` = 8 passed, 0 failed; `git diff --check` clean at acceptance. Regression fixtures: `test_uat_regression_unrelated_product_ref_not_sent`, `test_unknown_reference_ordinal_rejected_via_real_sequence`, `test_reference_mention_with_empty_full_catalog_rejected`. |
 | Evidence (historical, immutable) | Image probes: `evaluation_artifacts/image_probe_20260908_092915/`; Final Agent 4 UAT: `evaluation_artifacts/final_agent4_uat_20260908_094512/`; Original failed UAT preserved: `evaluation_artifacts/real_uat_20260908_083822_FAILED_PARTIAL/`; Pre-subset-fix real UAT: `output/uat_media_20260909_125427/uat_report.json` — real image/video execution succeeded before the subset correction, but exposed extra-reference contamination; `06157af` fixed the defect offline; this is not post-fix fidelity/subset-isolation acceptance; do not rerun without separate Product Owner approval. These remain evidence, not current PASS. |
-| Paid calls allowed now | No. No paid/model/web/media/provider UAT is authorized unless the Product Owner approves it separately. |
-| Next exact action | Prepare a bounded, generic Media Capability Coverage plan for Product Owner/Codex review. |
-| Last updated | 2026-09-09 (Checkpoint D accepted/frozen) |
+| Paid calls allowed now | No. No paid/model/web/media/provider UAT is authorized unless the Product Owner approves it separately. The $1.00 Wan 2.7 video generation (request `aTo9OCZ5KlcV3Ld1r1nY`, 2026-09-10) was a completed, previously approved historical call — not continuing authorization. |
+| Next exact action | Codex review of the narrow Wan 2.7 config-switch diff (4 files: `config/media.yaml`, `tests/test_media_gen_provider_flow.py`, `tests/test_model_migration.py`, `cache/_media_capabilities/video:alibaba_wan-2.7.json`) before commit. Do not commit until reviewed. |
+| Last updated | 2026-09-10 (C2 video/reference-fidelity sub-checkpoint PASS; C2 remains PARTIAL/open) |
 
 ## Progress Ledger — ARCH-CLEANUP-01 (Manager removal)
 

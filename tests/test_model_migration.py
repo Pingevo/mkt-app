@@ -355,7 +355,7 @@ def test_media_image_model_unchanged():
 def test_media_video_model_unchanged():
     """config/media.yaml video_model must remain unchanged."""
     cfg = _media_yaml()
-    assert cfg.get("video_model") == "bytedance/seedance-2.0-fast"
+    assert cfg.get("video_model") == "alibaba/wan-2.7"
 
 
 def test_image_retry_path_passes_38_to_rewrite_llm():

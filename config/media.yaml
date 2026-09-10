@@ -10,7 +10,10 @@ image_aspect_ratio: '16:9'
 image_timeout_seconds: 180
 
 # Video generation
-video_model: bytedance/seedance-2.0-fast
+# Wan 2.7 — proven direct reference-to-video path (person + product + logo refs).
+# Seedance 2.0/2.5 rejected the real person/child reference with HTTP 400
+# privacy/sensitive-content errors on the direct-reference path.
+video_model: alibaba/wan-2.7
 video_duration: 5
 video_aspect_ratio: '16:9'
 video_resolution: 720p

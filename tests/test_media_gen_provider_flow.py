@@ -352,7 +352,7 @@ def test_video_payload_merges_all_3_ref_sources_as_data_urls(monkeypatch, tmp_pa
     assert result.get("ok") is True, result
 
     payload = captured["payload"]
-    assert payload["model"] == "bytedance/seedance-2.0-fast"
+    assert payload["model"] == "alibaba/wan-2.7"
     ir = payload.get("input_references")
     assert ir is not None and len(ir) == 3, f"expected 3 refs, got {len(ir) if ir else 0}"
     for ref in ir:
