@@ -92,8 +92,15 @@ from src.auth import (
     get_workspace_ctx,
     get_workspace_ctx_optional,
 )
-from src.workspace_context import set_workspace as _set_ws, reset_workspace as _reset_ws
+from src.workspace_context import (
+    set_workspace as _set_ws,
+    reset_workspace as _reset_ws,
+    WorkspaceContext,
+)
+from src.brand_registry import BrandRegistry
 from fastapi import Depends, HTTPException, Response
+
+BRAND_COOKIE_NAME = "mktapp_brand"
 
 @app.post("/api/auth/register")
 async def api_register(request: Request) -> JSONResponse:
@@ -174,6 +181,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
     """Enforce authentication on all /api/* routes except /api/auth/*.
 
     Sets the per-user WorkspaceContext via the context-var for protected routes.
+    When a verified brand selection cookie is present, sets ``brand_id`` on the
+    context so brand-scoped operations resolve to the brand root.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -195,8 +204,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return JSONResponse({"error": "Invalid or expired session"}, status_code=401)
 
         # Set per-user workspace context for this request
-        from src.workspace_context import WorkspaceContext
         ws = WorkspaceContext.for_user(user_id, PROJECT_ROOT)
+        # If a brand selection cookie is present, revalidate ownership and
+        # upgrade to a brand-scoped context.  Invalid/unknown brand → user-only.
+        brand_id = request.cookies.get(BRAND_COOKIE_NAME)
+        if brand_id:
+            reg = BrandRegistry(user_id=user_id, project_root=PROJECT_ROOT)
+            if reg.get(brand_id) is not None:
+                ws = WorkspaceContext(
+                    user_id=ws.user_id, root=ws.root, brand_id=brand_id
+                )
         ws_token = _set_ws(ws)
         try:
             response = await call_next(request)
@@ -4246,6 +4263,117 @@ class _SchedulerProxy:
 
 
 _attach_schedule_endpoints(app, _SchedulerProxy())
+
+
+# ============================================================
+# Brand API — MB-01 Multi-Brand Foundation
+# ============================================================
+# User-scoped brand CRUD + select/activate.  Ownership is verified via
+# BrandRegistry on every get/rename/archive.  The browser submits brand_id;
+# the server resolves the authenticated user_id from the WorkspaceContext.
+# No arbitrary user_id is exposed or trusted.
+
+def _brand_registry() -> BrandRegistry:
+    """Return a BrandRegistry bound to the authenticated user."""
+    from src.workspace_context import get_workspace
+    ws = get_workspace()
+    if ws is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return BrandRegistry(user_id=ws.user_id, project_root=PROJECT_ROOT)
+
+
+@app.get("/api/brands")
+def api_list_brands() -> JSONResponse:
+    """List the authenticated user's active brands."""
+    return JSONResponse({"brands": _brand_registry().list()})
+
+
+@app.post("/api/brands")
+async def api_create_brand(request: Request) -> JSONResponse:
+    """Create a new brand for the authenticated user."""
+    body = await request.json()
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    brand = _brand_registry().create(name)
+    return JSONResponse(brand)
+
+
+@app.get("/api/brands/active")
+def api_active_brand() -> JSONResponse:
+    """Return the currently active brand, if any."""
+    from src.workspace_context import get_workspace
+    ws = get_workspace()
+    if ws is None or ws.brand_id is None:
+        return JSONResponse({"active": False})
+    brand = _brand_registry().get(ws.brand_id)
+    if brand is None:
+        return JSONResponse({"active": False})
+    return JSONResponse({"active": True, "brand": brand})
+
+
+@app.post("/api/brands/deselect")
+def api_deselect_brand() -> JSONResponse:
+    """Clear the active brand selection (return to user-level context)."""
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(key=BRAND_COOKIE_NAME, path="/")
+    return resp
+
+
+@app.get("/api/brands/{brand_id}")
+def api_get_brand(brand_id: str) -> JSONResponse:
+    """Get a brand owned by the authenticated user (management/history lookup).
+
+    Returns archived brands too — use ``active_only=False`` so archived
+    records remain inspectable.  Selection/context establishment use the
+    default active-only ``get()`` and reject archived brands.
+    """
+    brand = _brand_registry().get(brand_id, active_only=False)
+    if brand is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(brand)
+
+
+@app.patch("/api/brands/{brand_id}")
+async def api_rename_brand(brand_id: str, request: Request) -> JSONResponse:
+    """Rename a brand owned by the authenticated user."""
+    body = await request.json()
+    new_name = str(body.get("name", "")).strip()
+    if not new_name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    if not _brand_registry().rename(brand_id, new_name):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True, "brand_id": brand_id, "name": new_name})
+
+
+@app.delete("/api/brands/{brand_id}")
+def api_archive_brand(brand_id: str) -> JSONResponse:
+    """Archive a brand owned by the authenticated user (not delete)."""
+    if not _brand_registry().archive(brand_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True, "brand_id": brand_id, "status": "archived"})
+
+
+@app.post("/api/brands/{brand_id}/select")
+def api_select_brand(brand_id: str) -> JSONResponse:
+    """Select/activate a brand for the authenticated user.
+
+    Ownership is revalidated on every subsequent request via AuthMiddleware.
+    The cookie alone never grants access.
+    """
+    brand = _brand_registry().get(brand_id)
+    if brand is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    resp = JSONResponse({"ok": True, "brand_id": brand_id, "name": brand["name"]})
+    resp.set_cookie(
+        key=BRAND_COOKIE_NAME,
+        value=brand_id,
+        httponly=True,
+        samesite="lax",
+        max_age=7 * 24 * 3600,
+        path="/",
+    )
+    return resp
 
 
 @app.post("/api/run_auto")

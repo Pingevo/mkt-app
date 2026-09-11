@@ -50,14 +50,22 @@ class WorkspaceContext:
       ``root / cache/``, ``root / data/``, ``root / output/``, etc.
 
     Product Factory config is NOT here — it stays at the global project root.
+
+    ``brand_id`` is ``None`` for user-level contexts (auth, brand registry,
+    listing/creating brands).  When set, it identifies an ownership-verified
+    brand and ``brand_state_root()`` resolves beneath this user's root.
     """
 
     user_id: str
     root: Path
+    brand_id: str | None = None
 
     @classmethod
     def for_user(cls, user_id: str, project_root: Path) -> WorkspaceContext:
-        """Create a workspace for ``user_id`` under ``project_root / users/``."""
+        """Create a workspace for ``user_id`` under ``project_root / users/``.
+
+        ``brand_id`` is ``None`` — this is a user-level context.
+        """
         safe = _sanitize_user_id(user_id)
         root = (project_root.resolve() / "users" / safe)
         # Defence in depth: verify the resolved path is inside project_root.
@@ -66,6 +74,25 @@ class WorkspaceContext:
         except ValueError:
             raise ValueError(f"path traversal detected for user_id: {user_id!r}")
         return cls(user_id=safe, root=root)
+
+    @classmethod
+    def for_brand(cls, user_id: str, brand_id: str,
+                  project_root: Path) -> WorkspaceContext:
+        """Create a brand-scoped workspace for ``user_id`` / ``brand_id``.
+
+        Ownership is verified via BrandRegistry before the context is
+        established.  Raises ``ValueError`` if the brand does not belong to
+        ``user_id`` or does not exist.  Never falls back to a user-only or
+        default-brand context.
+        """
+        from .brand_registry import BrandRegistry
+        reg = BrandRegistry(user_id=user_id, project_root=project_root)
+        if reg.get(brand_id) is None:
+            raise ValueError(
+                f"brand {brand_id!r} not owned by user {user_id!r}"
+            )
+        ws = cls.for_user(user_id, project_root)
+        return cls(user_id=ws.user_id, root=ws.root, brand_id=brand_id)
 
     # --- Convenience path accessors ----------------------------------
 
@@ -120,6 +147,9 @@ def user_state_root(project_root: Path | None = None) -> Path:
 
     This is the **single function** all state modules should call instead
     of ``_project_root()`` for user-derived state paths.
+
+    Semantics are always the **user** root (``users/<user_id>/``), never a
+    brand root, even when ``brand_id`` is set on the active workspace.
     """
     ws = _current_ws.get()
     if ws is not None:
@@ -127,6 +157,35 @@ def user_state_root(project_root: Path | None = None) -> Path:
     if project_root is not None:
         return project_root
     return Path(__file__).resolve().parent.parent
+
+
+def brand_state_root(project_root: Path | None = None) -> Path:
+    """Return the brand-scoped root directory.
+
+    Requires an active workspace with ``brand_id`` set (ownership-verified
+    at context establishment).  Returns ``users/<user_id>/brands/<brand_id>/``.
+
+    Fails closed — raises ``ValueError`` if no workspace is active or the
+    active workspace has no ``brand_id``.  Never falls back to a user root,
+    a default brand, or the project root.
+    """
+    ws = _current_ws.get()
+    if ws is None or ws.brand_id is None:
+        raise ValueError("brand_state_root requires an active brand context")
+    return ws.root / "brands" / ws.brand_id
+
+
+def require_brand_context() -> WorkspaceContext:
+    """Return the active workspace, requiring a verified ``brand_id``.
+
+    Fails closed — raises ``ValueError`` if no workspace is active or the
+    active workspace has no ``brand_id``.  Use for brand-scoped operations
+    that must not silently fall back to a user-only or default-brand context.
+    """
+    ws = _current_ws.get()
+    if ws is None or ws.brand_id is None:
+        raise ValueError("brand-scoped operation requires an active brand context")
+    return ws
 
 
 # --- Path containment helper -----------------------------------------

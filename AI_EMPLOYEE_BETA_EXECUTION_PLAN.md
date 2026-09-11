@@ -452,8 +452,8 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 | Evidence (Media Core) | `tests/test_media_gen_provider_flow.py tests/test_phase4_media_wiring.py` = 60 passed, 0 failed; `tests/test_browser_e2e.py::TestImageGenerationBrowserE2E + TestVideoGenerationBrowserE2E + TestMediaPersistenceBrowserE2E` = 8 passed, 0 failed; `git diff --check` clean at acceptance. Regression fixtures: `test_uat_regression_unrelated_product_ref_not_sent`, `test_unknown_reference_ordinal_rejected_via_real_sequence`, `test_reference_mention_with_empty_full_catalog_rejected`. |
 | Evidence (historical, immutable) | Image probes: `evaluation_artifacts/image_probe_20260908_092915/`; Final Agent 4 UAT: `evaluation_artifacts/final_agent4_uat_20260908_094512/`; Original failed UAT preserved: `evaluation_artifacts/real_uat_20260908_083822_FAILED_PARTIAL/`; Pre-subset-fix real UAT: `output/uat_media_20260909_125427/uat_report.json` — real image/video execution succeeded before the subset correction, but exposed extra-reference contamination; `06157af` fixed the defect offline; this is not post-fix fidelity/subset-isolation acceptance; do not rerun without separate Product Owner approval. These remain evidence, not current PASS. |
 | Paid calls allowed now | No / $0. No paid/model/web/media/provider UAT is authorized unless the Product Owner approves it separately. The $1.00 Wan 2.7 video generation (request `aTo9OCZ5KlcV3Ld1r1nY`, 2026-09-10) was a completed, previously approved historical call — not continuing authorization. |
-| Next exact action | **Implement Stage A (AUTH-ISO-01-A):** path containment, worker-context propagation, legacy fallback removal, test-fixture repair. Stages B/C remain pending Stage A completion and Codex review. |
-| Last updated | 2026-09-11 (AUTH-ISO-01 is current blocking phase; C2/Wan deferred) |
+| Next exact action | **MB-01 (Multi-Brand Foundation) implementation complete** — pending Codex MB-01 acceptance review. Stage A `71c1e62` and Stage B `7a3c293` frozen. System81 and Stage C pending after multi-brand foundation. |
+| Last updated | 2026-09-11 (MB-01 Multi-Brand Foundation implemented; AUTH-ISO-01 Stages A/B frozen) |
 
 ## Progress Ledger — ARCH-CLEANUP-01 (Manager removal)
 
@@ -913,6 +913,36 @@ No new framework or state-manager abstraction. Each global becomes a `dict[key, 
 1. **Scheduler restart reload scope**: `start()` will enumerate authoritative registered users via `UserStore.list_users()` and load each user's job store. This changes startup behavior (previously loaded a single global store). Product Owner must confirm multi-user restart is the intended deployment model.
 
 No other hard stops. APScheduler uses in-memory `MemoryJobStore` (default, no `jobstores=` arg at line 254) — namespacing the in-memory APS ID does not alter any persisted state file, because none exists. The application's JSON job/run records retain the existing public `job_id`. All other changes are mechanical containment, context propagation, and state isolation within existing architecture seams.
+
+## Progress Ledger — MB-01 (Multi-Brand Foundation)
+
+|| Field | Value |
+||---|---|
+|| Phase ID | MB-01 |
+|| Agent ID | SHARED-RUNTIME |
+|| Gate status | MB-01 implementation complete; pending Codex acceptance review. |
+|| Baseline | Stage A `71c1e62` (frozen), Stage B `7a3c293` (frozen) |
+|| Ownership hierarchy | `User → many Brands`. A brand belongs to exactly one user. System81 later authenticates the PERSON only; MKTApp owns Brand entities and brand ownership. |
+|| Products scope | Products, product profiles, product raw data, ingestion, and staging are formally classified **BRAND-SCOPED**. Not migrated in MB-01. Recorded here so future phases do not preserve the old user-shared assumption. |
+|| User root invariant | `user_state_root(project_root)` → `users/<user_id>/` — semantics unchanged, always the user root, never a brand root. |
+|| Brand root invariant | `brand_state_root()` → `users/<user_id>/brands/<brand_id>/` — separate explicit seam. Fails closed when no verified `brand_id` is active. Brand root always beneath the authenticated user's root. |
+|| WorkspaceContext | Extended single propagated context with optional `brand_id`. `for_user()` → user context (brand_id=None). `for_brand()` → brand context (ownership-verified via BrandRegistry). `with_workspace_context()` propagates `brand_id` automatically. Stage A behavior preserved. |
+|| Brand identity | `brand_id` = `secrets.token_hex(8)` — internally generated, immutable, filesystem-safe, independent from display name, not client-chosen, not reused after archive. |
+|| APScheduler IDs | Stage B `(user_id, job_id)` APS identity untouched. No brand-awareness added to scheduler in MB-01. |
+|| BrandRegistry | `src/brand_registry.py` — JSON-backed, user-scoped (`users/<user_id>/brand_registry.json`). Operations: create, list, get, rename, archive. Every get/rename/archive verifies owner. Archive (not delete) preserves brand_id. `get(brand_id, *, active_only=True)` returns `None` for archived brands by default; management/history lookups pass `active_only=False`. Archived brands cannot be selected, cannot establish a brand context, and stale cookies pointing to archived brands fail closed to user-only context. |
+|| Brand API | `web_viewer.py` — `GET/POST /api/brands`, `GET/PATCH/DELETE /api/brands/{brand_id}`, `POST /api/brands/{brand_id}/select`, `POST /api/brands/deselect`, `GET /api/brands/active`. No arbitrary user_id exposed. Selection via HttpOnly cookie `mktapp_brand`, revalidated against authenticated user on every request via AuthMiddleware. `GET /api/brands/{brand_id}` uses `active_only=False` (management/history); all other paths use default active-only. |
+|| `brand_dir` gap | Current run endpoints accept client-controlled `brand_dir` and pass it to the Orchestrator. **BLOCKING FOLLOW-UP**: no future multi-brand phase may treat client `brand_dir` as trusted. Eventual contract is verified `brand_id`, not arbitrary filesystem `brand_dir`. Not migrated in MB-01. |
+|| Migration | No existing single-brand state moved/deleted. `workspace/local/brand`, products, product profiles, raw data, staging, pillars, history, output, scheduler, run resources all untouched. |
+|| Files changed (production) | `src/brand_registry.py` (new), `src/workspace_context.py`, `web_viewer.py` (Brand API + AuthMiddleware brand_id propagation) |
+|| Files changed (tests) | `tests/test_brand_registry.py` (new), `tests/test_brand_context.py` (new), `tests/test_brand_api.py` (new) |
+|| Files changed (docs) | `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md` (this ledger) |
+|| Scheduler | Business behavior untouched. No brand semantics added. Stage B APS IDs unchanged. |
+|| System81 | Pending after multi-brand foundation. Not started. |
+|| Stage C | Pending. Not started. |
+|| Paid calls | $0. No LLM, web, image, video, provider, or network calls. |
+|| Test results | BrandRegistry: 28 passed. BrandContext: 19 passed. Brand API: 17 passed. Stage A workspace/auth: 47 passed. Stage B scheduler (exec ownership + ownership + schedule API): 34 passed. Stage B scheduler (rerun/restart/missed/cleanup/misfire/attachments): 30 passed. Total: 175 passed, 0 failed. |
+|| `git diff --check` | passed (no whitespace errors) |
+|| Next exact action | Codex MB-01 final acceptance. |
 
 ## Post-Beta Backlog
 
