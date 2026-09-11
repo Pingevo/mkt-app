@@ -30,6 +30,7 @@ import bcrypt
 from fastapi import Cookie, HTTPException, Request
 
 from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
+from .system81 import ExternalIdentity
 
 SESSION_COOKIE_NAME = "mktapp_session"
 SESSION_TTL_HOURS = 24 * 7  # 7 days
@@ -157,20 +158,28 @@ class UserStore:
             return User(user_id=user_id, username=username, created_at=record["created_at"])
 
     def verify(self, username: str, password: str) -> User | None:
-        """Verify credentials. Returns User if valid, None if not."""
+        """Verify credentials. Returns User if valid, None if not.
+
+        Skips records without a ``password_hash`` (e.g. System81 profiles)
+        and continues searching so a dev account with the same username
+        can still be found later in the registry.
+        """
         username = username.strip()
         if not username or not password:
             return None
         users = self._load()
         for u in users:
-            if u.get("username", "").lower() == username.lower():
-                if verify_password(password, u.get("password_hash", "")):
-                    return User(
-                        user_id=u["user_id"],
-                        username=u.get("username", username),
-                        created_at=u.get("created_at", ""),
-                    )
-                return None
+            if u.get("username", "").lower() != username.lower():
+                continue
+            stored_hash = u.get("password_hash", "")
+            if not stored_hash:
+                continue  # passwordless (System81) profile — skip
+            if verify_password(password, stored_hash):
+                return User(
+                    user_id=u["user_id"],
+                    username=u.get("username", username),
+                    created_at=u.get("created_at", ""),
+                )
         return None
 
     def get_by_id(self, user_id: str) -> dict[str, Any] | None:
@@ -186,6 +195,51 @@ class UserStore:
             {k: v for k, v in u.items() if k != "password_hash"}
             for u in self._load()
         ]
+
+    def get_or_create(self, external: ExternalIdentity) -> User:
+        """Get or create a local profile for a System81-verified user.
+
+        No password required — System81 is the authentication authority.
+        On repeat login, updates username/email/metadata and last_login.
+        Never stores the System81 access token.
+        """
+        now = datetime.now().isoformat()
+        with self._lock:
+            users = self._load()
+            for u in users:
+                if u.get("user_id") == external.user_id:
+                    u["username"] = external.username
+                    if external.email:
+                        u["email"] = external.email
+                    u["provider"] = external.provider
+                    u["external_subject"] = external.external_subject
+                    u["metadata"] = external.metadata
+                    u["updated_at"] = now
+                    u["last_login"] = now
+                    self._save(users)
+                    return User(
+                        user_id=external.user_id,
+                        username=external.username,
+                        created_at=u.get("created_at", ""),
+                    )
+            record = {
+                "user_id": external.user_id,
+                "username": external.username,
+                "email": external.email,
+                "provider": external.provider,
+                "external_subject": external.external_subject,
+                "metadata": external.metadata,
+                "created_at": now,
+                "updated_at": now,
+                "last_login": now,
+            }
+            users.append(record)
+            self._save(users)
+            return User(
+                user_id=external.user_id,
+                username=external.username,
+                created_at=now,
+            )
 
 
 # ---------------------------------------------------------------------

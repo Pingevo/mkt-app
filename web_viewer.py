@@ -92,6 +92,7 @@ from src.auth import (
     get_workspace_ctx,
     get_workspace_ctx_optional,
 )
+from src.system81 import System81Provider
 from src.workspace_context import (
     set_workspace as _set_ws,
     reset_workspace as _reset_ws,
@@ -104,6 +105,9 @@ BRAND_COOKIE_NAME = "mktapp_brand"
 
 @app.post("/api/auth/register")
 async def api_register(request: Request) -> JSONResponse:
+    # Dev/test-only — disabled in production.  System81 is the auth authority.
+    if os.getenv("MKTAPP_DEV_AUTH", "") != "1":
+        return JSONResponse({"error": "registration is via System81"}, status_code=403)
     body = await request.json()
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
@@ -127,24 +131,55 @@ async def api_register(request: Request) -> JSONResponse:
 @app.post("/api/auth/login")
 async def api_login(request: Request) -> JSONResponse:
     body = await request.json()
-    username = str(body.get("username", "")).strip()
-    password = str(body.get("password", ""))
-    if not username or not password:
-        return JSONResponse({"error": "username and password required"}, status_code=400)
-    user = get_user_store().verify(username, password)
-    if user is None:
-        return JSONResponse({"error": "invalid credentials"}, status_code=401)
-    token = get_session_manager().create_session(user.user_id)
-    resp = JSONResponse({"user_id": user.user_id, "username": user.username})
-    resp.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=token,
-        httponly=True,
-        samesite="lax",
-        max_age=7 * 24 * 3600,
-        path="/",
-    )
-    return resp
+    token = str(body.get("token", "")).strip()
+
+    # Production path: System81 token verification
+    if token:
+        provider = System81Provider()
+        identity = provider.verify_token(token)
+        if identity is None:
+            return JSONResponse({"error": "authentication failed"}, status_code=401)
+        user = get_user_store().get_or_create(identity)
+        session_token = get_session_manager().create_session(user.user_id)
+        resp = JSONResponse({"user_id": user.user_id, "username": user.username})
+        resp.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=session_token,
+            httponly=True,
+            samesite="lax",
+            max_age=7 * 24 * 3600,
+            path="/",
+        )
+        return resp
+
+    # Dev/test fallback: username/password when MKTAPP_DEV_AUTH=1
+    if os.getenv("MKTAPP_DEV_AUTH", "") == "1":
+        username = str(body.get("username", "")).strip()
+        password = str(body.get("password", ""))
+        if not username or not password:
+            return JSONResponse({"error": "token or username+password required"}, status_code=400)
+        user = get_user_store().verify(username, password)
+        if user is None:
+            return JSONResponse({"error": "invalid credentials"}, status_code=401)
+        session_token = get_session_manager().create_session(user.user_id)
+        resp = JSONResponse({"user_id": user.user_id, "username": user.username})
+        resp.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=session_token,
+            httponly=True,
+            samesite="lax",
+            max_age=7 * 24 * 3600,
+            path="/",
+        )
+        return resp
+
+    return JSONResponse({"error": "token required"}, status_code=400)
+
+@app.get("/api/auth/login-url")
+async def api_login_url() -> JSONResponse:
+    """Return the System81 OAuth login URL for the browser to redirect to."""
+    provider = System81Provider()
+    return JSONResponse({"login_url": provider.get_login_url()})
 
 @app.post("/api/auth/logout")
 async def api_logout(request: Request) -> JSONResponse:
@@ -153,6 +188,7 @@ async def api_logout(request: Request) -> JSONResponse:
         get_session_manager().revoke_session(token)
     resp = JSONResponse({"ok": True})
     resp.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    resp.delete_cookie(key=BRAND_COOKIE_NAME, path="/")
     return resp
 
 @app.get("/api/auth/me")
@@ -11451,64 +11487,87 @@ LOGIN_HTML = r"""<!DOCTYPE html>
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
 .login-card { background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 32px; width: 100%; max-width: 360px; }
 .login-card h1 { font-size: 20px; margin-bottom: 24px; text-align: center; color: #333; }
-.login-card input { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; margin-bottom: 12px; }
-.login-card button { width: 100%; padding: 10px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; margin-bottom: 8px; }
+.login-card button { width: 100%; padding: 12px; border: none; border-radius: 6px; font-size: 15px; cursor: pointer; margin-bottom: 8px; }
 .btn-primary { background: #4f46e5; color: white; }
 .btn-primary:hover { background: #4338ca; }
-.btn-secondary { background: #e5e7eb; color: #374151; }
-.btn-secondary:hover { background: #d1d5db; }
 .error { color: #dc2626; font-size: 13px; margin-bottom: 8px; display: none; }
-.tabs { display: flex; margin-bottom: 20px; border-bottom: 1px solid #e5e7eb; }
-.tab { flex: 1; padding: 8px; text-align: center; cursor: pointer; color: #6b7280; font-size: 14px; }
-.tab.active { color: #4f46e5; border-bottom: 2px solid #4f46e5; }
+.status { color: #6b7280; font-size: 13px; margin-bottom: 8px; display: none; }
 </style>
 </head>
 <body>
 <div class="login-card">
 <h1>MKTApp</h1>
-<div class="tabs">
-<div class="tab active" id="tab-login" onclick="switchTab('login')">เข้าสู่ระบบ</div>
-<div class="tab" id="tab-register" onclick="switchTab('register')">สมัครใหม่</div>
-</div>
 <div class="error" id="error"></div>
-<input type="text" id="username" placeholder="ชื่อผู้ใช้" onkeypress="if(event.key==='Enter')submit()">
-<input type="password" id="password" placeholder="รหัสผ่าน" onkeypress="if(event.key==='Enter')submit()">
-<button class="btn-primary" id="submit-btn" onclick="submit()">เข้าสู่ระบบ</button>
+<div class="status" id="status"></div>
+<button class="btn-primary" id="s81-btn" onclick="loginWithSystem81()">Login with System81</button>
 </div>
 <script>
-let mode = 'login';
-function switchTab(m) {
-  mode = m;
-  document.getElementById('tab-login').classList.toggle('active', m === 'login');
-  document.getElementById('tab-register').classList.toggle('active', m === 'register');
-  document.getElementById('submit-btn').textContent = m === 'login' ? 'เข้าสู่ระบบ' : 'สมัครใหม่';
-  document.getElementById('error').style.display = 'none';
-}
-async function submit() {
-  const username = document.getElementById('username').value.trim();
-  const password = document.getElementById('password').value;
-  if (!username || !password) return;
-  const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
-  try {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({username, password})
-    });
-    if (res.ok) {
-      window.location.href = '/';
-    } else {
-      const data = await res.json();
+// Check for System81 callback token in URL (query param or fragment)
+async function handleCallback() {
+  const params = new URLSearchParams(window.location.search);
+  let token = params.get('token');
+  if (!token && window.location.hash) {
+    const hashParams = new URLSearchParams(window.location.hash.slice(1));
+    token = hashParams.get('token');
+  }
+  if (token) {
+    const status = document.getElementById('status');
+    status.textContent = 'Verifying...';
+    status.style.display = 'block';
+    const btn = document.getElementById('s81-btn');
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token})
+      });
+      if (res.ok) {
+        // Clear token from URL before redirecting
+        window.history.replaceState({}, '', '/login');
+        window.location.href = '/';
+      } else {
+        const data = await res.json();
+        const err = document.getElementById('error');
+        err.textContent = data.error || 'Authentication failed';
+        err.style.display = 'block';
+        status.style.display = 'none';
+        btn.disabled = false;
+        // Clear token from URL on failure too
+        window.history.replaceState({}, '', '/login');
+      }
+    } catch(e) {
       const err = document.getElementById('error');
-      err.textContent = data.error || 'เกิดข้อผิดพลาด';
+      err.textContent = 'Connection failed';
+      err.style.display = 'block';
+      status.style.display = 'none';
+      btn.disabled = false;
+      window.history.replaceState({}, '', '/login');
+    }
+  }
+}
+
+async function loginWithSystem81() {
+  try {
+    const res = await fetch('/api/auth/login-url');
+    const data = await res.json();
+    if (data.login_url) {
+      window.location.href = data.login_url;
+    } else {
+      const err = document.getElementById('error');
+      err.textContent = 'Could not get login URL';
       err.style.display = 'block';
     }
   } catch(e) {
     const err = document.getElementById('error');
-    err.textContent = 'การเชื่อมต่อล้มเหลว';
+    err.textContent = 'Connection failed';
     err.style.display = 'block';
   }
 }
+
+// Handle callback on page load
+handleCallback();
+
 // Redirect to main app if already logged in
 fetch('/api/auth/me').then(r => r.json()).then(d => { if (d.authenticated) window.location.href = '/'; });
 </script>

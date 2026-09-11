@@ -29,6 +29,8 @@ def _isolate_ai_usage_hub(monkeypatch, tmp_path):
     - patch ``_read_hub_credentials`` ให้คืน ``(None, None)`` เสมอ
       → ``record_ai_usage`` ข้าม Hub POST ไม่ว่า env จะถูกโหลดใหม่กี่ครั้ง
     - redirect ``usage_log_path`` ไป tmp_path → ไม่เขียนทับ logs/llm_usage.jsonl จริง
+    - enable MKTAPP_DEV_AUTH=1 so existing tests can use username/password login
+      (production login is System81-only; dev auth is disabled by default)
 
     เทสต์ที่ต้องการ Hub behavior จริง override โดย:
     ``monkeypatch.setattr(ai_usage, "_read_hub_credentials", lambda: (url, token))``
@@ -36,6 +38,7 @@ def _isolate_ai_usage_hub(monkeypatch, tmp_path):
     ทำงานทับ fixture นี้เพราะรันหลัง (ภายใน test body)
     """
     monkeypatch.setattr("src.ai_usage._read_hub_credentials", lambda: (None, None))
+    monkeypatch.setenv("MKTAPP_DEV_AUTH", "1")
 
     log_path = tmp_path / "llm_usage.jsonl"
     monkeypatch.setattr("src.ai_usage.usage_log_path", lambda: log_path)

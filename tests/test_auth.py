@@ -118,6 +118,56 @@ def test_login_unknown_user_rejected(user_store: UserStore):
     assert user is None
 
 
+def test_verify_skips_passwordless_profile_and_finds_dev_user(user_store: UserStore):
+    """verify() must skip System81 (passwordless) profiles and continue
+    searching to find a dev account with the same username later in the list.
+
+    Setup:
+      - System81 profile first (no password_hash)
+      - dev profile second (with password_hash)
+      - same username
+
+    Expected: correct dev password authenticates as the dev user,
+    not the System81 user.
+    """
+    from src.system81 import ExternalIdentity
+    identity = ExternalIdentity(
+        user_id="system81_test",
+        username="alice",
+        email="alice@s81.com",
+        provider="system81",
+        external_subject="test",
+        metadata={},
+    )
+    user_store.get_or_create(identity)  # System81 profile first
+    # register() would reject duplicate username, so write dev record
+    # directly to simulate a pre-existing dev account
+    import json
+    from datetime import datetime
+    users = user_store._load()
+    users.append({
+        "user_id": "user_dev_alice",
+        "username": "alice",
+        "password_hash": hash_password("devpass"),
+        "created_at": datetime.now().isoformat(),
+    })
+    user_store._save(users)
+
+    # Verify: correct dev password authenticates as dev user
+    result = user_store.verify("alice", "devpass")
+    assert result is not None
+    assert result.user_id == "user_dev_alice"
+    assert result.username == "alice"
+
+    # Wrong password still rejected
+    assert user_store.verify("alice", "wrongpass") is None
+
+    # System81 profile remains unaffected
+    s81_record = user_store.get_by_id("system81_test")
+    assert s81_record is not None
+    assert "password_hash" not in s81_record
+
+
 # --- Sessions ---
 
 def test_session_create_and_verify(user_store: UserStore, session_mgr: SessionManager):

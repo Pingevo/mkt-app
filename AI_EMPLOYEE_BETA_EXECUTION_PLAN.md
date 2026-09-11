@@ -452,8 +452,8 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 | Evidence (Media Core) | `tests/test_media_gen_provider_flow.py tests/test_phase4_media_wiring.py` = 60 passed, 0 failed; `tests/test_browser_e2e.py::TestImageGenerationBrowserE2E + TestVideoGenerationBrowserE2E + TestMediaPersistenceBrowserE2E` = 8 passed, 0 failed; `git diff --check` clean at acceptance. Regression fixtures: `test_uat_regression_unrelated_product_ref_not_sent`, `test_unknown_reference_ordinal_rejected_via_real_sequence`, `test_reference_mention_with_empty_full_catalog_rejected`. |
 | Evidence (historical, immutable) | Image probes: `evaluation_artifacts/image_probe_20260908_092915/`; Final Agent 4 UAT: `evaluation_artifacts/final_agent4_uat_20260908_094512/`; Original failed UAT preserved: `evaluation_artifacts/real_uat_20260908_083822_FAILED_PARTIAL/`; Pre-subset-fix real UAT: `output/uat_media_20260909_125427/uat_report.json` — real image/video execution succeeded before the subset correction, but exposed extra-reference contamination; `06157af` fixed the defect offline; this is not post-fix fidelity/subset-isolation acceptance; do not rerun without separate Product Owner approval. These remain evidence, not current PASS. |
 | Paid calls allowed now | No / $0. No paid/model/web/media/provider UAT is authorized unless the Product Owner approves it separately. The $1.00 Wan 2.7 video generation (request `aTo9OCZ5KlcV3Ld1r1nY`, 2026-09-10) was a completed, previously approved historical call — not continuing authorization. |
-| Next exact action | **MB-01 (Multi-Brand Foundation) implementation complete** — pending Codex MB-01 acceptance review. Stage A `71c1e62` and Stage B `7a3c293` frozen. System81 and Stage C pending after multi-brand foundation. |
-| Last updated | 2026-09-11 (MB-01 Multi-Brand Foundation implemented; AUTH-ISO-01 Stages A/B frozen) |
+| Next exact action | **System81 authentication integration correction round complete** — pending final Codex acceptance review. Stage A `71c1e62`, Stage B `7a3c293`, MB-01 `f15cdbd` frozen. Production auth = System81 (local username/password is not the production flow). Identity mapping = `system81_{sha256(sub)}` (collision-domain-safe). SYSTEM81 CONTRACT QUALIFICATION REQUIRED. LIVE SYSTEM81 QUALIFICATION PENDING. MB-02 and Stage C pending. Paid calls = $0. Live System81 calls = 0. |
+| Last updated | 2026-09-11 (System81 correction round: collision-domain-safe identity + dev verifier robustness; AUTH-ISO-01 Stages A/B + MB-01 frozen) |
 
 ## Progress Ledger — ARCH-CLEANUP-01 (Manager removal)
 
@@ -479,15 +479,22 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 |---|---|
 | Phase ID | AUTH-ISO-01 |
 | Agent ID | SHARED-RUNTIME |
-| Gate status | Stage A COMPLETE (commit `71c1e62`). Stage B COMPLETE (uncommitted, pending Codex acceptance). Stage C pending. |
+| Gate status | Stage A COMPLETE (commit `71c1e62`). Stage B COMPLETE (commit `7a3c293`). MB-01 COMPLETE (commit `f15cdbd`). System81 integration COMPLETE (uncommitted, pending Codex acceptance). Stage C pending. |
 | Blocking | Yes — supersedes all other work (including the deferred Wan 2.7 review) until closed |
 | Baseline HEAD | `3e0588f` (auth + workspace isolation initial implementation) |
 | Stage A commit | `71c1e62 fix(auth): enforce per-user workspace isolation` |
+| Stage B commit | `7a3c293 fix(auth): isolate scheduler state per user` |
+| MB-01 commit | `f15cdbd feat(brand): add multi-brand workspace foundation` |
+| System81 integration | Uncommitted — pending final Codex acceptance review. Production auth = System81. Local username/password is dev/test-only (`MKTAPP_DEV_AUTH=1`). Identity mapping = `system81_{sha256(sub)}` (full 64-char hex, collision-domain-safe). |
+| SYSTEM81 CONTRACT QUALIFICATION REQUIRED | Before production/live acceptance, confirm: (1) Is `sub` always present in userinfo? (2) Is `sub` immutable/stable for the same person? (3) Can `username` be renamed/recycled? If `sub` is guaranteed present+stable, pin identity to `sub` and remove fallback ambiguity. If not, define the actual canonical System81 identifier before production release. |
+| LIVE SYSTEM81 QUALIFICATION PENDING | Zero live System81 calls performed. After code acceptance and commit, one live smoke test required: obtain login URL → real System81 login → callback → userinfo verification → MKTApp session → `/api/auth/me` → brand list → logout. |
+| Token-redaction/logging policy | System81 contract uses `?token=...` query-string callback. Current `log_level="warning"` suppresses Uvicorn access logs. Before production deployment, verify token-redaction/logging policy so callback query tokens are not exposed in access logs. |
 | Uncommitted follow-up (preserved, not part of this proposal) | `src/scheduler.py`, `web_viewer.py`, `tests/test_scheduler_ownership.py` — scheduler ownership check for `remove_job`/`toggle_job`/`run_now` |
 | Code-truth findings | 9 verified defects (see below). The earlier `PER-USER STATE ISOLATION VERIFIED` conclusion is **superseded** — it passed API-level isolation tests but missed thread-context propagation, path-component containment, scheduler store resolution order, process-global state, and legacy fallback paths. |
 | Paid calls allowed | No / $0 |
-| Next exact action | Codex final Stage B acceptance review. |
-| Last updated | 2026-09-11 — Stage B final remediation complete (4 fixes). See Stage B remediation results below. |
+| Live System81 calls | 0 — all System81 HTTP behavior mocked in tests |
+| Next exact action | Codex final System81 acceptance review (correction round complete). |
+| Last updated | 2026-09-11 — System81 correction round: collision-domain-safe identity mapping + dev verifier mixed-schema robustness. See System81 integration results below. |
 
 ### Accepted code-truth findings (9 defects)
 
