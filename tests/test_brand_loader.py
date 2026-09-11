@@ -17,8 +17,24 @@ import sys
 import json
 import tempfile
 from pathlib import Path
+from contextlib import contextmanager
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+@contextmanager
+def _workspace_at(root: Path):
+    """Set a WorkspaceContext rooted directly at ``root`` for the duration of the block.
+
+    Replaces the old os.chdir() pattern that relied on the cwd fallback.
+    """
+    from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
+    ws = WorkspaceContext(user_id="test_user", root=root)
+    token = set_workspace(ws)
+    try:
+        yield
+    finally:
+        reset_workspace(token)
 
 
 # ---------------------------------------------------------------------------
@@ -312,14 +328,8 @@ def test_load_brand_reference_with_product_profile_overrides_audience():
             },
         })
 
-        # เปลี่ยน cwd ไปที่ tmp เพื่อให้ brand_loader หา data/ เจอ
-        import os
-        old_cwd = os.getcwd()
-        os.chdir(tmp)
-        try:
+        with _workspace_at(tmp):
             result = load_brand_reference(brand_dir, product_id="K9")
-        finally:
-            os.chdir(old_cwd)
 
         # audience ของ K9 ทับของแบรนด์
         assert "35-50" in result, f"product audience age missing: {result}"
@@ -339,13 +349,8 @@ def test_load_brand_reference_without_product_profile_uses_brand():
         _make_brand_with_audience(brand_dir, age="30-45", role="ผู้ปกครอง")
         # ไม่สร้าง product_profile
 
-        import os
-        old_cwd = os.getcwd()
-        os.chdir(tmp)
-        try:
+        with _workspace_at(tmp):
             result = load_brand_reference(brand_dir, product_id="K9")
-        finally:
-            os.chdir(old_cwd)
 
         assert "30-45" in result, f"brand audience missing: {result}"
 
@@ -366,13 +371,8 @@ def test_load_brand_reference_with_product_profile_adds_positioning():
             "price_tier": "flagship",
         })
 
-        import os
-        old_cwd = os.getcwd()
-        os.chdir(tmp)
-        try:
+        with _workspace_at(tmp):
             result = load_brand_reference(brand_dir, product_id="K9")
-        finally:
-            os.chdir(old_cwd)
 
         assert "Apple Watch SE Kids" in result, f"competitors missing: {result}"
         assert "กล้อง 5MP" in result, f"differentiators missing: {result}"
@@ -396,13 +396,8 @@ def test_load_brand_rules_with_product_tone_adjustment():
             "tone_adjustment": "พรีเมียม มั่นใจ จริงจังกว่า",
         })
 
-        import os
-        old_cwd = os.getcwd()
-        os.chdir(tmp)
-        try:
+        with _workspace_at(tmp):
             result = load_brand_rules(brand_dir, product_id="K9")
-        finally:
-            os.chdir(old_cwd)
 
         assert "เหมือนพ่อแม่" in result, f"brand voice missing: {result}"
         assert "พรีเมียม" in result, f"tone_adjustment missing: {result}"
@@ -428,13 +423,8 @@ def test_load_brand_visual_with_product_visual_override():
             },
         })
 
-        import os
-        old_cwd = os.getcwd()
-        os.chdir(tmp)
-        try:
+        with _workspace_at(tmp):
             result = load_brand_visual(brand_dir, product_id="K9")
-        finally:
-            os.chdir(old_cwd)
 
         # visual_override ทับฟิลด์ที่ระบุ (ทั้งก้อนของฟิลด์ย่อย)
         assert "ดำ-ทอง" in str(result.get("image_style", {}).get("tone", "")), \
@@ -462,6 +452,41 @@ def test_load_brand_rules_product_id_none_backward_compat():
         # เรียกแบบส่ง product_id=None ชัดๆ — ต้องเหมือนกัน
         result_none = load_brand_rules(brand_dir, product_id=None)
         assert result == result_none, f"product_id=None should be identical"
+
+
+# ---------------------------------------------------------------------------
+# AUTH-ISO-01-A: legacy fallback must not leak global state to new users
+# ---------------------------------------------------------------------------
+
+def test_no_legacy_fallback_for_new_user(tmp_path: Path):
+    """User B with no product_profile must NOT fall back to Path.cwd()/cache.
+
+    The legacy fallback at brand_loader.py:303-304 checks Path.cwd()/cache
+    and Path.cwd()/data, letting a new user's workspace be influenced by
+    legacy/global state. This must be removed for authenticated web execution.
+    """
+    import os
+    from src.brand_loader import load_product_profile
+    from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
+
+    # Create a global product profile that should NOT be visible to User B
+    global_cache = tmp_path / "cache" / "ProductA"
+    global_cache.mkdir(parents=True)
+    (global_cache / "product_profile.json").write_text(
+        json.dumps({"audience": {"primary": {"age": "GLOBAL-LEAK"}}}),
+        encoding="utf-8",
+    )
+
+    # User B has an empty workspace
+    ws_b = WorkspaceContext.for_user("user_bbb", tmp_path)
+    token = set_workspace(ws_b)
+    try:
+        profile = load_product_profile("ProductA")
+        # User B must not see the global profile — legacy cwd fallback removed
+        assert profile == {}, \
+            f"User B must not see legacy global product profile: {profile}"
+    finally:
+        reset_workspace(token)
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ Implemented minimal local/Beta authentication with complete per-user state isola
 
 - **Context-var based workspace resolution**: A single `contextvars.ContextVar` holds the current `WorkspaceContext`. The auth middleware sets it per-request. All state modules call `user_state_root()` which checks the context-var. This avoids changing every function signature.
 - **Factory config stays global**: `config/agent_instructions.json`, `config/agents.yaml`, `config/content_policy.yaml`, `brand/` templates remain at the project root. Only user-derived state (products, cache, history, outputs, settings) moves to per-user workspaces.
-- **Server-side sessions**: Sessions stored in JSON file with HMAC-signed tokens. Logout invalidates the server-side record. Tampered tokens are rejected.
+- **Server-side sessions**: Sessions stored in JSON file with opaque high-entropy server-side tokens (`secrets.token_urlsafe(32)`) with TTL and server-side revocation. Logout invalidates the server-side record. Tampered/unknown tokens are rejected.
 - **Scheduler ownership**: Scheduler jobs store `user_id`. When a job runs, it sets the per-user workspace context and passes the session cookie in httpx calls to the web server.
 
 ### Test results

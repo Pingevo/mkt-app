@@ -157,19 +157,13 @@ def _server(tmp_path_factory):
     from src import product_db
     _orig_project_root = product_db._project_root
 
-    # Patch filesystem paths — save originals for cleanup
+    # Patch filesystem paths — use PROJECT_ROOT so WorkspaceContext.for_user
+    # resolves to tmp/users/{user_id}/. Per-request workspace context is set
+    # by the auth middleware in the server thread.
     _orig_paths = {
         "PROJECT_ROOT": web_viewer.PROJECT_ROOT,
-        "OUTPUT_DIR": web_viewer.OUTPUT_DIR,
-        "DATA_DIR": web_viewer.DATA_DIR,
-        "CACHE_DIR": web_viewer.CACHE_DIR,
-        "BRAND_DIR": web_viewer.BRAND_DIR,
     }
     web_viewer.PROJECT_ROOT = tmp
-    web_viewer.OUTPUT_DIR = lambda: tmp / "output"
-    web_viewer.DATA_DIR = lambda: tmp / "data"
-    web_viewer.CACHE_DIR = lambda: tmp / "cache"
-    web_viewer.BRAND_DIR = lambda: tmp / "brand"
 
     # Register a test user for auth
     from src.auth import UserStore, SessionManager
@@ -191,7 +185,12 @@ def _server(tmp_path_factory):
     (_ws_root / "cache").mkdir(parents=True)
     (_ws_root / "brand").mkdir(parents=True)
     (_ws_root / "output").mkdir(parents=True)
-    # Patch product_db to the per-user workspace
+    # Set workspace context for setup code (server thread gets it via auth middleware)
+    from src.workspace_context import WorkspaceContext, set_workspace as _set_ws, reset_workspace as _reset_ws
+    _ws = WorkspaceContext.for_user(_user.user_id, tmp)
+    _ws_token = _set_ws(_ws)
+
+    # Patch product_db to the per-user workspace for setup calls
     product_db._project_root = lambda: _ws_root
     for name, text in [(ALPHA_NAME, ALPHA_TEXT), (BETA_NAME, BETA_TEXT)]:
         product_db.set_status(name, product_db.STATUS_READY)
@@ -298,10 +297,7 @@ def _server(tmp_path_factory):
     CompetitorReportRenderer.validate = _orig_validate
     comp_mod.BrandInterpretationPass.interpret = _orig_interpret
     web_viewer.PROJECT_ROOT = _orig_paths["PROJECT_ROOT"]
-    web_viewer.OUTPUT_DIR = lambda: _orig_paths["OUTPUT_DIR"]
-    web_viewer.DATA_DIR = lambda: _orig_paths["DATA_DIR"]
-    web_viewer.CACHE_DIR = lambda: _orig_paths["CACHE_DIR"]
-    web_viewer.BRAND_DIR = lambda: _orig_paths["BRAND_DIR"]
+    _reset_ws(_ws_token)
     web_viewer._current_llm = _orig_current_llm
     web_viewer._session_ts = _orig_session_ts
     web_viewer._cancel_requested = _orig_cancel

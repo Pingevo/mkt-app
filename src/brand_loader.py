@@ -289,19 +289,17 @@ def load_product_profile(product_id: str) -> dict[str, Any]:
     use_cases, price_tier, tone_adjustment, visual_override).
     กฎรวม: สินค้ามีฟิลด์ไหน → ใช้ของสินค้า; ไม่มี → ใช้ของแบรนด์
 
-    ค้นหาจาก cwd/cache ก่อน (สำหรับ test) แล้ว fallback ไป project_root/cache
-    รวมถึง data/ เดิมเพื่อ backward compat
+    ค้นหาจาก workspace root (per-user หรือ project root) — ไม่ fallback ไป Path.cwd()
+    รวมถึง data/ เดิมเพื่อ backward compat ภายใต้ workspace root เท่านั้น
     """
     if not product_id:
         return {}
-    # Resolve through per-user workspace when active, else cwd/project_root fallbacks
-    from .workspace_context import user_state_root
+    # Resolve through per-user workspace when active, else project root
+    from .workspace_context import user_state_root, contain_path
     _ws_root = user_state_root(Path(__file__).resolve().parent.parent)
     candidates = [
-        _ws_root / "cache" / product_id / "product_profile.json",
-        _ws_root / "data" / product_id / "product_profile.json",
-        Path.cwd() / "cache" / product_id / "product_profile.json",
-        Path.cwd() / "data" / product_id / "product_profile.json",
+        contain_path(product_id, _ws_root / "cache") / "product_profile.json",
+        contain_path(product_id, _ws_root / "data") / "product_profile.json",
     ]
     for path in candidates:
         data = _read_json(path)

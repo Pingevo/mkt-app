@@ -53,7 +53,8 @@ def _project_root() -> Path:
 
 def _product_dir(product_id: str) -> Path:
     """โฟลเดอร์ DB ของสินค้า — อยู่ใน cache/ ไม่ใช่ data/ (แยกจากไฟล์ user)."""
-    return _project_root() / "cache" / product_id
+    from .workspace_context import contain_path
+    return contain_path(product_id, _project_root() / "cache")
 
 
 def _db_path(product_id: str) -> Path:
@@ -253,6 +254,8 @@ def save_uploaded_files(
       - ถ้าชื่อซ้ำแต่เนื้อต่าง → เปลี่ยนชื่อเป็น ชื่อ_1.ext (dedup ชื่อ ไม่เขียนทับของเดิม)
     """
     product_dir = _project_root() / "data" / product_id
+    from .workspace_context import contain_path
+    product_dir = contain_path(product_id, _project_root() / "data")
     product_dir.mkdir(parents=True, exist_ok=True)
     existing_hashes = get_existing_file_hashes(product_id)
 
@@ -263,7 +266,7 @@ def save_uploaded_files(
         content_hash = hashlib.sha256(content).hexdigest()
         if content_hash in existing_hashes:
             continue  # เนื้อซ้ำ → ข้าม
-        dest = product_dir / filename
+        dest = contain_path(filename, product_dir)
         if dest.exists():
             stem = dest.stem
             suffix = dest.suffix

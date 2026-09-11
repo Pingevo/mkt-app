@@ -43,12 +43,28 @@ from src.local_workspace import (
 )
 
 
+def _ws_root() -> Path:
+    """Workspace-aware root for user state (matches production resolution)."""
+    from src.workspace_context import user_state_root
+    return user_state_root(PROJECT_ROOT)
+
+
 @pytest.fixture(autouse=True)
-def clean_workspace():
-    """Ensure clean local workspace before and after each test."""
+def clean_workspace(tmp_path: Path, monkeypatch):
+    """Ensure clean local workspace before and after each test.
+
+    Redirect all mutable roots to a temporary directory BEFORE any reset
+    call, so destructive operations never touch the real repository checkout.
+    """
+    # Redirect workspace to tmp_path before any reset
+    from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
+    ws = WorkspaceContext.for_user("test_user", tmp_path)
+    token = set_workspace(ws)
+    # Now safe to reset — operates on tmp_path, not the real repo
     reset_local_workspace()
     yield
     reset_local_workspace()
+    reset_workspace(token)
 
 
 # --- 1. Factory isolation: saving instructions does not alter product config ---
@@ -290,7 +306,7 @@ def test_reset_clears_product_cache():
     from src import product_db
 
     # Simulate a product cache record
-    cache_dir = PROJECT_ROOT / "cache"
+    cache_dir = _ws_root() / "cache"
     test_product = cache_dir / "TestProduct123"
     test_product.mkdir(parents=True, exist_ok=True)
     (test_product / "product.json").write_text('{"product_id": "TestProduct123", "status": "ready"}', encoding="utf-8")
@@ -305,7 +321,7 @@ def test_reset_clears_product_cache():
 def test_reset_preserves_media_capabilities_cache():
     """Reset must NOT remove cache/_media_capabilities/ (product infrastructure)."""
     media_caps = PROJECT_ROOT / "cache" / "_media_capabilities"
-    # This directory is tracked in git — it should exist
+    # This directory is tracked in git — it should exist at the real project root
     assert media_caps.exists(), "Test precondition: _media_capabilities should exist"
 
     reset_local_workspace()
@@ -382,7 +398,7 @@ def test_fresh_workspace_no_product_context():
 def test_reset_clears_content_history():
     """Reset removes content history."""
     import json
-    ch_path = PROJECT_ROOT / "cache" / "content_history.json"
+    ch_path = _ws_root() / "cache" / "content_history.json"
     ch_path.parent.mkdir(parents=True, exist_ok=True)
     with open(ch_path, "w") as f:
         json.dump({"entries": [{"test": True}]}, f)
@@ -396,20 +412,20 @@ def test_reset_clears_scheduler_state():
     """Reset removes scheduler state."""
     import json
     for fname in ["scheduled_jobs.json", "scheduled_runs.json"]:
-        p = PROJECT_ROOT / "cache" / fname
+        p = _ws_root() / "cache" / fname
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, "w") as f:
             json.dump({"jobs": [], "runs": []}, f)
 
     reset_local_workspace()
 
-    assert not (PROJECT_ROOT / "cache" / "scheduled_jobs.json").exists()
-    assert not (PROJECT_ROOT / "cache" / "scheduled_runs.json").exists()
+    assert not (_ws_root() / "cache" / "scheduled_jobs.json").exists()
+    assert not (_ws_root() / "cache" / "scheduled_runs.json").exists()
 
 
 def test_reset_clears_run_resources():
     """Reset removes run resource sessions."""
-    rr = PROJECT_ROOT / "cache" / "run_resources" / "test_session"
+    rr = _ws_root() / "cache" / "run_resources" / "test_session"
     rr.mkdir(parents=True, exist_ok=True)
     (rr / "resource.json").write_text("{}", encoding="utf-8")
 
@@ -420,7 +436,7 @@ def test_reset_clears_run_resources():
 
 def test_reset_clears_staging():
     """Reset removes staging batches."""
-    staging = PROJECT_ROOT / "data" / ".staging" / "test_batch"
+    staging = _ws_root() / "data" / ".staging" / "test_batch"
     staging.mkdir(parents=True, exist_ok=True)
     (staging / "batch.json").write_text("{}", encoding="utf-8")
 
@@ -431,7 +447,7 @@ def test_reset_clears_staging():
 
 def test_reset_clears_output():
     """Reset removes generated outputs."""
-    output = PROJECT_ROOT / "output" / "test_run"
+    output = _ws_root() / "output" / "test_run"
     output.mkdir(parents=True, exist_ok=True)
     (output / "result.txt").write_text("test", encoding="utf-8")
 
@@ -472,7 +488,7 @@ def test_product_lifecycle_create_and_reset():
     assert product_db.get_ready_products() == []
 
     # Create a product (simulates ingestion — needs both data/ dir and cache/ record)
-    data_dir = PROJECT_ROOT / "data" / "LifecycleTest"
+    data_dir = _ws_root() / "data" / "LifecycleTest"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "source.txt").write_text("Test product source", encoding="utf-8")
     record = {
@@ -565,7 +581,7 @@ def test_product_profile_save_does_not_mutate_product_config():
     """Product profile save must NOT alter any file under config/."""
     import json
     # Simulate what the web_viewer endpoint does
-    profile_dir = PROJECT_ROOT / "cache" / "ProfileTest"
+    profile_dir = _ws_root() / "cache" / "ProfileTest"
     profile_dir.mkdir(parents=True, exist_ok=True)
     path = profile_dir / "product_profile.json"
     path.write_text(json.dumps({"audience": "test"}, ensure_ascii=False), encoding="utf-8")
@@ -586,7 +602,7 @@ def test_product_profile_save_does_not_mutate_product_config():
 
 def test_ai_usage_log_cleared_by_reset():
     """AI usage log (generated history) is cleared by reset."""
-    logs_dir = PROJECT_ROOT / "logs"
+    logs_dir = _ws_root() / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_file = logs_dir / "llm_usage.jsonl"
     log_file.write_text('{"test": true}\n', encoding="utf-8")
@@ -671,7 +687,7 @@ def test_product_delete_removes_content_history_references():
     reset_local_workspace()
 
     # Create a product
-    data_dir = PROJECT_ROOT / "data" / "SymTest"
+    data_dir = _ws_root() / "data" / "SymTest"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "info.txt").write_text("Sym test product", encoding="utf-8")
     product_db.save("SymTest", {
@@ -712,11 +728,11 @@ def test_product_delete_removes_product_profile():
     reset_local_workspace()
 
     # Create product data + cache
-    data_dir = PROJECT_ROOT / "data" / "ProfileSymTest"
+    data_dir = _ws_root() / "data" / "ProfileSymTest"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "info.txt").write_text("Profile sym test", encoding="utf-8")
 
-    cache_dir = PROJECT_ROOT / "cache" / "ProfileSymTest"
+    cache_dir = _ws_root() / "cache" / "ProfileSymTest"
     cache_dir.mkdir(parents=True, exist_ok=True)
     (cache_dir / "product_profile.json").write_text(
         json.dumps({"audience": "test audience"}), encoding="utf-8"
@@ -756,11 +772,11 @@ def test_product_full_lifecycle_create_delete_reset():
     assert get_entries_for_product(PROJECT_ROOT, "FullLife") == []
 
     # 2. Create product (simulates ingestion)
-    data_dir = PROJECT_ROOT / "data" / "FullLife"
+    data_dir = _ws_root() / "data" / "FullLife"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "source.txt").write_text("Full lifecycle product", encoding="utf-8")
 
-    cache_dir = PROJECT_ROOT / "cache" / "FullLife"
+    cache_dir = _ws_root() / "cache" / "FullLife"
     cache_dir.mkdir(parents=True, exist_ok=True)
     (cache_dir / "product_profile.json").write_text(
         json.dumps({"category": "electronics"}), encoding="utf-8"
@@ -957,7 +973,7 @@ def test_full_reset_eliminates_all_previous_user_influence():
     bdir.mkdir(parents=True, exist_ok=True)
     (bdir / "voice.json").write_text('{"personality": "test"}', encoding="utf-8")
     # 6. Product
-    data_dir = PROJECT_ROOT / "data" / "FullReset"
+    data_dir = _ws_root() / "data" / "FullReset"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "info.txt").write_text("Full reset test", encoding="utf-8")
     product_db.save("FullReset", {
@@ -1020,7 +1036,7 @@ def test_safe_reset_preserves_output_bytes(tmp_path, monkeypatch):
     import shutil
 
     # Create test output directory with real files
-    output_dir = PROJECT_ROOT / "output"
+    output_dir = _ws_root() / "output"
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
@@ -1069,7 +1085,7 @@ def test_safe_reset_preserves_log_bytes(tmp_path, monkeypatch):
     import shutil
 
     # Create test log file
-    logs_dir = PROJECT_ROOT / "logs"
+    logs_dir = _ws_root() / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_file = logs_dir / "llm_usage.jsonl"
     log_file.write_text('{"test": "log entry"}\n', encoding="utf-8")
@@ -1117,7 +1133,7 @@ def test_safe_reset_still_clears_output_affecting_state():
     save_content_pillars_local(["p1"], {"p1": ["kw"]})
     save_media_overrides({"image_model": "test"})
 
-    data_dir = PROJECT_ROOT / "data" / "SafeResetTest"
+    data_dir = _ws_root() / "data" / "SafeResetTest"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "info.txt").write_text("test", encoding="utf-8")
     product_db.save("SafeResetTest", {
@@ -1160,7 +1176,7 @@ def test_archive_not_visible_to_runtime_readers(tmp_path, monkeypatch):
     from src.brand_loader import load_brand_rules
 
     # Create output and archive it
-    output_dir = PROJECT_ROOT / "output"
+    output_dir = _ws_root() / "output"
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
@@ -1233,7 +1249,7 @@ def test_failed_backup_verification_prevents_deletion(tmp_path, monkeypatch):
     import shutil
 
     # Create output with real files
-    output_dir = PROJECT_ROOT / "output"
+    output_dir = _ws_root() / "output"
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
@@ -1291,7 +1307,7 @@ def test_purge_history_mode_deletes_without_archive(tmp_path, monkeypatch):
     import shutil
 
     # Create output
-    output_dir = PROJECT_ROOT / "output"
+    output_dir = _ws_root() / "output"
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
@@ -1324,7 +1340,7 @@ def test_default_reset_is_safe_not_destructive(tmp_path, monkeypatch):
     import shutil
 
     # Create output
-    output_dir = PROJECT_ROOT / "output"
+    output_dir = _ws_root() / "output"
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)

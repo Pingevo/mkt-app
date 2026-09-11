@@ -49,7 +49,8 @@ def _staging_root() -> Path:
 
 
 def _batch_dir(batch_id: str) -> Path:
-    return _staging_root() / batch_id
+    from .workspace_context import contain_path
+    return contain_path(batch_id, _staging_root())
 
 
 def _batch_json_path(batch_id: str) -> Path:
@@ -81,10 +82,11 @@ def create_batch(files: list[tuple[str, bytes]]) -> str:
     source_dir.mkdir(parents=True, exist_ok=False)
 
     saved_files: list[dict] = []
+    from .workspace_context import contain_path
     for filename, content in files:
         if not filename or filename.startswith(".") or filename == ".DS_Store":
             continue
-        dest = source_dir / filename
+        dest = contain_path(filename, source_dir)
         if dest.exists():
             stem = dest.stem
             suffix = dest.suffix

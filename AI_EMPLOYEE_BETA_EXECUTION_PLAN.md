@@ -440,20 +440,20 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 
 | Field | Current value |
 |---|---|
-| Current phase | Media Capability Coverage (C2) — video/reference-fidelity sub-checkpoint PASS; C2 remains PARTIAL/open |
-| Current objective | Codex review of the narrow Wan 2.7 config-switch diff before commit; then continue C2 image capability and remaining criteria |
+| Current phase | **AUTH-ISO-01 (Auth + Per-User Workspace Isolation remediation)** — CURRENT BLOCKING PHASE. C2/Wan work deferred, not discarded. |
+| Current objective | Review/close AUTH-ISO-01 remediation proposal (revision 3) before returning to C2 image capability and remaining criteria. |
 | Checkpoint A — Final grounding boundary | `ACCEPTED / FROZEN` at `65ed8c7`. Generic final-output truth boundary wired into the smallest common pre-persistence seam for Agents 1–4; model reasoning for semantic entailment; no keyword/regex lists. Implemented safeguard — not yet re-qualified against current model. |
 | Gemini 3.8 migration | `ACCEPTED / FROZEN` at `c39f596`. Production text/reasoning workloads migrated to `google/gemini-3.8-flash` (read from `config/agents.yaml`). |
 | Checkpoint C1 — Media Core (mechanical transport) | `ACCEPTED / FROZEN` at `5cc4724` + `06157af`. Per-item product+asset reference selection via `extract_reference_ordinals`/`filter_catalog_by_ordinals`/`selected_reference_ordinals` in `compose_media_input`; `preflight_reference_mentions` rejects unknown/out-of-range ordinals and empty-catalog mentions. Reviewed and accepted by Codex. Do not reopen speculative media plumbing. |
-| Checkpoint C2 — Media Capability Coverage | `PARTIAL` (open). Video/reference-fidelity sub-checkpoint: `PASS` (2026-09-10). Browser UI → production Media → accepted OpenRouter Gateway → `alibaba/wan-2.7`; five original references (3 K5 product + child a_0007 + logo a_0008) delivered as `input_references`; request `aTo9OCZ5KlcV3Ld1r1nY`, 10 s, $1.00, `success`; video persisted and playable in UI; K5/child/logo visibly used. Known issue: requested 9:16, returned 1280×720 — responsible upstream layer (OpenRouter normalization vs Wan provider behavior) not yet proven. Image capability and other C2 criteria remain open. |
+| Checkpoint C2 — Media Capability Coverage | `PARTIAL` (open) — **DEFERRED** while AUTH-ISO-01 is blocking. Video/reference-fidelity sub-checkpoint: `PASS` (2026-09-10). Browser UI → production Media → accepted OpenRouter Gateway → `alibaba/wan-2.7`; five original references (3 K5 product + child a_0007 + logo a_0008) delivered as `input_references`; request `aTo9OCZ5KlcV3Ld1r1nY`, 10 s, $1.00, `success`; video persisted and playable in UI; K5/child/logo visibly used. Known issue: requested 9:16, returned 1280×720 — responsible upstream layer (OpenRouter normalization vs Wan provider behavior) not yet proven. Image capability and other C2 criteria remain open. |
 | Checkpoint B — User-facing presentation | `PLANNED` (open). Agent 2/3 user-facing rendering still has internal phrases / pending-validation leakage; no accepted closure evidence. |
 | Scheduler (Checkpoint D) | **ACCEPTED / FROZEN** at `5781fd8`. Offline: 72 focused tests + 1 browser E2E passed. Real UI wall-clock qualification: one one-time `product_spec` job fired autonomously at `2026-09-09T16:06:00+07:00`, status `success`, 2 LLM calls, cost `$0.03216`, 0 media calls. Known non-blocking: `auto_image=true` serialized by UI defaults but no media path executes for `product_spec`-only flow; `session_ts` empty in run record but output/history/cost all functioned. |
 | Checkpoint E — Final qualification | `BLOCKED` (open). No current-model qualification evidence; no Agent 1–4 declared Beta-ready. Agent 4 final-grounding/text requalification belongs here; visual fidelity belongs to C2. |
 | Evidence (Media Core) | `tests/test_media_gen_provider_flow.py tests/test_phase4_media_wiring.py` = 60 passed, 0 failed; `tests/test_browser_e2e.py::TestImageGenerationBrowserE2E + TestVideoGenerationBrowserE2E + TestMediaPersistenceBrowserE2E` = 8 passed, 0 failed; `git diff --check` clean at acceptance. Regression fixtures: `test_uat_regression_unrelated_product_ref_not_sent`, `test_unknown_reference_ordinal_rejected_via_real_sequence`, `test_reference_mention_with_empty_full_catalog_rejected`. |
 | Evidence (historical, immutable) | Image probes: `evaluation_artifacts/image_probe_20260908_092915/`; Final Agent 4 UAT: `evaluation_artifacts/final_agent4_uat_20260908_094512/`; Original failed UAT preserved: `evaluation_artifacts/real_uat_20260908_083822_FAILED_PARTIAL/`; Pre-subset-fix real UAT: `output/uat_media_20260909_125427/uat_report.json` — real image/video execution succeeded before the subset correction, but exposed extra-reference contamination; `06157af` fixed the defect offline; this is not post-fix fidelity/subset-isolation acceptance; do not rerun without separate Product Owner approval. These remain evidence, not current PASS. |
-| Paid calls allowed now | No. No paid/model/web/media/provider UAT is authorized unless the Product Owner approves it separately. The $1.00 Wan 2.7 video generation (request `aTo9OCZ5KlcV3Ld1r1nY`, 2026-09-10) was a completed, previously approved historical call — not continuing authorization. |
-| Next exact action | Codex review of the narrow Wan 2.7 config-switch diff (4 files: `config/media.yaml`, `tests/test_media_gen_provider_flow.py`, `tests/test_model_migration.py`, `cache/_media_capabilities/video:alibaba_wan-2.7.json`) before commit. Do not commit until reviewed. |
-| Last updated | 2026-09-10 (C2 video/reference-fidelity sub-checkpoint PASS; C2 remains PARTIAL/open) |
+| Paid calls allowed now | No / $0. No paid/model/web/media/provider UAT is authorized unless the Product Owner approves it separately. The $1.00 Wan 2.7 video generation (request `aTo9OCZ5KlcV3Ld1r1nY`, 2026-09-10) was a completed, previously approved historical call — not continuing authorization. |
+| Next exact action | **Implement Stage A (AUTH-ISO-01-A):** path containment, worker-context propagation, legacy fallback removal, test-fixture repair. Stages B/C remain pending Stage A completion and Codex review. |
+| Last updated | 2026-09-11 (AUTH-ISO-01 is current blocking phase; C2/Wan deferred) |
 
 ## Progress Ledger — ARCH-CLEANUP-01 (Manager removal)
 
@@ -471,7 +471,320 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 | Tests (offline, rerun) | `pytest tests/test_manager_removal_contract.py tests/test_model_migration.py` = 49 passed, 0 failed. `pytest tests/test_orchestrator_campaign_integration.py tests/test_orchestrator_visual_style_types.py` = 17 passed, 0 failed. `pytest tests/test_media_gen_provider_flow.py tests/test_pricing_format.py tests/test_qual_c2_launcher.py` = 105 passed, 0 failed. Combined total: 171 passed, 0 failed. |
 | Tests (browser, rerun) | `pytest tests/test_browser_e2e.py -k "ImageGenerationBrowserE2E or VideoGenerationBrowserE2E or MediaPersistenceBrowserE2E"` = 8 passed, 0 failed (rerun during this revision; confirms `/api/run_auto` still reaches `run_content_creator_auto()` and media generation). |
 | Tests (pre-existing failures, unchanged) | `tests/test_browser_upload_real_source.py` = 33 failed (require real source files not present in worktree; identical to baseline before ARCH-CLEANUP-01). |
-| Next single action | Codex/Product Owner freeze review of the diff. Do not commit until reviewed. |
+| Next single action | **SUPERSEDED** by AUTH-ISO-01 (see ledger below). Wan 2.7 config-switch diff review is deferred until AUTH-ISO-01 closes. |
+
+## Progress Ledger — AUTH-ISO-01 (Auth + Per-User Workspace Isolation remediation) — CURRENT BLOCKING PHASE
+
+| Field | Value |
+|---|---|
+| Phase ID | AUTH-ISO-01 |
+| Agent ID | SHARED-RUNTIME |
+| Gate status | Stage A APPROVED for implementation (revision 3 + corrections). Stages B/C pending Stage A completion. |
+| Blocking | Yes — supersedes all other work (including the deferred Wan 2.7 review) until closed |
+| Baseline HEAD | `3e0588f` (auth + workspace isolation initial implementation) |
+| Uncommitted follow-up (preserved, not part of this proposal) | `src/scheduler.py`, `web_viewer.py`, `tests/test_scheduler_ownership.py` — scheduler ownership check for `remove_job`/`toggle_job`/`run_now` |
+| Code-truth findings | 9 verified defects (see below). The earlier `PER-USER STATE ISOLATION VERIFIED` conclusion is **superseded** — it passed API-level isolation tests but missed thread-context propagation, path-component containment, scheduler store resolution order, process-global state, and legacy fallback paths. |
+| Paid calls allowed | No / $0 |
+| Next exact action | Codex final Stage A acceptance review. |
+| Last updated | 2026-09-11 — Stage A implementation + acceptance fixes complete. See Stage A results below. |
+
+### Accepted code-truth findings (9 defects)
+
+1. **Thread context loss**: `web_viewer.py` has 8+ `threading.Thread(target=...)` calls (lines 991, 1298, 1437, 1569, 2221, 2312, 2882, 3698, 3947, 3961, 4559). None propagate the `contextvars.ContextVar`. `contextvars` do not auto-propagate into threads — workers fall back to global project root.
+2. **Path traversal in product_id/folder**: `web_viewer.py:1406` `product_dir = DATA_DIR() / folder_name` (user-controlled `product_name`); `src/product_db.py:56` `_product_dir(product_id)` = `_project_root() / "cache" / product_id` (no containment). Direct proof: `product_db.save("../../user_b/cache/Secret", ...)` writes into User B's cache.
+3. **Path traversal in uploaded filename**: `src/product_db.py:266` `dest = product_dir / filename`; `src/staging.py:87` `dest = source_dir / filename`; `web_viewer.py:2194` `dest = assets_dir / f.filename`. All user-controlled, no containment.
+4. **Scheduler store resolution order**: `src/scheduler.py:894` `_run_job` calls `self._store.load_jobs()` *before* line 908 sets workspace. APScheduler callbacks receive only `job["id"]` (lines 319, 565, 628) — no `user_id`. `rerun_run` (line 698) loads runs before any workspace. `_on_job_missed` (line 279) loads jobs with no workspace. `_job_specs` (line 262) keyed by bare `job_id`, process-global. Direct proof: job saved in User A store = 1; visible from scheduler worker context = 0; `_run_job` reports "job not found."
+5. **Scheduler startup**: `src/scheduler.py:293` `start()` calls `self._store.load_jobs()` with no workspace. Stuck-run cleanup (`_cleanup_stuck_running`, line 290) and durable-session cleanup (`_cleanup_orphaned_durable_sessions`, line 291) run once against the global fallback store. On restart, only the global store loads; per-user jobs are orphaned.
+6. **Process-global state**: `web_viewer.py:211` `_conflict_cache`, `:261` `_BRAND_VISUAL_CACHE`, `:418` `_cancel_requested`, `:2798` `_current_llm`, `:419` `_active_llms`; `scheduler.py:265` `_running_status`. All module-level, shared across users. `_running_status` not user-filtered. `/api/cancel` (line 2740) takes no run/session ID — cancels ALL active runs globally.
+7. **Recovery archive is global, not per-user**: `src/local_workspace.py:38` `_archive_root()` returns `_project_root() / ".recovery_archive"` where `_project_root()` (line 31) is `Path(__file__).resolve().parent.parent` — **not workspace-aware**. Even with User A's `WorkspaceContext` active, the archive resolves to `/Users/its-dev2/MKTApp/.recovery_archive`, not `users/user_a/.recovery_archive`. Child-path traversal can undermine it. Archive inaccessibility to runtime readers is not proven.
+8. **Legacy fallback**: `src/brand_loader.py:303-304` falls back to `Path.cwd()/cache` and `Path.cwd()/data`, letting legacy/global state influence a new user.
+9. **Auth documentation discrepancy + test defects**: `DEVELOPER_LOG.md:38` falsely claims "HMAC-signed tokens" — the implementation (`src/auth.py:224`) uses opaque random tokens (`secrets.token_urlsafe(32)`) with server-side revocation. Opaque tokens are an accepted design, not a defect. The false HMAC claim is a documentation discrepancy. `tests/test_local_workspace.py:49` autouse fixture calls `reset_local_workspace()` against the real repo before redirecting paths. Browser fixtures patch `DATA_DIR`/`OUTPUT_DIR` directly, masking the missing thread-context propagation.
+
+### Behavioral contract (acceptance cases)
+
+1. Every authenticated execution path — request handler, async generator, worker thread, scheduler executor, APScheduler fire — resolves the same `WorkspaceContext` for the same `user_id`. No fallback to global project root when an authenticated user is the originator.
+2. User-controlled path components (`product_id`, `folder`, `filename`, `session_ts`, `batch_id`, `output_dir`) cannot resolve outside the active user workspace root. Covers read, write, upload, rename, delete, archive, output, product DB, staging, assets, media/session access.
+3. User A cannot read, write, delete, list, run, rerun, toggle, cancel, or observe User B's products, cache, history, brand, settings, pillars, assets, scheduler jobs/status/runs/resources, output, usage logs, or recovery data — even if A knows B's IDs or submits traversal paths.
+4. Authenticated web execution never falls back to legacy global state. CLI backward compat remains only through an explicit, non-web boundary.
+5. Scheduler save → run-now/timed fire → run history and restart reload preserve the owning user without creating reusable long-lived credentials.
+6. New users start clean — no reading of legacy global product profiles, brand state, history, or output.
+7. Factory config/templates remain global and read-only: `config/`, tracked `brand/*.example.*`, provider capability cache, tracked fixtures.
+8. Recovery copies and verifies before deletion, remains inaccessible to normal runtime readers, preserves user ownership, and archives into the owning user's workspace.
+
+### Staged design
+
+#### Stage A — Safe path construction, worker-context propagation, legacy fallback removal, test-fixture repair
+
+**Thread-context helper** (corrected): one stdlib helper in `src/workspace_context.py` that wraps a callable with `contextvars.copy_context().run(...)` while preserving the existing thread lifecycle. It does **not** create or join a thread — it returns a wrapped callable suitable for `threading.Thread(target=...)` or `ThreadPoolExecutor.submit(...)`. Caller retains full control of thread creation, daemon flag, and timing.
+
+```python
+def with_workspace_context(fn, /, *args, **kwargs):
+    """Return a zero-arg callable that runs fn under the current context.
+    Use as: threading.Thread(target=with_workspace_context(worker)) or
+    executor.submit(with_workspace_context(lambda: ...))."""
+    ctx = contextvars.copy_context()
+    def _run():
+        return fn(*args, **kwargs)
+    return lambda: ctx.run(_run)
+```
+
+Tests exercise this helper and the actual production worker launch points — not bare `threading.Thread` or bare `ThreadPoolExecutor` (Python provides no such inheritance contract).
+
+**Path-containment helper** (corrected): one shared mechanical helper based on resolved containment under an explicit root. Rejects absolute paths, `..` escapes, and symlink-based escapes (via `Path.resolve()`). Accepts valid product display names without rewriting identity. Applied only at actual filesystem boundary functions. Replaces scattered substring checks (e.g. `".." in real_name` at line 1671) with the single resolved-containment check.
+
+```python
+def contain_path(child: str, root: Path) -> Path:
+    """Resolve child under root; reject absolute paths, .. escapes, and symlink escapes."""
+    root_resolved = root.resolve()
+    candidate = (root_resolved / child).resolve()
+    if not candidate.is_relative_to(root_resolved):
+        raise ValueError(f"path escapes root: {child!r}")
+    return candidate
+```
+
+**Complete filesystem trust-boundary inventory** (every direct join of request-controlled values under `DATA_DIR()`, `CACHE_DIR()`, `OUTPUT_DIR()`, staging roots, local brand roots, and request-created temporary directories):
+
+| # | Unsafe component | Operation | Boundary function | File:line | Status |
+|---|---|---|---|---|---|
+| 1 | `product_name` (folder) | write | `api_upload` | `web_viewer.py:1406` | unsafe |
+| 2 | `filename` (upload) | write | `save_uploaded_files` | `src/product_db.py:266` | unsafe |
+| 3 | `product_id` | read/write | `_product_dir` | `src/product_db.py:56` | unsafe |
+| 4 | `filename` (staging) | write | `create_batch` | `src/staging.py:87` | unsafe |
+| 5 | `filename` (asset) | write | `api_assets_upload` | `web_viewer.py:2194` | unsafe |
+| 6 | `product_id` (ingestion) | read | `_scan_product_files`, `_generate_product_profile` | `src/ingestion.py:455,416` | unsafe |
+| 7 | `product_id` (brand profile) | read | `load_product_profile` | `src/brand_loader.py:301` | unsafe |
+| 8 | `folder` | read | `api_ingest` | `web_viewer.py:1543` | unsafe |
+| 9 | `folder` | read | `api_ingest_status` | `web_viewer.py:1575` | unsafe |
+| 10 | `folder` | read | `api_folder_files` | `web_viewer.py:1589` | unsafe |
+| 11 | `folder` | read | `api_product_image` | `web_viewer.py:1636` | unsafe |
+| 12 | `folder` + `filepath` | delete | `api_delete_file` (cache branch uses `".." in real_name` substring check; data branch uses `is_relative_to` but `folder` not contained) | `web_viewer.py:1671,1679` | unsafe |
+| 13 | `folder` | delete (rmtree) | `api_delete_folder` | `web_viewer.py:1738,1743` | unsafe |
+| 14 | `file` (output path) | delete | `api_delete_output_file` | `web_viewer.py:1771,1780` | **existing safe** — resolved containment at lines 1778-1782; regression test only |
+| 15 | `old_name` + `new_name` | rename | `api_rename_folder` | `web_viewer.py:1844,1847` | unsafe |
+| 16 | `filename` (brand) | read | `api_brand_file_get` | `web_viewer.py:1902` | unsafe |
+| 17 | `folder` (profile) | write | `api_product_profile_save` | `web_viewer.py:2021` | unsafe |
+| 18 | `session` | read | `api_media_status` | `web_viewer.py:1314` | unsafe |
+| 19 | `session` | read | `api_media_retry_log` | `web_viewer.py:1325` | unsafe |
+| 20 | `session` | write | `api_media_retry` | `web_viewer.py:1367` | unsafe |
+| 21 | `session` + `filename` | read | `api_file` | `web_viewer.py:2717` | unsafe |
+| 22 | `session` | read | `api_session_files` | `web_viewer.py:2694` | unsafe |
+| 23 | `output_dir` + `filename` | write | generate-media endpoint | `web_viewer.py:846,847` | unsafe |
+| 24 | `batch_id` (route param) | read/commit/delete | `api_get_stage`, `api_commit_stage`, `api_delete_stage` | `web_viewer.py:1484,1494,1513` | unsafe |
+| 25 | `session` | read | `api_cost_summary` | `web_viewer.py:1343` | unsafe |
+| 26 | `folder` | read | `_read_folder` | `web_viewer.py:2904-2905` | unsafe |
+| 27 | `filename` (voice temp) | write | `api_voice_learn_upload` | `web_viewer.py:2145` | unsafe (temp dir, but absolute/traversal filename escapes it) |
+| 28 | `filename` (video temp) | write | `api_video_style_upload` | `web_viewer.py:2380` | unsafe (temp dir, but absolute/traversal filename escapes it) |
+
+Boundaries 1-13, 15-28 (excluding #14) use the shared `contain_path` helper at the filesystem seam. Scattered substring checks (`".." in real_name`) are replaced by the single resolved-containment check. Boundary #14 (`api_delete_output_file`) already enforces resolved containment — retain it and add a regression test.
+
+**Legacy fallback removal**: `src/brand_loader.py:303-304` — remove `Path.cwd()/cache` and `Path.cwd()/data` candidates. Resolve only through `user_state_root()`.
+
+**Test-fixture repair**: `tests/test_local_workspace.py:49` — autouse fixture must redirect paths to tmp *before* calling `reset_local_workspace()`, not after. Browser fixtures must set the workspace context and let production resolvers work, not patch `DATA_DIR`/`OUTPUT_DIR` directly.
+
+**Stage A allowed files:**
+- Production: `src/workspace_context.py`, `src/product_db.py`, `src/staging.py`, `src/ingestion.py`, `src/brand_loader.py`, `web_viewer.py` (all 24 boundary functions + thread-launch sites)
+- Documentation: `DEVELOPER_LOG.md` (correct false HMAC claim only)
+- Tests: `tests/test_workspace_context.py`, `tests/test_local_workspace.py`, `tests/test_brand_loader.py`, new `tests/test_thread_context_propagation.py`, browser fixtures in `tests/test_browser_e2e.py` / `tests/test_browser_integration_real_orch.py` / `tests/test_browser_upload_real_source.py`
+
+**Stage A test classification:**
+
+*Manual reproductions / proposed red tests (not yet in `tests/` — will be written and run against current code first):*
+1. `test_thread_context_propagation.py::test_production_worker_launch_propagates` — set workspace, launch `threading.Thread(target=worker)` (current production pattern), assert worker sees workspace. **Manual reproduction:** workers see `None`, fall back to global root.
+2. `test_workspace_context.py::test_product_db_save_traversal_blocked` — `product_db.save("../../user_b/cache/Secret", ...)` raises, no file created outside workspace. **Manual reproduction:** no containment, file written into User B's cache.
+3. `test_workspace_context.py::test_delete_folder_traversal_blocked` — `DELETE /api/folder` with `folder="../../user_b"` does not rmtree outside workspace. **Manual reproduction:** no containment on `folder`.
+4. `test_workspace_context.py::test_rename_folder_traversal_blocked` — `POST /api/rename_folder` with `new_name="../../user_b"` does not rename outside workspace. **Manual reproduction:** no containment.
+5. `test_workspace_context.py::test_brand_file_read_traversal_blocked` — `GET /api/brand_file/../../etc/passwd` does not read outside workspace. **Manual reproduction:** no containment on `filename`.
+6. `test_workspace_context.py::test_file_read_traversal_blocked` — `GET /api/file/../../etc/passwd/foo` does not read outside workspace. **Manual reproduction:** no containment on `session`/`filename`.
+7. `test_brand_loader.py::test_no_legacy_fallback_for_new_user` — User B with no profile calls `load_product_profile("ProductA")`, returns `{}`. **Manual reproduction:** falls back to `Path.cwd()/cache`.
+8. `test_local_workspace.py::test_autouse_fixture_does_not_touch_real_repo` — fixture redirects before reset. **Manual reproduction:** reset runs first against real repo.
+
+*Proposed red tests not yet written (helpers don't exist yet):*
+9. `test_thread_context_propagation.py::test_helper_propagates_workspace` — call `with_workspace_context(lambda: get_workspace().user_id)()`, assert returns set user_id. **Not yet written:** helper doesn't exist.
+10. `test_workspace_context.py::test_contain_path_rejects_traversal` — `contain_path("../../user_b/cache/Secret", root)` raises `ValueError`. **Not yet written:** helper doesn't exist.
+11. `test_workspace_context.py::test_contain_path_rejects_absolute` — `contain_path("/etc/passwd", root)` raises. **Not yet written.**
+12. `test_workspace_context.py::test_contain_path_rejects_symlink_escape` — symlink inside root pointing outside, `contain_path` raises. **Not yet written.**
+
+*Existing safe boundary (regression test only):*
+13. `test_workspace_context.py::test_delete_output_file_existing_containment` — `api_delete_output_file` rejects external file via existing `is_relative_to` check. **Existing safe:** lines 1778-1782.
+
+*Existing test defects requiring repair:*
+14. `tests/test_local_workspace.py` autouse fixture (line 49) — calls `reset_local_workspace()` against real repo before redirect. **Existing defect.**
+15. Browser fixtures patch `DATA_DIR`/`OUTPUT_DIR` directly — masks missing thread-context propagation. **Existing defect.**
+
+**Stage A acceptance cases:** contract items 1, 2, 4, 6, 7.
+**Stage A stop point:** all Stage A tests green; no production code beyond Stage A allowed files touched; stop for Codex review before Stage B.
+
+### Stage A implementation results — COMPLETE
+
+**Files changed (production):**
+- `src/workspace_context.py` — added `contain_path()` and `with_workspace_context()` helpers
+- `src/product_db.py` — `_product_dir()` and `save_uploaded_files()` use `contain_path`
+- `src/staging.py` — `_batch_dir()` and `create_batch()` use `contain_path`
+- `src/ingestion.py` — `_scan_product_files()` and `_generate_product_profile()` use `contain_path`
+- `src/brand_loader.py` — removed `Path.cwd()` fallback; `load_product_profile()` uses `contain_path`
+- `web_viewer.py` — 28 boundary functions use `contain_path`; 11 `threading.Thread` launch sites use `with_workspace_context`; `api_generate_all_media` file-path fallback fixed to resolve via `OUTPUT_DIR()` instead of `PROJECT_ROOT`
+- `DEVELOPER_LOG.md` — corrected false HMAC wording to opaque high-entropy server-side tokens
+
+**Files changed (tests):**
+- `tests/test_workspace_context.py` — containment and traversal tests
+- `tests/test_thread_context_propagation.py` — helper existence, propagation, no-thread-creation, bare-pattern-loses-context, **production worker launch test** (exercises real `POST /api/ingest/{folder}` endpoint via TestClient), static analysis defense-in-depth
+- `tests/test_brand_loader.py` — `_workspace_at()` context manager; legacy fallback test; 4 cwd-based tests converted to workspace context
+- `tests/test_local_workspace.py` — autouse fixture redirects to tmp before reset; `_ws_root()` helper for workspace-aware paths
+- `tests/test_browser_e2e.py` — fixture uses WorkspaceContext instead of patching OUTPUT_DIR/DATA_DIR/CACHE_DIR; teardown resets workspace token via try/finally
+- `tests/test_browser_integration_real_orch.py` — same fixture fix
+- `tests/test_browser_upload_real_source.py` — same fixture fix
+
+**Acceptance review fixes (3 fixes after independent review):**
+1. **Production worker-context acceptance test** — added `test_production_ingest_worker_sees_authenticated_workspace` which exercises the real `POST /api/ingest/{folder}` endpoint via FastAPI TestClient, with auth middleware setting the workspace, and proves the launched worker thread sees the authenticated user's workspace (not None, not global fallback). Also added `test_all_web_viewer_thread_launches_use_with_workspace_context` as defense-in-depth static check.
+2. **Browser fixture lifecycle** — `tests/test_browser_e2e.py` teardown now wraps cleanup in try/finally and always resets `_ws_token` via `_reset_ws(_ws_token)`, preventing ContextVar leakage into later tests.
+3. **Browser image-generation regression** — root cause: `api_generate_all_media` (line 1023-1026) used `PROJECT_ROOT / filepath` as fallback, bypassing workspace context. Frontend sends `output/session/filename`; with workspace context the file lives at `OUTPUT_DIR()/session/filename` = `tmp/users/<uid>/output/session/filename`, but `PROJECT_ROOT/filepath` = `tmp/output/session/filename` (wrong). Fixed to strip `output/` prefix and resolve via `contain_path(remaining, OUTPUT_DIR())`. This was a **real Stage A boundary defect**, not a fixture mismatch.
+
+**Red test results (pre-fix, run against unmodified code):**
+- 14 failed, 1 passed
+- Failures: worker context loss, contain_path missing, traversal/absolute/symlink/Unicode containment, product_db save/delete/rename traversal, legacy fallback leak
+
+**Post-fix test commands and counts:**
+```
+python3 -m pytest tests/test_thread_context_propagation.py tests/test_workspace_context.py \
+  tests/test_brand_loader.py tests/test_local_workspace.py tests/test_auth.py \
+  tests/test_staging_api.py tests/test_schedule_api.py tests/test_scheduler_ownership.py \
+  tests/test_scheduler_rerun.py --tb=short
+```
+- Result: **153 passed, 1 failed**
+- The 1 failure (`test_product_agent_instructions_no_per_agent_sections`) is **pre-existing** — confirmed failing on baseline commit `3e0588f` before any Stage A changes. It checks that `config/agent_instructions.json` lacks per-agent sections, but the factory config file has them. Unrelated to Stage A.
+
+**Browser E2E tests:**
+```
+python3 -m pytest tests/test_browser_e2e.py -k 'not test_video and not test_schedule and not test_media_persistence and not test_auto_image and not test_auto_video' --tb=short
+```
+- Result: **18 passed, 5 deselected** (deselected: video/schedule/media_persistence/auto tests require longer runtime)
+- Includes `test_manual_image_generation_button` (previously failing, now fixed) and `test_image_error_surfaces_in_ui` (run after, proves no ContextVar leakage)
+
+**Tests not run and why:**
+- `tests/test_browser_e2e.py` video/schedule/media_persistence/auto tests — deselected to keep runtime under 3 minutes; they require the same fixture lifecycle already proven by the 18 that ran
+- `tests/test_browser_integration_real_orch.py`, `tests/test_browser_upload_real_source.py` — require real LLM/orchestration mocks; fixture changes verified by inspection
+- No LLM/embedding/web/media/provider/network/paid calls: **$0**
+
+**Unrelated dirty files preserved:**
+- `src/scheduler.py` — scheduler ownership follow-up (20 insertions, 8 deletions) — unchanged by Stage A
+- `cache/_media_capabilities/image:google_gemini-3.1-flash-image.json` — pre-existing dirty — unchanged
+- `tests/test_scheduler_ownership.py` — untracked, scheduler follow-up — unchanged
+
+**`git diff --check`:** passed (no whitespace errors)
+
+**Paid calls:** $0
+
+**Next single action:** Codex final Stage A acceptance review.
+
+#### Stage B — Scheduler owner propagation, restart reload, rerun/fire/status isolation
+
+**Corrected scheduler design** — one internal owner key `(user_id, job_id)` used consistently across every APScheduler-facing and store-facing path:
+
+- **Internal owner key**: `(user_id, job_id)` tuple. The public `job_id` (UUID) remains unchanged in JSON records. APScheduler's in-memory `MemoryJobStore` uses a namespaced ID `f"{user_id}:{job_id}"` to prevent cross-user ID collisions (in-memory only — no persisted APScheduler state file exists, so no state-file incompatibility).
+- **APScheduler `add_job`** (lines 316, 562, 625): `id=f"{user_id}:{job_id}"`, `args=[job_id, user_id]`.
+- **APScheduler `get_job`/`remove_job`**: look up by namespaced ID.
+- **`_job_specs`** (line 262): change from `dict[str, dict]` (keyed by `job_id`) to `dict[tuple[str, str], dict]` (keyed by `(user_id, job_id)`).
+- **`_run_job(self, job_id, user_id)`**: set `WorkspaceContext.for_user(user_id, project_root)` *before* any `self._store.load_jobs()` call.
+- **`run_now`**: `self._executor.submit(self._run_job, job_id, user_id)` — `user_id` from calling context (`_SchedulerProxy._current_user_id()`).
+- **`rerun_run`**: load the run record to get `user_id` from the stored job, then `self._executor.submit(self._rerun_from_record, dict(run), user_id)`. `_rerun_from_record(self, source_run, user_id)` sets workspace before any store access.
+- **`_on_job_missed(event)`**: recover owner from the namespaced APS ID (split `event.job_id` on `:`), set that workspace before `self._store.load_jobs()` or `self._record_missed(job)`.
+- **`add_job`/`toggle_job`/`remove_job`/`list_jobs`/`job_exists`**: all accept/use `user_id` and operate only on the owner's store.
+- **One-time completion cleanup**: runs inside the owner's workspace.
+- **`_running_status`** (line 265): change from `dict[str, dict]` (keyed by `job_id`) to `dict[str, dict[str, dict]]` (keyed by `user_id` → `job_id` → status). `get_running_status(user_id)` returns only the calling user's entries.
+- **Restart reload**: `start()` enumerates **authoritative registered users** via `UserStore.list_users()` (not arbitrary `users/*` directories). For each user: set `WorkspaceContext`, run `_cleanup_stuck_running()` and `_cleanup_orphaned_durable_sessions()` inside that workspace, then load jobs. No reusable long-lived credentials are minted — workspace context is set from `user_id` alone; the short-lived session token created in `_run_job` remains scoped to the job execution and revoked after.
+
+**Stage B allowed files:**
+- Production: `src/scheduler.py`, `web_viewer.py` (scheduler proxy + restart hook only)
+- Tests: `tests/test_scheduler_ownership.py`, `tests/test_scheduler_rerun.py`, `tests/test_schedule_api.py`
+
+**Stage B test classification:**
+
+*Reproduced failing tests against current production code:*
+1. `test_scheduler_ownership.py::test_run_job_finds_job_in_owner_store` — save job as User A, call `_run_job(job_id)` (current signature, no `user_id`), assert job is found. **Reproduced fail:** store loads from global fallback, job not found.
+2. `test_scheduler_ownership.py::test_restart_reloads_per_user_jobs` — save job as User A, call `start()`, assert job is rescheduled. **Reproduced fail:** `start()` loads from global store only.
+3. `test_scheduler_ownership.py::test_running_status_user_filtered` — User A has running job, User B calls `get_running_status`, assert B sees empty. **Reproduced fail:** `_running_status` is process-global, not user-filtered.
+4. `test_scheduler_ownership.py::test_on_job_missed_preserves_owner` — fire `_on_job_missed` with a User A job, assert missed record written to User A's store. **Reproduced fail:** `_on_job_missed` loads from global fallback.
+5. `test_scheduler_ownership.py::test_stuck_run_cleanup_per_user` — User A has stuck run, User B has stuck run, `start()` cleans both. **Reproduced fail:** cleanup runs once against global store.
+
+*Proposed red tests not yet written:*
+6. `test_scheduler_ownership.py::test_rerun_preserves_owner` — rerun a User A run record, assert it executes in User A's workspace. **Not yet written:** `rerun_run` doesn't pass `user_id`.
+7. `test_scheduler_ownership.py::test_apscheduler_id_namespaced` — two users with same job UUID don't collide in APScheduler. **Not yet written:** IDs not namespaced.
+
+*Existing passing regression tests:*
+8. `tests/test_scheduler_ownership.py` (9 existing tests for `remove_job`/`toggle_job`/`run_now` ownership) — **existing pass**, must remain green.
+
+**Stage B acceptance cases:** contract items 3 (scheduler subset), 5.
+**Stage B stop point:** all Stage B tests green; stop for Codex review before Stage C.
+
+#### Stage C — Concurrent per-user process state and recovery archive per-user isolation
+
+**Corrected process-state design** — preserves existing `/api/cancel` contract (no run ID parameter):
+
+| Global | Ownership key | Lifecycle | Cancel behavior |
+|---|---|---|---|
+| `_cancel_requested` | per-user (`user_id`) | created on run start, cleared on completion/cancel/failure | `/api/cancel` sets the *calling user's* flag only; other users unaffected |
+| `_current_llm` | closure-local where possible; per-user (`user_id`) fallback | created on run start, closed on completion/failure | cancel closes all of the calling user's clients |
+| `_active_llms` | per-user (`user_id`) → list | appended on create, removed on close | cancel clears all of the calling user's clients |
+| `_session_ts` | closure-local where possible | created on run start, discarded on completion | not a global; if a global is unavoidable, per-user |
+| `_BRAND_VISUAL_CACHE` | per-user (`user_id`) | created on first access, cleared on brand-change refresh | read-only cache, no cancel action |
+| `_conflict_cache` | per-user (`user_id`) | created on first access, refreshed on brand/agent settings change | read-only cache, no cancel action |
+| scheduler `_running_status` | per-user (`user_id`) → per-job | (covered in Stage B) | (covered in Stage B) |
+
+No new framework or state-manager abstraction. Each global becomes a `dict[key, value]` with a small thread-safe helper for create/lookup/remove. `/api/cancel` is scoped by authenticated `user_id` — it stops that user's active runs but never another user's. Same-user per-run cancellation is a **non-goal** unless separately approved (would require an API change to add a run ID).
+
+**Recovery archive per-user isolation (corrected):**
+- `src/local_workspace.py:38` `_archive_root()` must change from `_project_root() / ".recovery_archive"` to `user_state_root(_project_root()) / ".recovery_archive"`, so it resolves to `users/{user_id}/.recovery_archive` when a workspace is active.
+- Archive destination = `users/{user_id}/.recovery_archive/` (per-user, not global).
+- Acceptance tests prove: (a) archive destination inside owning user workspace; (b) copy + hash verification before source deletion; (c) another user cannot read or restore it; (d) ordinary product/history/output listing cannot expose archive contents; (e) traversal and symlink escape attempts into archive fail.
+
+**Stage C allowed files:**
+- Production: `web_viewer.py` (global state → per-user dicts + cancel scoping), `src/local_workspace.py` (`_archive_root` per-user)
+- Tests: `tests/test_local_workspace.py` (archive isolation tests), new `tests/test_concurrent_run_state.py`
+
+**Stage C test classification:**
+
+*Reproduced failing tests against current production code:*
+1. `test_concurrent_run_state.py::test_cancel_scoped_to_user` — User A and User B running concurrently, User A calls `/api/cancel`, User B continues. **Reproduced fail:** `_cancel_requested` is a single global bool; cancel stops all users.
+2. `test_concurrent_run_state.py::test_llm_client_scoped_to_user` — User A and User B running concurrently, each gets separate LLM clients. **Reproduced fail:** `_current_llm`/`_active_llms` are process-global.
+3. `test_concurrent_run_state.py::test_brand_visual_cache_scoped_to_user` — User A and User B get separate brand visual caches. **Reproduced fail:** `_BRAND_VISUAL_CACHE` is process-global.
+4. `test_local_workspace.py::test_archive_destination_inside_owner_workspace` — with User A workspace active, `reset_local_workspace()` archives to `users/user_a/.recovery_archive/`, not global `.recovery_archive`. **Reproduced fail:** `_archive_root()` returns global path.
+5. `test_local_workspace.py::test_archive_inaccessible_to_other_users` — User B cannot read User A's archive. **Reproduced fail:** archive is global, shared.
+
+*Proposed red tests not yet written:*
+6. `test_local_workspace.py::test_archive_traversal_blocked` — traversal into archive fails. **Not yet written:** no containment on archive child paths.
+
+**Stage C acceptance cases:** contract items 3 (process-state subset), 8.
+**Stage C stop point:** all Stage C tests green; full AUTH-ISO-01 regression rerun; stop for Product Owner freeze review.
+
+### Auth documentation correction (no crypto change)
+
+- **Decision**: keep existing opaque, high-entropy (`secrets.token_urlsafe(32)`) server-side session tokens with TTL and server-side revocation. Opaque tokens are an accepted design, not a defect. Do **not** add HMAC signing. Do **not** modify `src/auth.py` solely for crypto.
+- Correct `DEVELOPER_LOG.md:38` which falsely claims "HMAC-signed tokens" — change to "opaque high-entropy server-side session tokens with TTL and server-side revocation."
+- Do not add `hmac.compare_digest` unless a concrete exploitable timing-attack requirement is demonstrated (256-bit random token makes timing attack not materially exploitable).
+
+### Cookie/network (no change in this task)
+
+- Transport changes (bind address, `Secure` flag) are **outside** the isolation implementation stages.
+- `Secure` cookies must be enabled when the application is actually served through HTTPS. For loopback HTTP (local/Beta default), `Secure` is not set — the cookie would not be sent over plain HTTP.
+- Any bind-address or remote-access change remains a **Product Owner hard stop**.
+- Do **not** change the bind address or cookie behavior in this task.
+
+### Explicit non-goals
+
+- No new dependency. No new semantic validator or keyword list. No model/web/image/video/media calls. Budget: $0.
+- No benchmark-, product-, brand-, or scenario-specific logic.
+- No change to public API/schema/orchestration contracts (including `/api/cancel` — no run ID added).
+- No change to Agent behavior or frozen media.
+- No commit, push, deploy, or GitHub issue update.
+- No destructive reset against the real checkout.
+- No change to bind address or cookie `Secure` flag in this task.
+- No same-user per-run cancellation (requires API change — non-goal unless separately approved).
+
+### Product Owner hard stops still unresolved
+
+1. **Scheduler restart reload scope**: `start()` will enumerate authoritative registered users via `UserStore.list_users()` and load each user's job store. This changes startup behavior (previously loaded a single global store). Product Owner must confirm multi-user restart is the intended deployment model.
+
+No other hard stops. APScheduler uses in-memory `MemoryJobStore` (default, no `jobstores=` arg at line 254) — namespacing the in-memory APS ID does not alter any persisted state file, because none exists. The application's JSON job/run records retain the existing public `job_id`. All other changes are mechanical containment, context propagation, and state isolation within existing architecture seams.
 
 ## Post-Beta Backlog
 

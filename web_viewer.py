@@ -843,8 +843,12 @@ async def api_generate_media(request: Request) -> StreamingResponse:
     if media_type not in ("image", "video"):
         return JSONResponse({"error": "type must be image or video"})
 
-    output_dir = OUTPUT_DIR() / output_dir_str
-    output_path = output_dir / filename
+    from src.workspace_context import contain_path
+    try:
+        output_dir = contain_path(output_dir_str, OUTPUT_DIR())
+        output_path = contain_path(filename, output_dir)
+    except ValueError:
+        return JSONResponse({"error": "output path ไม่ถูกต้อง"}, status_code=400)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # หา flow_id ของ session นี้ — เพื่อผูก cost สร้างสื่อภายหลังเข้า flow เดิม
@@ -988,7 +992,8 @@ async def api_generate_media(request: Request) -> StreamingResponse:
                 clear_flow_id()
             q.put_nowait(None)
 
-    thread = threading.Thread(target=worker, daemon=True)
+    from src.workspace_context import with_workspace_context
+    thread = threading.Thread(target=with_workspace_context(worker), daemon=True)
     thread.start()
 
     async def stream():
@@ -1017,8 +1022,15 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
         return JSONResponse({"error": "missing file"})
     p = Path(filepath)
     if not p.exists():
-        # ลอง relative to PROJECT_ROOT (filepath may be "output/session/file.json")
-        p = PROJECT_ROOT / filepath
+        # filepath may be "output/session/file.json" — resolve via workspace OUTPUT_DIR()
+        if filepath.startswith("output/"):
+            from src.workspace_context import contain_path
+            try:
+                p = contain_path(filepath[len("output/"):], OUTPUT_DIR())
+            except ValueError:
+                return JSONResponse({"error": "file path ไม่ถูกต้อง"}, status_code=400)
+        else:
+            p = PROJECT_ROOT / filepath
     if not p.exists():
         return JSONResponse({"error": f"file not found: {filepath}"})
 
@@ -1295,7 +1307,8 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
                 clear_flow_id()
             q.put_nowait(None)
 
-    thread = threading.Thread(target=worker, daemon=True)
+    from src.workspace_context import with_workspace_context
+    thread = threading.Thread(target=with_workspace_context(worker), daemon=True)
     thread.start()
 
     async def stream():
@@ -1311,7 +1324,11 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
 @app.get("/api/media_status/{session}")
 def api_media_status(session: str) -> JSONResponse:
     """ดึงสถานะ media generation ของ session — ใช้ตอนเปิดหน้า output ใหม่."""
-    status_file = OUTPUT_DIR() / session / "_media_status.json"
+    from src.workspace_context import contain_path
+    try:
+        status_file = contain_path(session, OUTPUT_DIR()) / "_media_status.json"
+    except ValueError:
+        return JSONResponse({"error": "session ไม่ถูกต้อง"}, status_code=400)
     if not status_file.exists():
         return JSONResponse({"status": "none"})
     try:
@@ -1323,7 +1340,11 @@ def api_media_status(session: str) -> JSONResponse:
 @app.get("/api/media_retry_log/{session}")
 def api_media_retry_log(session: str) -> JSONResponse:
     """ดึงประวัติการ retry ของ session — ดูได้ผ่านหน้าเว็บ."""
-    session_dir = OUTPUT_DIR() / session
+    from src.workspace_context import contain_path
+    try:
+        session_dir = contain_path(session, OUTPUT_DIR())
+    except ValueError:
+        return JSONResponse({"error": "session ไม่ถูกต้อง", "entries": []}, status_code=400)
     if not session_dir.exists():
         return JSONResponse({"error": "session not found", "entries": []})
     entries = media_gen.load_retry_history(session_dir)
@@ -1340,7 +1361,11 @@ def api_cost_summary(session: str, file: str = "") -> JSONResponse:
 
     คืน: cost summary dict หรือ {"status": "none"} ถ้าไม่มี
     """
-    session_dir = OUTPUT_DIR() / session
+    from src.workspace_context import contain_path
+    try:
+        session_dir = contain_path(session, OUTPUT_DIR())
+    except ValueError:
+        return JSONResponse({"error": "session ไม่ถูกต้อง"}, status_code=400)
     if not session_dir.exists():
         return JSONResponse({"status": "none"})
 
@@ -1367,14 +1392,18 @@ def api_cost_summary(session: str, file: str = "") -> JSONResponse:
 @app.post("/api/media_retry/{session}")
 async def api_media_retry(session: str, request: Request) -> JSONResponse:
     """ล้างสถานะ media gen เดิม เพื่อให้กดสร้างใหม่ได้."""
+    from src.workspace_context import contain_path
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     auto_image = body.get("auto_image", True)
     auto_video = body.get("auto_video", True)
-    status_file = OUTPUT_DIR() / session / "_media_status.json"
+    try:
+        session_dir = contain_path(session, OUTPUT_DIR())
+    except ValueError:
+        return JSONResponse({"error": "session ไม่ถูกต้อง"}, status_code=400)
+    status_file = session_dir / "_media_status.json"
     if status_file.exists():
         status_file.unlink()
     # หาไฟล์ content_creator ใน session
-    session_dir = OUTPUT_DIR() / session
     if not session_dir.exists():
         return JSONResponse({"error": "session not found"})
     cc_files = [f for f in session_dir.iterdir() if f.is_file() and "content_creator" in f.name.lower() and f.suffix == ".md"]
@@ -1403,7 +1432,11 @@ async def api_upload(
         return JSONResponse({"error": "กรุณาตั้งชื่อสินค้า"}, status_code=400)
 
     folder_name = product_name.strip()
-    product_dir = DATA_DIR() / folder_name
+    from src.workspace_context import contain_path
+    try:
+        product_dir = contain_path(folder_name, DATA_DIR())
+    except ValueError:
+        return JSONResponse({"error": "ชื่อสินค้าไม่ถูกต้อง"}, status_code=400)
     # ตรวจว่าเป็นการอัปโหลดสินค้าใหม่ (โฟลเดอร์ยังไม่มี) — ใช้เปิด catalog segmentation
     is_new_upload = not product_dir.exists()
     product_dir.mkdir(parents=True, exist_ok=True)
@@ -1434,7 +1467,8 @@ async def api_upload(
                     product_db.set_status(folder_name, product_db.STATUS_NO_USABLE, extra={
                         "ingest_error": str(e),
                     })
-            thread = threading.Thread(target=_run, daemon=True)
+            from src.workspace_context import with_workspace_context
+            thread = threading.Thread(target=with_workspace_context(_run), daemon=True)
             thread.start()
 
     return JSONResponse({"ok": True, "folder": folder_name, "files": saved})
@@ -1539,8 +1573,12 @@ async def api_ingest(folder: str, request: Request) -> JSONResponse:
     import threading
     from src import product_db
     from src.ingestion import ingest_product
+    from src.workspace_context import contain_path
 
-    product_dir = DATA_DIR() / folder
+    try:
+        product_dir = contain_path(folder, DATA_DIR())
+    except ValueError:
+        return JSONResponse({"error": "โฟลเดอร์ไม่ถูกต้อง"}, status_code=400)
     if not product_dir.exists() or not product_dir.is_dir():
         return JSONResponse({"error": "ไม่พบโฟลเดอร์"}, status_code=404)
 
@@ -1566,7 +1604,8 @@ async def api_ingest(folder: str, request: Request) -> JSONResponse:
                 "ingest_error": str(e),
             })
 
-    thread = threading.Thread(target=_run, daemon=True)
+    from src.workspace_context import with_workspace_context
+    thread = threading.Thread(target=with_workspace_context(_run), daemon=True)
     thread.start()
 
     return JSONResponse({"ok": True, "message": "เริ่มประมวลผลข้อมูลแล้ว"})
@@ -1595,8 +1634,12 @@ def api_folder_files(folder: str) -> JSONResponse:
     """
     from src import product_db
     from src.ingestion import _classify_file, _load_config
+    from src.workspace_context import contain_path
 
-    product_dir = DATA_DIR() / folder
+    try:
+        product_dir = contain_path(folder, DATA_DIR())
+    except ValueError:
+        return JSONResponse({"error": "โฟลเดอร์ไม่ถูกต้อง"}, status_code=400)
     if not product_dir.exists() or not product_dir.is_dir():
         return JSONResponse({"error": "ไม่พบโฟลเดอร์"})
 
@@ -1636,7 +1679,11 @@ def api_folder_files(folder: str) -> JSONResponse:
 @app.get("/api/product_image/{folder}")
 def api_product_image(folder: str):
     """Serve the first image file found in a product folder as a thumbnail."""
-    product_dir = DATA_DIR() / folder
+    from src.workspace_context import contain_path
+    try:
+        product_dir = contain_path(folder, DATA_DIR())
+    except ValueError:
+        return JSONResponse({"error": "โฟลเดอร์ไม่ถูกต้อง"}, status_code=400)
     if not product_dir.exists() or not product_dir.is_dir():
         return JSONResponse({"error": "ไม่พบโฟลเดอร์"}, status_code=404)
     image_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
@@ -1659,6 +1706,7 @@ async def api_delete_file(request: Request) -> JSONResponse:
     ถ้าลบ deliverable ใน cache/ → แค่ลบไฟล์ ไม่กระทบ DB
     """
     from src import product_db
+    from src.workspace_context import contain_path
 
     body = await request.json()
     folder = body.get("folder", "")
@@ -1668,16 +1716,20 @@ async def api_delete_file(request: Request) -> JSONResponse:
     # Files in cache/ are deliverables (เอกสารสเปคจาก product_spec agent) — ลบได้เลย ไม่กระทบ DB
     if filepath.startswith("cache/"):
         real_name = filepath[len("cache/"):]
-        if ".." in real_name:
+        try:
+            cache_product_dir = contain_path(folder, CACHE_DIR())
+            full_path = contain_path(real_name, cache_product_dir)
+        except ValueError:
             return JSONResponse({"error": "เส้นทางไม่ถูกต้อง"}, status_code=400)
-        full_path = CACHE_DIR() / folder / real_name
         if full_path.exists() and full_path.is_file():
             full_path.unlink()
             return JSONResponse({"ok": True})
         return JSONResponse({"error": "ไม่พบไฟล์"})
     # User files in data/ — ลบไฟล์ + sync DB
-    full_path = DATA_DIR() / folder / filepath
-    if ".." in filepath or not full_path.resolve().is_relative_to((DATA_DIR() / folder).resolve()):
+    try:
+        data_product_dir = contain_path(folder, DATA_DIR())
+        full_path = contain_path(filepath, data_product_dir)
+    except ValueError:
         return JSONResponse({"error": "เส้นทางไม่ถูกต้อง"}, status_code=400)
     if full_path.exists() and full_path.is_file():
         full_path.unlink()
@@ -1731,17 +1783,24 @@ async def api_delete_file(request: Request) -> JSONResponse:
 async def api_delete_folder(request: Request) -> JSONResponse:
     """Delete an entire product folder — data/, cache/, and Content History entries."""
     import shutil
+    from src.workspace_context import contain_path
     body = await request.json()
     folder = body.get("folder", "")
     if not folder:
         return JSONResponse({"error": "ไม่ระบุโฟลเดอร์"}, status_code=400)
-    folder_path = DATA_DIR() / folder
+    try:
+        folder_path = contain_path(folder, DATA_DIR())
+    except ValueError:
+        return JSONResponse({"error": "โฟลเดอร์ไม่ถูกต้อง"}, status_code=400)
     if not folder_path.exists() or not folder_path.is_dir():
         return JSONResponse({"error": "ไม่พบโฟลเดอร์"})
     shutil.rmtree(folder_path)
     # Also clean up cache/
-    cache_path = CACHE_DIR() / folder
-    if cache_path.exists() and cache_path.is_dir():
+    try:
+        cache_path = contain_path(folder, CACHE_DIR())
+    except ValueError:
+        cache_path = None
+    if cache_path and cache_path.exists() and cache_path.is_dir():
         shutil.rmtree(cache_path)
     # Clean Content History entries referencing this product (lifecycle symmetry)
     removed_history = content_history.delete_entries_for_product(PROJECT_ROOT, folder)
@@ -1834,6 +1893,7 @@ async def api_delete_output_file(request: Request) -> JSONResponse:
 @app.post("/api/rename_folder")
 async def api_rename_folder(request: Request) -> JSONResponse:
     """Rename a product folder."""
+    from src.workspace_context import contain_path
     body = await request.json()
     old_name = body.get("old_name", "").strip()
     new_name = body.get("new_name", "").strip()
@@ -1841,18 +1901,24 @@ async def api_rename_folder(request: Request) -> JSONResponse:
         return JSONResponse({"error": "ไม่ระบุชื่อโฟลเดอร์"}, status_code=400)
     if old_name == new_name:
         return JSONResponse({"ok": True, "folder": new_name, "renamed": False})
-    old_path = DATA_DIR() / old_name
+    try:
+        old_path = contain_path(old_name, DATA_DIR())
+        new_path = contain_path(new_name, DATA_DIR())
+    except ValueError:
+        return JSONResponse({"error": "ชื่อโฟลเดอร์ไม่ถูกต้อง"}, status_code=400)
     if not old_path.exists() or not old_path.is_dir():
         return JSONResponse({"error": "ไม่พบโฟลเดอร์เดิม"}, status_code=400)
-    new_path = DATA_DIR() / new_name
     if new_path.exists():
         return JSONResponse({"error": "มีสินค้าชื่อนี้แล้ว"}, status_code=400)
     old_path.rename(new_path)
     # Also rename cache/ folder if it exists
-    old_cache = CACHE_DIR() / old_name
-    if old_cache.exists() and old_cache.is_dir():
-        new_cache = CACHE_DIR() / new_name
-        if not new_cache.exists():
+    try:
+        old_cache = contain_path(old_name, CACHE_DIR())
+        new_cache = contain_path(new_name, CACHE_DIR())
+    except ValueError:
+        old_cache = new_cache = None
+    if old_cache and old_cache.exists() and old_cache.is_dir():
+        if new_cache and not new_cache.exists():
             old_cache.rename(new_cache)
     # Update product_db record: product_id + paths inside data/cache
     record = product_db.load(new_name)
@@ -1898,8 +1964,12 @@ def api_brand_files() -> JSONResponse:
 def api_brand_file_get(filename: str) -> JSONResponse:
     """Get brand file content — local first, then product example."""
     from src.local_workspace import local_brand_dir, product_brand_dir
+    from src.workspace_context import contain_path
     for d in [local_brand_dir(), product_brand_dir()]:
-        filepath = d / filename
+        try:
+            filepath = contain_path(filename, d)
+        except ValueError:
+            return JSONResponse({"error": "ชื่อไฟล์ไม่ถูกต้อง"}, status_code=400)
         if filepath.exists() and filepath.is_file():
             return JSONResponse({"content": filepath.read_text(encoding="utf-8")})
     return JSONResponse({"error": "ไม่พบไฟล์"})
@@ -2017,8 +2087,12 @@ def api_product_profile_get(folder: str) -> JSONResponse:
 async def api_product_profile_save(folder: str, request: Request) -> JSONResponse:
     """บันทึก product_profile.json ลง cache/ — รับ dict จาก body."""
     import json as _json
+    from src.workspace_context import contain_path
     body = await request.json()
-    profile_dir = CACHE_DIR() / folder
+    try:
+        profile_dir = contain_path(folder, CACHE_DIR())
+    except ValueError:
+        return JSONResponse({"error": "โฟลเดอร์ไม่ถูกต้อง"}, status_code=400)
     profile_dir.mkdir(parents=True, exist_ok=True)
     path = profile_dir / "product_profile.json"
     path.write_text(_json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2138,11 +2212,15 @@ async def api_voice_learn_upload(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "ไม่มีไฟล์"}, status_code=400)
 
     import tempfile
+    from src.workspace_context import contain_path
     saved: list[str] = []
     tmp_dir = Path(tempfile.mkdtemp(prefix="voice_learn_"))
     for f in files:
         if hasattr(f, "filename") and f.filename:
-            dest = tmp_dir / f.filename
+            try:
+                dest = contain_path(f.filename, tmp_dir)
+            except ValueError:
+                return JSONResponse({"ok": False, "error": "ชื่อไฟล์ไม่ถูกต้อง"}, status_code=400)
             content = await f.read()
             dest.write_bytes(content)
             saved.append(str(dest))
@@ -2183,6 +2261,7 @@ async def api_assets_upload(
     """
     from src import asset_library
     from src.local_workspace import local_brand_dir
+    from src.workspace_context import contain_path
 
     assets_dir = local_brand_dir() / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -2191,7 +2270,10 @@ async def api_assets_upload(
     for f in files:
         if not f.filename or f.filename.startswith(".") or f.filename == ".DS_Store":
             continue
-        dest = assets_dir / f.filename
+        try:
+            dest = contain_path(f.filename, assets_dir)
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "ชื่อไฟล์ไม่ถูกต้อง"}, status_code=400)
         # กันชนชื่อซ้ำ
         if dest.exists():
             stem, suffix = dest.stem, dest.suffix
@@ -2218,7 +2300,8 @@ async def api_assets_upload(
             if llm:
                 llm.close()
 
-    thread = threading.Thread(target=_run, daemon=True)
+    from src.workspace_context import with_workspace_context
+    thread = threading.Thread(target=with_workspace_context(_run), daemon=True)
     thread.start()
 
     return JSONResponse({"ok": True, "files": saved})
@@ -2309,7 +2392,8 @@ async def api_assets_reingest(request: Request) -> JSONResponse:
             if llm:
                 llm.close()
 
-    thread = threading.Thread(target=_run, daemon=True)
+    from src.workspace_context import with_workspace_context
+    thread = threading.Thread(target=with_workspace_context(_run), daemon=True)
     thread.start()
     return JSONResponse({"ok": True, "message": "เริ่มวิเคราะห์ใหม่แล้ว"})
 
@@ -2373,11 +2457,15 @@ async def api_video_style_upload(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "ไม่มีไฟล์"}, status_code=400)
 
     import tempfile
+    from src.workspace_context import contain_path
     saved: list[str] = []
     tmp_dir = Path(tempfile.mkdtemp(prefix="video_style_"))
     for f in files:
         if hasattr(f, "filename") and f.filename:
-            dest = tmp_dir / f.filename
+            try:
+                dest = contain_path(f.filename, tmp_dir)
+            except ValueError:
+                return JSONResponse({"ok": False, "error": "ชื่อไฟล์ไม่ถูกต้อง"}, status_code=400)
             content = await f.read()
             dest.write_bytes(content)
             saved.append(str(dest))
@@ -2694,7 +2782,11 @@ def api_sessions() -> JSONResponse:
 @app.get("/api/session_files/{session}")
 def api_session_files(session: str) -> JSONResponse:
     """List files in a single session — ใช้หาภาพประกอบที่เกี่ยวข้องกับ content_creator."""
-    session_dir = OUTPUT_DIR() / session
+    from src.workspace_context import contain_path
+    try:
+        session_dir = contain_path(session, OUTPUT_DIR())
+    except ValueError:
+        return JSONResponse([])
     if not session_dir.exists() or not session_dir.is_dir():
         return JSONResponse([])
     files = []
@@ -2714,7 +2806,12 @@ def api_content_history_for_product(folder: str, limit: int = 20) -> JSONRespons
 @app.get("/api/file/{session}/{filename:path}")
 def api_file(session: str, filename: str, download: int = 0):
     from fastapi.responses import Response
-    filepath = OUTPUT_DIR() / session / filename
+    from src.workspace_context import contain_path
+    try:
+        session_dir = contain_path(session, OUTPUT_DIR())
+        filepath = contain_path(filename, session_dir)
+    except ValueError:
+        return JSONResponse({"content": "ไม่พบไฟล์"})
     if not filepath.exists() or not filepath.is_file():
         return JSONResponse({"content": "ไม่พบไฟล์"})
     # Binary files (images, videos) — serve raw bytes
@@ -2879,7 +2976,8 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                 q.put_nowait(_sse("done", ""))
                 q.put_nowait(None)
 
-        thread = threading.Thread(target=worker, daemon=True)
+        from src.workspace_context import with_workspace_context
+        thread = threading.Thread(target=with_workspace_context(worker), daemon=True)
         thread.start()
 
         while True:
@@ -2901,8 +2999,12 @@ def _read_folder(folder: str) -> tuple[list[str], list[str], dict[str, str]]:
     Raw files come from data/{folder}/ (user-uploaded).
     Ready files come from cache/{folder}/ (system-generated, kept separate).
     """
-    product_dir = DATA_DIR() / folder
-    cache_dir = CACHE_DIR() / folder
+    from src.workspace_context import contain_path
+    try:
+        product_dir = contain_path(folder, DATA_DIR())
+        cache_dir = contain_path(folder, CACHE_DIR())
+    except ValueError:
+        return [], [], {}
     raw_contents = []
     image_paths = []
     ready_contents = {}
@@ -3695,7 +3797,8 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                 q.put_nowait(_sse("done", ""))
                 q.put_nowait(None)
 
-        thread = threading.Thread(target=worker, daemon=True)
+        from src.workspace_context import with_workspace_context
+        thread = threading.Thread(target=with_workspace_context(worker), daemon=True)
         thread.start()
 
         while True:
@@ -3944,7 +4047,8 @@ async def api_run_flows(request: Request) -> StreamingResponse:
 
                 threads = []
                 for flow_idx, flow in enumerate(flows):
-                    t = threading.Thread(target=_flow_worker, args=(flow_idx, flow, output_dir), daemon=True)
+                    from src.workspace_context import with_workspace_context
+                    t = threading.Thread(target=with_workspace_context(_flow_worker, flow_idx, flow, output_dir), daemon=True)
                     t.start()
                     threads.append(t)
 
@@ -3958,7 +4062,8 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                 q.put_nowait(_sse("done", ""))
                 q.put_nowait(None)
 
-        master_worker_thread = threading.Thread(target=master_worker, daemon=True)
+        from src.workspace_context import with_workspace_context
+        master_worker_thread = threading.Thread(target=with_workspace_context(master_worker), daemon=True)
         master_worker_thread.start()
 
         while True:
@@ -4550,7 +4655,8 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     pass
                 clear_flow_id()
 
-        thread = threading.Thread(target=worker, daemon=True)
+        from src.workspace_context import with_workspace_context
+        thread = threading.Thread(target=with_workspace_context(worker), daemon=True)
         thread.start()
 
         while True:

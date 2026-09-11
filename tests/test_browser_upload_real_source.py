@@ -326,10 +326,8 @@ def _server(tmp_path_factory):
     # Ensure staging uses the patched product_db (not a stale import-time ref)
     staging.product_db = product_db
     web_viewer.PROJECT_ROOT = tmp
-    web_viewer.OUTPUT_DIR = lambda: tmp / "output"
-    web_viewer.DATA_DIR = lambda: tmp / "data"
-    web_viewer.CACHE_DIR = lambda: tmp / "cache"
-    web_viewer.BRAND_DIR = lambda: tmp / "brand"
+    # Path functions (OUTPUT_DIR, DATA_DIR, etc.) resolve via workspace ContextVar
+    # set by auth middleware — no direct patches needed.
 
     # Register a test user for auth
     from src.auth import UserStore, SessionManager
@@ -348,7 +346,11 @@ def _server(tmp_path_factory):
     (_ws_root / "cache").mkdir(parents=True)
     (_ws_root / "brand").mkdir(parents=True)
     (_ws_root / "output").mkdir(parents=True)
-    # Patch _project_root functions to per-user workspace
+    # Set workspace context for setup code (server thread gets it via auth middleware)
+    from src.workspace_context import WorkspaceContext, set_workspace as _set_ws, reset_workspace as _reset_ws
+    _ws = WorkspaceContext.for_user(_user.user_id, tmp)
+    _ws_token = _set_ws(_ws)
+    # Patch _project_root functions to per-user workspace for setup calls
     product_db._project_root = lambda: _ws_root
     staging._project_root = lambda: _ws_root
     ingestion._project_root = lambda: _ws_root
@@ -494,10 +496,7 @@ def _server(tmp_path_factory):
     ingestion._make_llm = _orig["ingestion_make_llm"]
     CompetitorReportRenderer.validate = _orig["renderer_validate"]
     web_viewer.PROJECT_ROOT = _orig["PROJECT_ROOT"]
-    web_viewer.OUTPUT_DIR = lambda: _orig["OUTPUT_DIR"]
-    web_viewer.DATA_DIR = lambda: _orig["DATA_DIR"]
-    web_viewer.CACHE_DIR = lambda: _orig["CACHE_DIR"]
-    web_viewer.BRAND_DIR = lambda: _orig["BRAND_DIR"]
+    _reset_ws(_ws_token)
     _bl_mod._resolve_brand_dir = _orig_resolve_brand_dir
     _bl_mod.load_product_profile = _orig_load_product_profile
     web_viewer._current_llm = _orig["current_llm"]

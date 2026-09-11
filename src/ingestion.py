@@ -288,6 +288,8 @@ def _extracted_images_dir(file_path: Path) -> Path:
         if idx + 1 < len(parts):
             product_id = parts[idx + 1]
     out_dir = _project_root() / "cache" / product_id / "extracted_images"
+    from .workspace_context import contain_path
+    out_dir = contain_path(product_id, _project_root() / "cache") / "extracted_images"
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
 
@@ -413,7 +415,8 @@ def _generate_product_profile(product_id: str, llm=None) -> None:
     try:
         suggested = analyze_product_positioning(spec_text, client)
         if suggested:
-            profile_dir = _project_root() / "cache" / product_id
+            from .workspace_context import contain_path
+            profile_dir = contain_path(product_id, _project_root() / "cache")
             profile_dir.mkdir(parents=True, exist_ok=True)
             profile_path = profile_dir / "product_profile.json"
             # สร้างเฉพาะครั้งแรก — ไม่ทับของ user ทีแก้ไว้ใน modal
@@ -452,7 +455,8 @@ def _ingestion_cfg() -> dict:
 
 def _scan_product_files(product_id: str, config: dict) -> list[dict[str, Any]]:
     """Scan โฟลเดอร์สินค้า → รายการไฟล์พร้อมประเภท."""
-    pdir = _project_root() / "data" / product_id
+    from .workspace_context import contain_path
+    pdir = contain_path(product_id, _project_root() / "data")
     if not pdir.exists():
         return []
 

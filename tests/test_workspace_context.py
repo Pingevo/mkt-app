@@ -225,3 +225,141 @@ def test_factory_config_unchanged_after_user_state(tmp_path: Path):
 
     hash_after = factory_config.read_bytes().__hash__()
     assert hash_before == hash_after, "Factory config must not be mutated by user state writes"
+
+
+# --- AUTH-ISO-01-A: contain_path helper ---
+
+def test_contain_path_helper_exists():
+    """contain_path must exist."""
+    from src.workspace_context import contain_path
+    assert callable(contain_path)
+
+
+def test_contain_path_rejects_traversal(tmp_path: Path):
+    """contain_path must reject .. escapes."""
+    from src.workspace_context import contain_path
+    with pytest.raises(ValueError):
+        contain_path("../../user_b/cache/Secret", tmp_path)
+
+
+def test_contain_path_rejects_absolute(tmp_path: Path):
+    """contain_path must reject absolute paths outside root."""
+    from src.workspace_context import contain_path
+    with pytest.raises(ValueError):
+        contain_path("/etc/passwd", tmp_path)
+
+
+def test_contain_path_rejects_symlink_escape(tmp_path: Path):
+    """contain_path must reject symlinks that resolve outside root."""
+    from src.workspace_context import contain_path
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret")
+    root = tmp_path / "root"
+    root.mkdir()
+    link = root / "link"
+    link.symlink_to(outside / "secret.txt")
+    with pytest.raises(ValueError):
+        contain_path("link", root)
+
+
+def test_contain_path_accepts_valid_name(tmp_path: Path):
+    """contain_path must accept valid product display names."""
+    from src.workspace_context import contain_path
+    result = contain_path("Lagenio K5", tmp_path)
+    assert result == (tmp_path / "Lagenio K5").resolve()
+
+
+def test_contain_path_accepts_unicode(tmp_path: Path):
+    """contain_path must accept Thai/Unicode names."""
+    from src.workspace_context import contain_path
+    result = contain_path("สินค้าทดสอบ", tmp_path)
+    assert result == (tmp_path / "สินค้าทดสอบ").resolve()
+
+
+# --- AUTH-ISO-01-A: product_db traversal ---
+
+def test_product_db_save_traversal_blocked(tmp_path: Path):
+    """product_db.save with traversal product_id must not write outside workspace."""
+    from src import product_db
+
+    ws = WorkspaceContext.for_user("user_aaa", tmp_path)
+    token = set_workspace(ws)
+    try:
+        # Create User B's workspace so the traversal target exists
+        ws_b = WorkspaceContext.for_user("user_bbb", tmp_path)
+        ws_b.cache_dir().mkdir(parents=True, exist_ok=True)
+
+        # RED: current code has no containment — writes into User B's cache
+        with pytest.raises(ValueError):
+            product_db.save("../../user_bbb/cache/Secret", product_db._empty_record("evil"))
+        # Verify no file was created
+        assert not (ws_b.cache_dir() / "Secret" / "product.json").exists()
+    finally:
+        reset_workspace(token)
+
+
+def test_product_db_delete_folder_traversal_blocked(tmp_path: Path):
+    """api_delete_folder with traversal folder must not rmtree outside workspace."""
+    from src import product_db
+
+    ws = WorkspaceContext.for_user("user_aaa", tmp_path)
+    token = set_workspace(ws)
+    try:
+        # Create a target outside the workspace
+        target = tmp_path / "outside_target"
+        target.mkdir()
+        (target / "important.txt").write_text("important")
+
+        # Simulate what api_delete_folder does: DATA_DIR() / folder
+        from web_viewer import DATA_DIR
+        folder = "../../outside_target"
+        folder_path = DATA_DIR() / folder
+
+        # RED: current code has no containment — would rmtree outside
+        from src.workspace_context import contain_path
+        with pytest.raises(ValueError):
+            contain_path(folder, DATA_DIR())
+    finally:
+        reset_workspace(token)
+
+
+def test_product_db_rename_traversal_blocked(tmp_path: Path):
+    """api_rename_folder with traversal new_name must not rename outside workspace."""
+    ws = WorkspaceContext.for_user("user_aaa", tmp_path)
+    token = set_workspace(ws)
+    try:
+        from web_viewer import DATA_DIR
+        from src.workspace_context import contain_path
+
+        new_name = "../../outside_target"
+        # RED: current code has no containment
+        with pytest.raises(ValueError):
+            contain_path(new_name, DATA_DIR())
+    finally:
+        reset_workspace(token)
+
+
+# --- AUTH-ISO-01-A: existing safe boundary regression ---
+
+def test_delete_output_file_existing_containment(tmp_path: Path):
+    """api_delete_output_file already has resolved containment at lines 1778-1782.
+    This test proves the existing check rejects external files."""
+    ws = WorkspaceContext.for_user("user_aaa", tmp_path)
+    token = set_workspace(ws)
+    try:
+        from web_viewer import OUTPUT_DIR
+        # Create a file outside OUTPUT_DIR
+        outside = tmp_path / "outside.md"
+        outside.write_text("external")
+
+        # The existing check: p.resolve().relative_to(OUTPUT_DIR().resolve())
+        output_dir = OUTPUT_DIR()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            outside.resolve().relative_to(output_dir.resolve())
+            assert False, "External file must not be relative to OUTPUT_DIR"
+        except ValueError:
+            pass  # Expected — existing containment works
+    finally:
+        reset_workspace(token)

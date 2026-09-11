@@ -122,12 +122,13 @@ def _server(tmp_path_factory):
         encoding="utf-8",
     )
 
-    # Patch filesystem paths
+    # Patch filesystem paths — use PROJECT_ROOT so WorkspaceContext.for_user
+    # resolves to tmp/users/{user_id}/. Per-request workspace context is set
+    # by the auth middleware in the server thread.
     web_viewer.PROJECT_ROOT = tmp
-    web_viewer.OUTPUT_DIR = lambda: tmp / "output"
-    web_viewer.DATA_DIR = lambda: tmp / "data"
-    web_viewer.CACHE_DIR = lambda: tmp / "cache"
-    web_viewer.BRAND_DIR = lambda: tmp / "brand"
+    # Restore original path functions — they call user_state_root() which
+    # resolves via the workspace ContextVar set by auth middleware.
+    # (Previously these were patched to tmp/output etc., bypassing workspace resolution.)
 
     # Register a test user for auth
     from src.auth import UserStore, SessionManager
@@ -149,7 +150,12 @@ def _server(tmp_path_factory):
     (tmp / "users" / _user.user_id / "cache" / "TestProduct").mkdir(parents=True)
     (tmp / "users" / _user.user_id / "brand").mkdir(parents=True)
     (tmp / "users" / _user.user_id / "output").mkdir(parents=True)
-    # Also patch product_db._project_root to the per-user workspace
+    # Set workspace context for setup code (server thread gets it via auth middleware)
+    from src.workspace_context import WorkspaceContext, set_workspace as _set_ws, reset_workspace as _reset_ws
+    _ws = WorkspaceContext.for_user(_user.user_id, tmp)
+    _ws_token = _set_ws(_ws)
+
+    # Also patch product_db._project_root to the per-user workspace for setup calls
     from src import product_db
     _orig_project_root = product_db._project_root
     product_db._project_root = lambda: tmp / "users" / _user.user_id
@@ -349,21 +355,26 @@ def _server(tmp_path_factory):
 
     yield {"port": port, "url": f"http://127.0.0.1:{port}", "tmp": tmp, "session_token": _test_token}
 
-    server.should_exit = True
-    thread.join(timeout=5)
+    try:
+        server.should_exit = True
+        thread.join(timeout=5)
 
-    # Restore original product_db._project_root to prevent leak
-    product_db._project_root = _orig_project_root
+        # Restore original product_db._project_root to prevent leak
+        product_db._project_root = _orig_project_root
 
-    # Restore original web_viewer globals to prevent cross-module leakage
-    for _name, _val in _orig_wv.items():
-        setattr(web_viewer, _name, _val)
-    for _name, _val in _orig_auth.items():
-        setattr(_auth_mod, _name, _val)
+        # Restore original web_viewer globals to prevent cross-module leakage
+        for _name, _val in _orig_wv.items():
+            setattr(web_viewer, _name, _val)
+        for _name, _val in _orig_auth.items():
+            setattr(_auth_mod, _name, _val)
 
-    # Restore original media_gen functions to prevent leak
-    for _name, _fn in _orig_media.items():
-        setattr(web_viewer.media_gen, _name, _fn)
+        # Restore original media_gen functions to prevent leak
+        for _name, _fn in _orig_media.items():
+            setattr(web_viewer.media_gen, _name, _fn)
+    finally:
+        # Always reset the workspace context token — even on failure paths —
+        # so User A's ContextVar does not leak into later tests.
+        _reset_ws(_ws_token)
 
 
 # ---------------------------------------------------------------------------

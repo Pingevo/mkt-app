@@ -9,6 +9,10 @@ This module provides:
     all state modules pick it up without changing every function signature.
   - ``user_state_root()`` — the single helper every module calls instead
     of ``_project_root()`` for user-state paths.
+  - ``contain_path()`` — shared resolved-containment check for filesystem
+    boundaries that receive request-controlled path components.
+  - ``with_workspace_context()`` — wraps a callable so worker threads
+    inherit the current workspace ContextVar.
 
 Security:
   - ``user_id`` is sanitized to ``[A-Za-z0-9_-]`` only.
@@ -21,6 +25,7 @@ import contextvars
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
 # Context var — set per-request by the auth dependency, read by state modules.
 _current_ws: contextvars.ContextVar[WorkspaceContext | None] = contextvars.ContextVar(
@@ -122,3 +127,49 @@ def user_state_root(project_root: Path | None = None) -> Path:
     if project_root is not None:
         return project_root
     return Path(__file__).resolve().parent.parent
+
+
+# --- Path containment helper -----------------------------------------
+
+def contain_path(child: str, root: Path) -> Path:
+    """Resolve ``child`` under ``root``; reject absolute paths, ``..`` escapes,
+    and symlink-based escapes.
+
+    Uses ``Path.resolve()`` so symlinks that point outside ``root`` are
+    detected even if the symlink itself lives inside ``root``.  Works for
+    paths that do not exist yet (``resolve(strict=False)`` is the default).
+
+    Returns the resolved path inside ``root``.
+    Raises ``ValueError`` if the resolved path escapes ``root``.
+    """
+    if not child:
+        raise ValueError("empty path component")
+    root_resolved = root.resolve()
+    candidate = (root_resolved / child).resolve()
+    if not candidate.is_relative_to(root_resolved):
+        raise ValueError(f"path escapes root: {child!r}")
+    return candidate
+
+
+# --- Worker context propagation helper --------------------------------
+
+def with_workspace_context(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Callable[[], Any]:
+    """Return a zero-arg callable that runs ``fn`` under the current
+    context (including the workspace ContextVar).
+
+    Use as::
+
+        threading.Thread(target=with_workspace_context(worker))
+        executor.submit(with_workspace_context(lambda: do_work()))
+
+    This helper does **not** create or join a thread — the caller controls
+    thread lifecycle, daemon flag, and timing.  It only captures the
+    current ``contextvars`` context so the worker sees the same workspace
+    as the launching request.
+    """
+    ctx = contextvars.copy_context()
+
+    def _run() -> Any:
+        return fn(*args, **kwargs)
+
+    return lambda: ctx.run(_run)
