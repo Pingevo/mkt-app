@@ -479,14 +479,15 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 |---|---|
 | Phase ID | AUTH-ISO-01 |
 | Agent ID | SHARED-RUNTIME |
-| Gate status | Stage A APPROVED for implementation (revision 3 + corrections). Stages B/C pending Stage A completion. |
+| Gate status | Stage A COMPLETE (commit `71c1e62`). Stage B COMPLETE (uncommitted, pending Codex acceptance). Stage C pending. |
 | Blocking | Yes — supersedes all other work (including the deferred Wan 2.7 review) until closed |
 | Baseline HEAD | `3e0588f` (auth + workspace isolation initial implementation) |
+| Stage A commit | `71c1e62 fix(auth): enforce per-user workspace isolation` |
 | Uncommitted follow-up (preserved, not part of this proposal) | `src/scheduler.py`, `web_viewer.py`, `tests/test_scheduler_ownership.py` — scheduler ownership check for `remove_job`/`toggle_job`/`run_now` |
 | Code-truth findings | 9 verified defects (see below). The earlier `PER-USER STATE ISOLATION VERIFIED` conclusion is **superseded** — it passed API-level isolation tests but missed thread-context propagation, path-component containment, scheduler store resolution order, process-global state, and legacy fallback paths. |
 | Paid calls allowed | No / $0 |
-| Next exact action | Codex final Stage A acceptance review. |
-| Last updated | 2026-09-11 — Stage A implementation + acceptance fixes complete. See Stage A results below. |
+| Next exact action | Codex final Stage B acceptance review. |
+| Last updated | 2026-09-11 — Stage B final remediation complete (4 fixes). See Stage B remediation results below. |
 
 ### Accepted code-truth findings (9 defects)
 
@@ -715,6 +716,133 @@ python3 -m pytest tests/test_browser_e2e.py -k 'not test_video and not test_sche
 
 **Stage B acceptance cases:** contract items 3 (scheduler subset), 5.
 **Stage B stop point:** all Stage B tests green; stop for Codex review before Stage C.
+
+### Stage B implementation results — COMPLETE
+
+**Root cause closed:** Scheduler callbacks (`_run_job`, `_on_job_missed`, `_rerun_from_record`) started by reading the store with no workspace context active, so they read from the global fallback path — User A's timed fire could not find User A's job. APScheduler used bare `job_id` as its in-memory key, so the same public `job_id` for two users would collide. `_running_status` was a process-global dict keyed by `job_id` — any user could see any other user's running status. `start()` loaded jobs once from the fallback store — per-user jobs were orphaned on restart. `rerun_run` had no ownership check.
+
+**Final invariant:** Every execution path that occurs outside an authenticated request carries owner identity explicitly before accessing the per-user store. APScheduler uses an internal owner-bearing ID `_aps_id(user_id, job_id)` = `f"{user_id}::{job_id}"` (deterministic, reversible, no collision). The public `job_id` remains unchanged. No auth/session secrets are embedded in APS IDs.
+
+**Existing changes reused:** The pre-existing uncommitted ownership checks for `remove_job`, `toggle_job`, `run_now`, and `_SchedulerProxy._current_user_id()` were retained as-is — they were correct. Extended `rerun_run` and `get_running_status` proxy methods to pass `user_id`.
+
+**Owner flow (concrete):**
+1. Authenticated create → `add_job` captures `user_id` from `WorkspaceContext` → saves job to user's store
+2. APScheduler registration uses `id=_aps_id(user_id, job_id)`, `args=[user_id, job_id]`
+3. Timed callback fires → `_run_job(user_id, job_id, trigger)` receives owner explicitly
+4. `WorkspaceContext.for_user(user_id, self._project_root)` established BEFORE any store access
+5. `self._store.load_jobs()` reads from the user's workspace (not fallback)
+6. Ownership validated: `job.get("user_id") == user_id` (fail closed)
+7. Execution, run history, status, output all written inside the user workspace
+8. `reset_workspace(ws_token)` in `finally`
+
+**Restart flow:** `start()` calls `_reload_all_users()` which enumerates registered users via `get_user_store().list_users()` (not filesystem directories). For each user: set `WorkspaceContext`, run `_cleanup_stuck_running()` + `_cleanup_orphaned_durable_sessions()` inside that workspace, then `_register_user_jobs(user_id)` loads and registers enabled jobs. Workspace is reset before moving to the next user. Unregistered `users/<name>` directories are never loaded. Legacy jobs (no `user_id`) are handled by `_reload_legacy_jobs()` which loads from the fallback store.
+
+**Files changed (production):**
+- `src/scheduler.py` — added `_aps_id`/`_decode_aps_id`; updated `add_job`, `remove_job`, `toggle_job`, `list_jobs`, `job_exists`, `run_now`, `_run_job`, `_rerun_from_record`, `rerun_run`, `_on_job_missed`, `start`/`_reload_all_users`/`_register_user_jobs`/`_reload_legacy_jobs`, `get_running_status`; added `user_id` to run records; fixed `_project_root` to use `self._project_root`; fixed `_cleanup_orphaned_durable_sessions` to handle non-existent dirs
+- `web_viewer.py` — `_SchedulerProxy.rerun_run` and `get_running_status` pass `user_id=self._current_user_id()`
+
+**Files changed (tests):**
+- `tests/test_scheduler_ownership.py` — extended with running status isolation, rerun cross-user blocked, same job_id independently controllable
+- `tests/test_scheduler_exec_ownership.py` — new: APS ID collision, timed fire owner, timed fire workspace write, missed event owner, malformed APS ID, restart multi-user, restart unregistered dir, restart cleanup per user, run-now owner, rerun owner workspace
+- `tests/test_scheduler_misfire_grace.py` — updated `_fake_run_job` signature to `(user_id, job_id, trigger)`
+- `tests/test_scheduler_restart.py` — updated `_fake_run_job` signatures
+- `tests/test_scheduler_rerun.py` — updated direct `_run_job` call to new signature
+- `tests/test_scheduler_attachments.py` — updated direct `_run_job` calls to new signature
+
+**Red test results (pre-fix, 12 failed, 10 passed):**
+- ImportError: `_aps_id` not found (3 tests)
+- TypeError: `rerun_run()` got unexpected `user_id` (2 tests)
+- AttributeError: `_register_user_jobs` not found (4 tests)
+- AssertionError: stuck run not marked error (1 test)
+- AssertionError: `run_now` not passing owner (1 test)
+- FileNotFoundError: run_resources dir missing (1 test)
+
+**Green test commands and counts:**
+```
+python3 -m pytest tests/test_scheduler_ownership.py tests/test_scheduler_exec_ownership.py \
+  tests/test_scheduler_rerun.py tests/test_scheduler_restart.py tests/test_scheduler_missed.py \
+  tests/test_scheduler_cleanup.py tests/test_scheduler_misfire_grace.py \
+  tests/test_scheduler_attachments.py tests/test_schedule_api.py --tb=short
+```
+- Result: **55 passed, 0 failed**
+
+**Workspace/auth regression:**
+```
+python3 -m pytest tests/test_workspace_context.py tests/test_local_workspace.py \
+  tests/test_thread_context_propagation.py --tb=short
+```
+- Result: **89 passed, 1 failed** — the 1 failure (`test_product_agent_instructions_no_per_agent_sections`) is **pre-existing** (confirmed failing on baseline before Stage B changes).
+
+**`git diff --check`:** passed (no whitespace errors)
+
+**Paid calls:** $0
+
+**Stage C untouched:** `_cancel_requested`, `_active_llms`, `_current_llm`, `_session_ts`, `_BRAND_VISUAL_CACHE`, `_conflict_cache` — all unchanged. Only Scheduler `_running_status` was modified (now user-filtered via `get_running_status(user_id)`).
+
+**Next single action:** Codex final Stage B acceptance review.
+
+### Stage B final remediation results — COMPLETE
+
+**4 bounded fixes applied after independent acceptance review identified defects:**
+
+**Fix 1 — Ownerless legacy jobs quarantined (CRITICAL):**
+- `_reload_legacy_jobs()` no longer registers ownerless jobs into APScheduler. It disables them in-place and records a missed/error run, preserving evidence without executing.
+- `_run_job(user_id, ...)` now fails closed when `user_id` is empty — returns immediately before any store access or execution. Defense-in-depth even if registration is bypassed.
+- Red tests proved ownerless jobs WERE registered and could reach `_execute_flow`. After fix: not registered, not executed, `_run_job("")` fails closed.
+
+**Fix 2 — Authoritative UserStore root-aware (ARCHITECTURAL):**
+- `get_user_store(project_root=None)` now accepts an optional project root. When provided, returns a `UserStore` bound to that root's `data/auth/users.json`. When omitted, behavior is unchanged (global singleton for normal application startup).
+- `Scheduler._reload_all_users()` now calls `get_user_store(self._project_root)` so `Scheduler(tmp_root)` enumerates users from `tmp_root`, not the source checkout.
+- Tests no longer monkeypatch the global singleton — they write to `tmp_path/data/auth/users.json` and the real root-aware seam resolves correctly.
+
+**Fix 3 — Running status fail-closed:**
+- `get_running_status(user_id=None)` now returns `{}` instead of all entries. Empty string also returns `{}`. No authenticated path can request "all users."
+
+**Fix 4 — Run log ownership explicit:**
+- `get_run_log(user_id=None)` now returns `[]` when no user identity is provided. When `user_id` is provided, establishes the user's workspace and filters runs by `run.get("user_id") == user_id`. Legacy runs with missing/empty `user_id` are never returned to an authenticated user.
+- `_SchedulerProxy.get_run_log` now passes `user_id=self._current_user_id()`.
+
+**Files changed (production):**
+- `src/scheduler.py` — `_reload_legacy_jobs` quarantine; `_run_job` fail-closed; `get_running_status` fail-closed; `get_run_log` user_id filter + workspace establishment
+- `src/auth.py` — `get_user_store(project_root=None)` optional root parameter
+- `web_viewer.py` — `_SchedulerProxy.get_run_log` passes `user_id`
+
+**Files changed (tests):**
+- `tests/test_scheduler_exec_ownership.py` — new tests: ownerless legacy quarantine, `_run_job` fail-closed, root-aware user enumeration, running status fail-closed, run log ownership filter
+- `tests/test_scheduler_rerun.py` — workspace fixture + user_id in run records and rerun calls
+- `tests/test_scheduler_restart.py` — workspace fixture + user_id in jobs and run records
+- `tests/test_scheduler_misfire_grace.py` — workspace fixture + user_id in job_exists/add_job/remove_job
+- `tests/test_scheduler_attachments.py` — workspace fixture + user_id in _run_job/rerun_run/remove_job calls
+
+**Green test commands and counts:**
+```
+python3 -m pytest tests/test_scheduler_ownership.py tests/test_scheduler_exec_ownership.py \
+  tests/test_scheduler_rerun.py tests/test_scheduler_restart.py tests/test_scheduler_missed.py \
+  tests/test_scheduler_cleanup.py tests/test_scheduler_misfire_grace.py \
+  tests/test_scheduler_attachments.py tests/test_schedule_api.py --tb=short
+```
+- Result: **64 passed, 0 failed**
+
+**Workspace/auth regression:**
+```
+python3 -m pytest tests/test_workspace_context.py tests/test_local_workspace.py \
+  tests/test_thread_context_propagation.py --tb=short
+```
+- Result: **89 passed, 1 failed** — the 1 failure (`test_product_agent_instructions_no_per_agent_sections`) is **pre-existing** (confirmed failing on baseline before Stage B changes).
+
+**Auth regression:**
+```
+python3 -m pytest tests/test_auth.py --tb=short
+```
+- Result: **15 passed, 0 failed**
+
+**`git diff --check`:** passed (no whitespace errors)
+
+**Paid calls:** $0
+
+**Stage C untouched:** `_cancel_requested`, `_active_llms`, `_current_llm`, `_session_ts`, `_BRAND_VISUAL_CACHE`, `_conflict_cache` — all unchanged. Auth login/session/token/cookie behavior unchanged. Media generation unchanged. Agent prompts/schemas unchanged.
+
+**Next single action:** Codex final Stage B acceptance review.
 
 #### Stage C — Concurrent per-user process state and recovery archive per-user isolation
 

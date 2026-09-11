@@ -9,6 +9,7 @@ Persist future one_time job
 
 Mock the execution seam; no web/model/provider call.
 """
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +17,32 @@ from unittest.mock import patch
 import pytest
 
 from src.scheduler import JsonJobStore, Scheduler
+from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
+
+
+TEST_USER_ID = "user_restart"
+
+
+def _register_user(tmp_path, user_id):
+    """Register a user in tmp_path's auth store (root-aware seam)."""
+    users_path = tmp_path / "data" / "auth" / "users.json"
+    users_path.parent.mkdir(parents=True, exist_ok=True)
+    users_path.write_text(json.dumps([
+        {"user_id": user_id, "username": user_id,
+         "password_hash": "$2b$12$dummy", "created_at": "2026-09-11T00:00:00"},
+    ]), encoding="utf-8")
+
+
+def _save_job_in_user_ws(store, project_root, user_id, job):
+    """Save a job directly into user_id's workspace store."""
+    ws = WorkspaceContext.for_user(user_id, project_root)
+    token = set_workspace(ws)
+    try:
+        jobs = store.load_jobs()
+        jobs.append(job)
+        store.save_jobs(jobs)
+    finally:
+        reset_workspace(token)
 
 
 @pytest.fixture
@@ -25,7 +52,9 @@ def _store(tmp_path):
 
 def test_restart_then_fire_executes_exactly_once(tmp_path, _store):
     """Persist future one_time job → restart → fire → exactly one run, no replay."""
-    # 1. Persist a future one_time job (no scheduler running yet)
+    _register_user(tmp_path, TEST_USER_ID)
+
+    # 1. Persist a future one_time job owned by TEST_USER_ID in user's workspace
     future = (datetime.now().astimezone() + timedelta(seconds=3)).isoformat()
     job = {
         "id": "job_restart_1",
@@ -35,18 +64,19 @@ def test_restart_then_fire_executes_exactly_once(tmp_path, _store):
         "schedule": {"type": "date", "value": future},
         "flow": {"is_auto": False, "agents": ["content_creator"]},
         "quick_brief": "test",
+        "user_id": TEST_USER_ID,
         "created_at": datetime.now().astimezone().isoformat(),
         "last_run": "",
         "next_run": "",
         "run_count": 0,
     }
-    _store.save_jobs([job])
+    _save_job_in_user_ws(_store, tmp_path, TEST_USER_ID, job)
 
     # 2. Start scheduler (simulates restart — loads and re-registers the job)
     fired_count = []
 
-    def _fake_run_job(job_id, trigger="auto"):
-        fired_count.append((job_id, trigger))
+    def _fake_run_job(user_id, job_id, trigger="auto"):
+        fired_count.append((user_id, job_id, trigger))
 
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
 
@@ -61,7 +91,8 @@ def test_restart_then_fire_executes_exactly_once(tmp_path, _store):
     assert len(fired_count) == 1, (
         f"expected exactly 1 fire, got {len(fired_count)}: {fired_count}"
     )
-    assert fired_count[0][0] == "job_restart_1"
+    assert fired_count[0][1] == "job_restart_1"
+    assert fired_count[0][0] == TEST_USER_ID, "owner must be passed explicitly"
 
     # 5. Stop and restart again — job must NOT fire again (one_time already fired)
     sched.stop()
@@ -75,7 +106,7 @@ def test_restart_then_fire_executes_exactly_once(tmp_path, _store):
     sched2 = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
     fired2 = []
 
-    def _fake_run_job2(job_id, trigger="auto"):
+    def _fake_run_job2(user_id, job_id, trigger="auto"):
         fired2.append(job_id)
 
     with patch.object(sched2, "_run_job", _fake_run_job2):
@@ -89,21 +120,28 @@ def test_restart_then_fire_executes_exactly_once(tmp_path, _store):
     )
 
     # The past one_time job must have been recorded as error (missed) and removed
-    jobs = _store.load_jobs()
-    assert all(j["id"] != "job_restart_1" for j in jobs), \
-        "past one_time job must be removed from job list"
+    ws = WorkspaceContext.for_user(TEST_USER_ID, tmp_path)
+    token = set_workspace(ws)
+    try:
+        jobs = _store.load_jobs()
+        assert all(j["id"] != "job_restart_1" for j in jobs), \
+            "past one_time job must be removed from job list"
+    finally:
+        reset_workspace(token)
 
     sched2.stop()
 
 
 def test_restart_does_not_replay_completed_one_time_job(tmp_path, _store):
     """A one_time job that already ran (and was deleted) must not replay on restart."""
+    _register_user(tmp_path, TEST_USER_ID)
+
     # No job in the store — it was already completed and deleted
     assert _store.load_jobs() == []
 
     fired = []
 
-    def _fake_run_job(job_id, trigger="auto"):
+    def _fake_run_job(user_id, job_id, trigger="auto"):
         fired.append(job_id)
 
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)

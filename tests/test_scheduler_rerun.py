@@ -14,6 +14,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.scheduler import JsonJobStore, Scheduler
+from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
+
+
+TEST_USER_ID = "user_test_rerun"
 
 
 @pytest.fixture
@@ -28,6 +32,15 @@ def _scheduler(_store, tmp_path):
     """Scheduler ที่ไม่ start APScheduler จริง — ใช้สำหรับ unit test."""
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
     return sched
+
+
+@pytest.fixture
+def _ws(_scheduler, tmp_path):
+    """Set a workspace context with a test user for the duration of the test."""
+    ws = WorkspaceContext.for_user(TEST_USER_ID, tmp_path)
+    token = set_workspace(ws)
+    yield ws
+    reset_workspace(token)
 
 
 def _fake_httpx_stream(lines):
@@ -56,7 +69,7 @@ def _sse_lines():
     ]
 
 
-def test_run_record_stores_flow_and_quick_brief(_scheduler, _store):
+def test_run_record_stores_flow_and_quick_brief(_scheduler, _store, _ws):
     """run record ทุกครั้งต้องเก็บ flow + quick_brief เพื่อให้ rerun ได้."""
     flow = {"is_auto": True, "agents": ["content_creator"], "content_count": 1}
     quick_brief = "ทดสอบ rerun"
@@ -72,7 +85,7 @@ def test_run_record_stores_flow_and_quick_brief(_scheduler, _store):
     job_id = _scheduler.add_job(job_spec)
 
     with patch("src.scheduler.httpx.Client", return_value=_fake_httpx_stream(_sse_lines())):
-        _scheduler._run_job(job_id, trigger="auto")
+        _scheduler._run_job(TEST_USER_ID, job_id, trigger="auto")
 
     runs = _store.load_runs()
     assert len(runs) == 1
@@ -81,7 +94,7 @@ def test_run_record_stores_flow_and_quick_brief(_scheduler, _store):
     assert run["quick_brief"] == quick_brief, "run record ต้องเก็บ quick_brief ไว้"
 
 
-def test_rerun_run_loads_flow_from_run_record(_scheduler, _store):
+def test_rerun_run_loads_flow_from_run_record(_scheduler, _store, _ws):
     """rerun_run(run_id) ต้องโหลด flow จาก run record แล้วยิงใหม่ได้
     แม้ job ต้นทางจะถูกลบไปแล้ว (one_time job ถูกลบหลังรัน)
     """
@@ -100,6 +113,7 @@ def test_rerun_run_loads_flow_from_run_record(_scheduler, _store):
         "output_files": ["/tmp/old.md"],
         "error": "",
         "trigger": "auto",
+        "user_id": TEST_USER_ID,
     }
     _store.append_run(run_record)
 
@@ -122,7 +136,7 @@ def test_rerun_run_loads_flow_from_run_record(_scheduler, _store):
     cm.__exit__ = MagicMock(return_value=False)
 
     with patch("src.scheduler.httpx.Client", return_value=cm):
-        ok = _scheduler.rerun_run(run_record["job_id"], run_record["started_at"])
+        ok = _scheduler.rerun_run(run_record["job_id"], run_record["started_at"], user_id=TEST_USER_ID)
         assert ok is True, "rerun_run ต้องคืน True เมื่อยิงสำเร็จ"
         # Wait for the executor thread to complete (inside the patch context)
         import time
@@ -135,13 +149,13 @@ def test_rerun_run_loads_flow_from_run_record(_scheduler, _store):
     assert captured_payload["json"]["content_count"] == 1, "rerun ต้องส่ง flow เดิม"
 
 
-def test_rerun_run_returns_false_when_run_not_found(_scheduler, _store):
+def test_rerun_run_returns_false_when_run_not_found(_scheduler, _store, _ws):
     """rerun_run ต้องคืน False เมื่อไม่พบ run record ที่ระบุ."""
-    ok = _scheduler.rerun_run("nonexistent_job", "2026-08-19T09:00:00+07:00")
+    ok = _scheduler.rerun_run("nonexistent_job", "2026-08-19T09:00:00+07:00", user_id=TEST_USER_ID)
     assert ok is False
 
 
-def test_rerun_run_appends_new_run_record(_scheduler, _store):
+def test_rerun_run_appends_new_run_record(_scheduler, _store, _ws):
     """rerun จาก success — ต้องสร้าง run record ใหม่ (เก็บเดิมไว้เปรียบเทียบ)."""
     flow = {"is_auto": True, "agents": ["content_creator"], "content_count": 1}
     run_record = {
@@ -155,11 +169,12 @@ def test_rerun_run_appends_new_run_record(_scheduler, _store):
         "output_files": [],
         "error": "",
         "trigger": "auto",
+        "user_id": TEST_USER_ID,
     }
     _store.append_run(run_record)
 
     with patch("src.scheduler.httpx.Client", return_value=_fake_httpx_stream(_sse_lines())):
-        _scheduler.rerun_run("job_x", "2026-08-19T09:00:00+07:00")
+        _scheduler.rerun_run("job_x", "2026-08-19T09:00:00+07:00", user_id=TEST_USER_ID)
         # รอ executor ทำงานเสร็จ (rerun_run ส่งเข้า background thread)
         _scheduler._executor.shutdown(wait=True)
 
@@ -173,7 +188,7 @@ def test_rerun_run_appends_new_run_record(_scheduler, _store):
     assert len(original) == 1, "original success record ต้องยังอยู่"
 
 
-def test_rerun_from_error_without_output_updates_original(_scheduler, _store):
+def test_rerun_from_error_without_output_updates_original(_scheduler, _store, _ws):
     """rerun จาก error ที่ไม่มี output (พลาดเวลา/ถูกตัด) — update original record
     เพราะเป็น placeholder ไม่มีค่าใช้งาน ไม่ต้องเก็บประวัติ
     """
@@ -189,11 +204,12 @@ def test_rerun_from_error_without_output_updates_original(_scheduler, _store):
         "output_files": [],
         "error": "พลาดเวลา",
         "trigger": "auto",
+        "user_id": TEST_USER_ID,
     }
     _store.append_run(error_record)
 
     with patch("src.scheduler.httpx.Client", return_value=_fake_httpx_stream(_sse_lines())):
-        _scheduler.rerun_run("job_err", "2026-08-19T09:00:00+07:00")
+        _scheduler.rerun_run("job_err", "2026-08-19T09:00:00+07:00", user_id=TEST_USER_ID)
         _scheduler._executor.shutdown(wait=True)
 
     runs = _store.load_runs()

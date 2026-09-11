@@ -38,6 +38,34 @@ from apscheduler.triggers.cron import CronTrigger
 
 
 # ============================================================
+# Owner-bearing APScheduler identity
+# ============================================================
+
+def _aps_id(user_id: str, job_id: str) -> str:
+    """Internal APScheduler ID encoding (user_id, job_id).
+
+    Deterministic and reversible via ``_decode_aps_id``.  The public API
+    continues to expose the original application ``job_id``; this is only
+    used as the APScheduler in-memory jobstore key so that the same public
+    ``job_id`` belonging to different users cannot collide.
+    """
+    if user_id:
+        return f"{user_id}::{job_id}"
+    return job_id
+
+
+def _decode_aps_id(aps_id: str) -> tuple[str, str]:
+    """Reverse ``_aps_id``.  Returns ``(user_id, job_id)``.
+
+    For legacy IDs (no ``::`` separator) returns ``("", aps_id)``.
+    """
+    if "::" in aps_id:
+        user_id, job_id = aps_id.split("::", 1)
+        return (user_id, job_id)
+    return ("", aps_id)
+
+
+# ============================================================
 # JobStore seam
 # ============================================================
 
@@ -272,33 +300,81 @@ class Scheduler:
         """เมื่อ job พลาด (server ดับตอนถึงเวลา) — บันทึก 'missed' ลงประวัติ.
 
         ไม่ยิง job ใหม่ — แค่เก็บประวัติให้ user เห็นและกดรันใหม่ได้
+
+        Owner identity is recovered mechanically from the internal APS ID.
+        Malformed/unrecognized IDs fail closed — never fall back to global state.
         """
-        job_id = getattr(event, "job_id", "")
+        aps_id = getattr(event, "job_id", "")
+        if not aps_id:
+            return
+        decoded = _decode_aps_id(aps_id)
+        user_id, job_id = decoded
         if not job_id:
             return
-        jobs = self._store.load_jobs()
-        job = next((j for j in jobs if j["id"] == job_id), None)
-        if not job:
-            return
-        self._record_missed(job)
+
+        from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
+        _project_root = self._project_root
+        ws_token = None
+        if user_id:
+            ws = WorkspaceContext.for_user(user_id, _project_root)
+            ws_token = set_workspace(ws)
+        try:
+            jobs = self._store.load_jobs()
+            job = next((j for j in jobs if j["id"] == job_id), None)
+            if not job:
+                return
+            # Fail closed: ownership must match
+            if user_id and job.get("user_id", "") != user_id:
+                return
+            self._record_missed(job)
+        finally:
+            if ws_token is not None:
+                reset_workspace(ws_token)
 
     def start(self) -> None:
         self._aps.start()
+        self._reload_all_users()
+        self._reload_legacy_jobs()
 
-        # ตรวจ run record ที่ค้างเป็น 'running' — เกิดจาก server ดับตอนกำลังรัน
-        # mark เป็น 'interrupted' เพื่อให้ user เห็นและกดรันใหม่ได้
-        self._cleanup_stuck_running()
-        self._cleanup_orphaned_durable_sessions()
+    def _reload_all_users(self) -> None:
+        """Enumerate registered users and reload each user's jobs + cleanup."""
+        from .auth import get_user_store
+        from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
+        _project_root = self._project_root
 
+        try:
+            users = get_user_store(self._project_root).list_users()
+        except Exception:
+            users = []
+
+        for user_record in users:
+            user_id = user_record.get("user_id", "")
+            if not user_id:
+                continue
+            ws = WorkspaceContext.for_user(user_id, _project_root)
+            ws_token = set_workspace(ws)
+            try:
+                self._cleanup_stuck_running()
+                self._cleanup_orphaned_durable_sessions()
+                self._register_user_jobs(user_id)
+            finally:
+                reset_workspace(ws_token)
+
+    def _register_user_jobs(self, user_id: str) -> None:
+        """Load and register enabled scheduled jobs for a single user.
+
+        Must be called within that user's workspace context.
+        """
         jobs = self._store.load_jobs()
         now = datetime.now().astimezone()
         changed = False
         for job in jobs:
             if not job.get("enabled", True):
                 continue
+            # Defensive: skip jobs not owned by this user
+            if job.get("user_id", "") != user_id:
+                continue
             try:
-                # ตรวจ one_time job ที่เวลาผ่านไปแล้ว — APScheduler ไม่ส่ง EVENT_JOB_MISSED
-                # กรณีนี้ ต้องบันทึก "missed" เองแล้วลบออกจากรายการ
                 sched = job.get("schedule", {})
                 if job.get("schedule_type") == "one_time" and sched.get("type") == "date":
                     run_ts = _parse_ts(sched.get("value", ""))
@@ -316,17 +392,46 @@ class Scheduler:
                 ap_job = self._aps.add_job(
                     self._run_job,
                     trigger=trigger,
-                    args=[job["id"]],
-                    id=job["id"],
+                    args=[user_id, job["id"]],
+                    id=_aps_id(user_id, job["id"]),
                     replace_existing=True,
                 )
                 with self._lock:
-                    self._job_specs[job["id"]] = job
+                    self._job_specs[_aps_id(user_id, job["id"])] = job
                     job["next_run"] = ap_job.next_run_time.isoformat() if ap_job.next_run_time else ""
             except Exception as e:
                 print(f"[Scheduler] โหลด job {job.get('id', '?')} ไม่ได้: {e}", flush=True)
 
-        # ลบ one_time job ที่ missed ออกจากรายการ (เหลือแค่ในประวัติ)
+        if changed:
+            jobs = [j for j in jobs if not (j.get("schedule_type") == "one_time" and not j.get("enabled"))]
+            self._store.save_jobs(jobs)
+
+    def _reload_legacy_jobs(self) -> None:
+        """Load and quarantine legacy ownerless jobs from the fallback store.
+
+        Pre-Stage-A jobs with no ``user_id`` are preserved for inspection and
+        manual migration, but they are NEVER registered into APScheduler and
+        NEVER executed.  They are disabled in-place so they cannot fire.
+        """
+        self._cleanup_stuck_running()
+        self._cleanup_orphaned_durable_sessions()
+
+        jobs = self._store.load_jobs()
+        if not jobs:
+            return
+        changed = False
+        for job in jobs:
+            if job.get("user_id", ""):
+                continue  # skip user-owned jobs — handled by _reload_all_users
+            if not job.get("enabled", True):
+                continue
+            # Quarantine: disable and record a missed/error reason so the job
+            # is not silently lost.  Do NOT register into APScheduler.
+            self._record_missed(job)
+            job["enabled"] = False
+            job["next_run"] = ""
+            changed = True
+
         if changed:
             jobs = [j for j in jobs if not (j.get("schedule_type") == "one_time" and not j.get("enabled"))]
             self._store.save_jobs(jobs)
@@ -452,6 +557,8 @@ class Scheduler:
         referenced.discard("")
 
         storage_dir = self._resource_store.storage_dir.resolve()
+        if not storage_dir.exists():
+            return
         for session_dir in storage_dir.iterdir():
             if not session_dir.is_dir():
                 continue
@@ -562,8 +669,8 @@ class Scheduler:
                     ap_job = self._aps.add_job(
                         self._run_job,
                         trigger=trigger,
-                        args=[job_id],
-                        id=job_id,
+                        args=[user_id, job_id],
+                        id=_aps_id(user_id, job_id),
                         replace_existing=True,
                     )
                     job["next_run"] = ap_job.next_run_time.isoformat() if ap_job.next_run_time else ""
@@ -571,24 +678,30 @@ class Scheduler:
                 print(f"[Scheduler] add_job {job_id} ลง APScheduler ไม่ได้: {e}", flush=True)
 
         with self._lock:
-            self._job_specs[job_id] = job
+            self._job_specs[_aps_id(user_id, job_id)] = job
 
         return job_id
 
-    def remove_job(self, job_id: str) -> bool:
+    def remove_job(self, job_id: str, user_id: str | None = None) -> bool:
         jobs = self._store.load_jobs()
         job = next((j for j in jobs if j["id"] == job_id), None)
         if not job:
             return False
 
+        # Ownership check: a user may only remove their own job.
+        if user_id is not None and job.get("user_id", "") != user_id:
+            return False
+
         new_jobs = [j for j in jobs if j["id"] != job_id]
         self._store.save_jobs(new_jobs)
+        owner = job.get("user_id", "")
+        aps_id = _aps_id(owner, job_id)
         try:
-            self._aps.remove_job(job_id)
+            self._aps.remove_job(aps_id)
         except Exception:
             pass
         with self._lock:
-            self._job_specs.pop(job_id, None)
+            self._job_specs.pop(aps_id, None)
 
         # Durable session is NOT unconditionally deleted here — retained run
         # history may still reference it for the existing rerun feature.
@@ -597,29 +710,35 @@ class Scheduler:
         self._cleanup_orphaned_durable_sessions()
         return True
 
-    def toggle_job(self, job_id: str, enabled: bool) -> bool:
+    def toggle_job(self, job_id: str, enabled: bool, user_id: str | None = None) -> bool:
         jobs = self._store.load_jobs()
-        found = False
+        job = next((j for j in jobs if j["id"] == job_id), None)
+        if not job:
+            return False
+
+        # Ownership check: a user may only toggle their own job.
+        if user_id is not None and job.get("user_id", "") != user_id:
+            return False
+
         for j in jobs:
             if j["id"] == job_id:
                 j["enabled"] = enabled
-                found = True
                 break
-        if not found:
-            return False
 
         self._store.save_jobs(jobs)
 
+        owner = job.get("user_id", "")
+        aps_id = _aps_id(owner, job_id)
+
         if enabled:
-            job = next(j for j in jobs if j["id"] == job_id)
             try:
                 trigger = _make_trigger(job["schedule"])
                 if trigger:
                     ap_job = self._aps.add_job(
                         self._run_job,
                         trigger=trigger,
-                        args=[job_id],
-                        id=job_id,
+                        args=[owner, job_id],
+                        id=aps_id,
                         replace_existing=True,
                     )
                     job["next_run"] = ap_job.next_run_time.isoformat() if ap_job.next_run_time else ""
@@ -627,65 +746,106 @@ class Scheduler:
                 print(f"[Scheduler] toggle enable {job_id} ไม่ได้: {e}", flush=True)
         else:
             try:
-                self._aps.remove_job(job_id)
+                self._aps.remove_job(aps_id)
             except Exception:
                 pass
 
         with self._lock:
-            if job_id in self._job_specs:
-                self._job_specs[job_id]["enabled"] = enabled
+            if aps_id in self._job_specs:
+                self._job_specs[aps_id]["enabled"] = enabled
 
         return True
 
     def list_jobs(self) -> list[dict]:
         jobs = self._store.load_jobs()
         for j in jobs:
+            owner = j.get("user_id", "")
+            aps_id = _aps_id(owner, j["id"])
             try:
-                ap_job = self._aps.get_job(j["id"])
+                ap_job = self._aps.get_job(aps_id)
                 if ap_job and ap_job.next_run_time:
                     j["next_run"] = ap_job.next_run_time.isoformat()
             except Exception:
                 pass
         return jobs
 
-    def job_exists(self, job_id: str) -> bool:
+    def job_exists(self, job_id: str, user_id: str | None = None) -> bool:
         """ตรวจว่า job อยู่ใน APScheduler's in-memory jobstore หรือไม่.
 
         คืน True ถ้า job ลงทะเบียนแล้วและพร้อมยิง, False ถ้ายังไม่ได้ลงทะเบียน
         (เช่น add_job ล้มเหลวเงียบ) หรือ scheduler ไม่ได้รัน
         """
+        aps_id = _aps_id(user_id, job_id) if user_id else job_id
         try:
-            return self._aps.get_job(job_id) is not None
+            return self._aps.get_job(aps_id) is not None
         except Exception:
             return False
 
-    def get_run_log(self, job_id: str | None = None, limit: int = 50) -> list[dict]:
-        return self._store.load_runs(job_id=job_id, limit=limit)
+    def get_run_log(self, job_id: str | None = None, limit: int = 50, user_id: str | None = None) -> list[dict]:
+        """Load run history.  When ``user_id`` is provided, only returns runs
+        owned by that user.  Fail closed: empty/None ``user_id`` returns ``[]``.
+        Legacy runs with missing/empty ``user_id`` are never returned to an
+        authenticated user.
+        """
+        if not user_id:
+            return []
+        from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
+        _project_root = self._project_root
+        ws = WorkspaceContext.for_user(user_id, _project_root)
+        ws_token = set_workspace(ws)
+        try:
+            runs = self._store.load_runs(job_id=job_id, limit=limit)
+        finally:
+            reset_workspace(ws_token)
+        return [r for r in runs if r.get("user_id", "") == user_id]
 
-    def get_running_status(self) -> dict[str, dict]:
-        """คืนสถานะล่าสุดของ job ที่กำลังรันอยู่ { job_id: { status, message, agent, started_at } }"""
+    def get_running_status(self, user_id: str | None = None) -> dict[str, dict]:
+        """คืนสถานะล่าสุดของ job ที่กำลังรันอยู่ { job_id: { status, message, agent, started_at } }
+
+        Fail closed: a non-empty ``user_id`` is required.  Returns only that
+        user's entries, translating internal APS IDs back to public ``job_id``
+        keys.  ``user_id=None`` or empty returns ``{}``.
+        """
+        if not user_id:
+            return {}
         with self._lock:
-            return dict(self._running_status)
+            result = {}
+            for aps_id, status in self._running_status.items():
+                decoded = _decode_aps_id(aps_id)
+                if decoded[0] == user_id:
+                    result[decoded[1]] = status
+            return result
 
-    def run_now(self, job_id: str) -> bool:
+    def run_now(self, job_id: str, user_id: str | None = None) -> bool:
         jobs = self._store.load_jobs()
         job = next((j for j in jobs if j["id"] == job_id), None)
         if not job:
             return False
-        self._executor.submit(self._run_job, job_id, "manual")
+
+        # Ownership check: a user may only run their own job.
+        if user_id is not None and job.get("user_id", "") != user_id:
+            return False
+
+        self._executor.submit(self._run_job, job.get("user_id", ""), job_id, "manual")
         return True
 
-    def rerun_run(self, job_id: str, started_at: str) -> bool:
+    def rerun_run(self, job_id: str, started_at: str, user_id: str | None = None) -> bool:
         """กดรันใหม่จากประวัติ — โหลด flow + quick_brief จาก run record เดิม.
 
         ใช้ (job_id, started_at) เป็น key เพื่อระบุ run record ที่ต้องการ rerun
         เพราะ job เดียวกันอาจรันหลายครั้ง (recurring) แต่ละครั้งมี started_at ต่างกัน
 
         คืน True ถ้าเจอ run record และยิงสำเร็จ, False ถ้าไม่เจอ
+
+        When ``user_id`` is provided, only allows rerun of runs owned by that user.
         """
         runs = self._store.load_runs(job_id=job_id, limit=200)
         run = next((r for r in runs if r.get("started_at") == started_at), None)
         if not run:
+            return False
+        # Ownership check: a run-history identifier must not be sufficient to
+        # rerun another user's execution.
+        if user_id is not None and run.get("user_id", "") != user_id:
             return False
         self._executor.submit(self._rerun_from_record, dict(run))
         return True
@@ -702,13 +862,11 @@ class Scheduler:
         # error ที่ไม่มี output = placeholder (พลาดเวลา/ถูกตัด) → update แทน append
         should_update_original = source_status == "error" and not source_run.get("output_files")
 
-        # Set per-user workspace context — look up the job to get user_id.
+        # Set per-user workspace context — use user_id from the run record.
         from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
         from .auth import get_session_manager
-        _project_root = Path(__file__).resolve().parent.parent
-        jobs = self._store.load_jobs()
-        job = next((j for j in jobs if j["id"] == source_job_id), None)
-        user_id = (job or {}).get("user_id", "")
+        _project_root = self._project_root
+        user_id = source_run.get("user_id", "")
         ws_token = None
         session_token = None
         if user_id:
@@ -719,6 +877,7 @@ class Scheduler:
             except Exception:
                 session_token = None
 
+        aps_id = _aps_id(user_id, source_job_id)
         started_at = datetime.now().astimezone().isoformat()
         run_record = {
             "job_id": source_job_id,
@@ -732,9 +891,10 @@ class Scheduler:
             "trigger": "rerun",
             "flow": dict(source_run.get("flow", {})),
             "quick_brief": str(source_run.get("quick_brief", "")),
+            "user_id": user_id,
         }
         with self._lock:
-            self._running_status[source_job_id] = {
+            self._running_status[aps_id] = {
                 "status": "running",
                 "message": "กำลังรันใหม่...",
                 "agent": "",
@@ -756,7 +916,7 @@ class Scheduler:
             flow = dict(source_run.get("flow", {}))
             quick_brief = str(source_run.get("quick_brief", ""))
             output_files, session_ts, error = self._execute_flow(
-                flow, quick_brief, source_job_id, session_token=session_token
+                flow, quick_brief, aps_id, session_token=session_token
             )
 
             run_record["finished_at"] = datetime.now().astimezone().isoformat()
@@ -771,7 +931,7 @@ class Scheduler:
             run_record["error"] = str(e)
 
         with self._lock:
-            self._running_status.pop(source_job_id, None)
+            self._running_status.pop(aps_id, None)
 
         # placeholder → update original (ใช้ source_started_at เป็น key เดิม)
         # success/error ที่มี output → append ใหม่
@@ -878,18 +1038,23 @@ class Scheduler:
 
         return output_files, session_ts, error
 
-    def _run_job(self, job_id: str, trigger: str = "auto") -> None:
-        jobs = self._store.load_jobs()
-        job = next((j for j in jobs if j["id"] == job_id), None)
-        if not job:
-            print(f"[Scheduler] job {job_id} ไม่พบ", flush=True)
+    def _run_job(self, user_id: str, job_id: str, trigger: str = "auto") -> None:
+        """Execute a scheduled job.
+
+        Owner identity is received explicitly — never discovered by reading
+        a context-dependent store first.  The workspace is established
+        BEFORE any store access so the per-user store is used.
+
+        Defense-in-depth: an empty ``user_id`` fails closed — no execution,
+        no global fallback store access, no run record.
+        """
+        if not user_id:
+            print(f"[Scheduler] job {job_id} ไม่มี owner — ปฏิเสธการรัน", flush=True)
             return
 
-        # Set per-user workspace context for this job execution.
-        from .workspace_context import WorkspaceContext, set_workspace, reset_workspace, get_workspace
-        from .auth import get_session_manager, SESSION_COOKIE_NAME
-        _project_root = Path(__file__).resolve().parent.parent
-        user_id = job.get("user_id", "")
+        from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
+        from .auth import get_session_manager
+        _project_root = self._project_root
         ws_token = None
         session_token = None
         if user_id:
@@ -903,6 +1068,33 @@ class Scheduler:
             except Exception:
                 session_token = None
 
+        # NOW load jobs from the per-user store (workspace is set)
+        jobs = self._store.load_jobs()
+        job = next((j for j in jobs if j["id"] == job_id), None)
+        if not job:
+            print(f"[Scheduler] job {job_id} ไม่พบ", flush=True)
+            if session_token:
+                try:
+                    get_session_manager().revoke_session(session_token)
+                except Exception:
+                    pass
+            if ws_token is not None:
+                reset_workspace(ws_token)
+            return
+
+        # Fail closed: ownership must match
+        if user_id and job.get("user_id", "") != user_id:
+            print(f"[Scheduler] job {job_id} ownership mismatch", flush=True)
+            if session_token:
+                try:
+                    get_session_manager().revoke_session(session_token)
+                except Exception:
+                    pass
+            if ws_token is not None:
+                reset_workspace(ws_token)
+            return
+
+        aps_id = _aps_id(user_id, job_id)
         started_at = datetime.now().astimezone().isoformat()
         run_record = {
             "job_id": job_id,
@@ -916,10 +1108,11 @@ class Scheduler:
             "trigger": trigger,
             "flow": dict(job.get("flow", {})),
             "quick_brief": str(job.get("quick_brief", "")),
+            "user_id": user_id,
         }
         # mark as running in live status
         with self._lock:
-            self._running_status[job_id] = {
+            self._running_status[aps_id] = {
                 "status": "running",
                 "message": "เริ่มรัน...",
                 "agent": "",
@@ -930,7 +1123,7 @@ class Scheduler:
             flow = dict(job.get("flow", {}))
             quick_brief = str(job.get("quick_brief", ""))
             output_files, session_ts, error = self._execute_flow(
-                flow, quick_brief, job_id, session_token=session_token
+                flow, quick_brief, aps_id, session_token=session_token
             )
 
             run_record["finished_at"] = datetime.now().astimezone().isoformat()
@@ -946,7 +1139,7 @@ class Scheduler:
 
         # clear live status
         with self._lock:
-            self._running_status.pop(job_id, None)
+            self._running_status.pop(aps_id, None)
 
         self._store.append_run(run_record)
         # Retention may have evicted old runs — clean up orphaned durable sessions.
@@ -970,7 +1163,7 @@ class Scheduler:
             if job_type == "one_time":
                 jobs = [j for j in jobs if j["id"] != job_id]
                 try:
-                    self._aps.remove_job(job_id)
+                    self._aps.remove_job(aps_id)
                 except Exception:
                     pass
 

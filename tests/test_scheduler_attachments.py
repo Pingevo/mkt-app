@@ -21,6 +21,10 @@ import pytest
 
 from src.run_resources import RunResourceStore
 from src.scheduler import JsonJobStore, Scheduler
+from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
+
+
+TEST_USER_ID = "user_attach"
 
 
 # ------------------------------------------------------------------
@@ -43,6 +47,21 @@ def _resource_store(tmp_path):
                 "max_extracted_chars_per_file": 50000,
                 "allowed_extensions": [".txt", ".md", ".csv", ".pdf", ".png", ".jpg"]},
     )
+
+
+@pytest.fixture
+def _ws(tmp_path):
+    """Set a workspace context with a test user for the duration of the test."""
+    users_path = tmp_path / "data" / "auth" / "users.json"
+    users_path.parent.mkdir(parents=True, exist_ok=True)
+    users_path.write_text(json.dumps([
+        {"user_id": TEST_USER_ID, "username": TEST_USER_ID,
+         "password_hash": "$2b$12$dummy", "created_at": "2026-09-11T00:00:00"},
+    ]), encoding="utf-8")
+    ws = WorkspaceContext.for_user(TEST_USER_ID, tmp_path)
+    token = set_workspace(ws)
+    yield ws
+    reset_workspace(token)
 
 
 def _fake_httpx_stream(lines):
@@ -76,7 +95,7 @@ def _sse_lines_ok():
 class TestAutoForwardsAttachments:
     """Scheduled auto flow must forward upload_session_id + resource_refs."""
 
-    def test_auto_payload_includes_upload_session_id_and_resource_refs(self, tmp_path, _store):
+    def test_auto_payload_includes_upload_session_id_and_resource_refs(self, tmp_path, _store, _ws):
         """_execute_flow auto branch must forward upload_session_id + resource_refs."""
         sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
 
@@ -127,7 +146,7 @@ class TestAutoForwardsAttachments:
 class TestDurableAttachmentCloning:
     """add_job must clone attachments to a no-expiry session for durability."""
 
-    def test_add_job_clones_attachments_to_durable_session(self, tmp_path, _store, _resource_store):
+    def test_add_job_clones_attachments_to_durable_session(self, tmp_path, _store, _resource_store, _ws):
         """add_job with resource_refs must clone to a durable (no-expiry) session."""
         # Upload an ephemeral resource
         rec = _resource_store.upload(
@@ -175,7 +194,7 @@ class TestDurableAttachmentCloning:
         assert not durable_rec.get("expires_at"), \
             "durable resource must have no expires_at (never expires)"
 
-    def test_add_job_without_attachments_unchanged(self, tmp_path, _store, _resource_store):
+    def test_add_job_without_attachments_unchanged(self, tmp_path, _store, _resource_store, _ws):
         """add_job without resource_refs must not create a durable session."""
         sched = Scheduler(
             project_root=tmp_path, web_port=9999, job_store=_store,
@@ -195,7 +214,7 @@ class TestDurableAttachmentCloning:
         assert not job.get("durable_session_id"), \
             "job without attachments must not have a durable session"
 
-    def test_remove_job_cleans_up_durable_session(self, tmp_path, _store, _resource_store):
+    def test_remove_job_cleans_up_durable_session(self, tmp_path, _store, _resource_store, _ws):
         """remove_job must delete the durable session directory."""
         rec = _resource_store.upload(
             filename="brief.txt", content=b"cleanup test", media_type="text/plain",
@@ -223,12 +242,12 @@ class TestDurableAttachmentCloning:
 
         assert durable_dir.exists(), "durable session dir must exist after add_job"
 
-        sched.remove_job(job_id)
+        sched.remove_job(job_id, user_id=TEST_USER_ID)
 
         assert not durable_dir.exists(), \
             "durable session dir must be deleted after remove_job"
 
-    def test_one_time_job_post_fire_retains_durable_session(self, tmp_path, _store, _resource_store):
+    def test_one_time_job_post_fire_retains_durable_session(self, tmp_path, _store, _resource_store, _ws):
         """After a one-time job fires, its durable session must be RETAINED for rerun.
 
         The run history record retains the flow with upload_session_id/resource_refs.
@@ -262,7 +281,7 @@ class TestDurableAttachmentCloning:
 
         # Mock execution and fire the job
         with patch("src.scheduler.httpx.Client", return_value=_fake_httpx_stream(_sse_lines_ok())):
-            sched._run_job(job_id, trigger="auto")
+            sched._run_job(TEST_USER_ID, job_id, trigger="auto")
 
         # One-time job must be removed from job list
         jobs = _store.load_jobs()
@@ -281,7 +300,7 @@ class TestDurableAttachmentCloning:
         assert len(run["flow"]["resource_refs"]) == 1
 
     def test_orphaned_durable_session_cleaned_after_retention_eviction(
-        self, tmp_path, _resource_store,
+        self, tmp_path, _resource_store, _ws,
     ):
         """When run history is evicted by retention, orphaned durable sessions are cleaned up."""
         from src.scheduler import JsonJobStore
@@ -318,7 +337,7 @@ class TestDurableAttachmentCloning:
 
         # Fire the job — creates run record #1
         with patch("src.scheduler.httpx.Client", return_value=_fake_httpx_stream(_sse_lines_ok())):
-            sched._run_job(job_id, trigger="auto")
+            sched._run_job(TEST_USER_ID, job_id, trigger="auto")
 
         # Durable session still exists (run history references it)
         assert durable_dir.exists(), \
@@ -347,7 +366,7 @@ class TestDurableAttachmentCloning:
         assert not durable_dir.exists(), \
             "orphaned durable session must be cleaned up after retention evicts its runs"
 
-    def test_expired_original_records_visible_error(self, tmp_path, _store, _resource_store):
+    def test_expired_original_records_visible_error(self, tmp_path, _store, _resource_store, _ws):
         """If original resources are already expired, add_job must not silently drop them."""
         # Upload a resource and manually expire it
         rec = _resource_store.upload(
@@ -390,7 +409,7 @@ class TestRerunLifecycle:
     after the active job is removed so the existing rerun feature works."""
 
     def test_rerun_after_one_time_fire_forwards_same_attachments(
-        self, tmp_path, _store, _resource_store,
+        self, tmp_path, _store, _resource_store, _ws,
     ):
         """Fire one-time job → rerun from history → same attachment forwarded."""
         rec = _resource_store.upload(
@@ -442,7 +461,7 @@ class TestRerunLifecycle:
 
         with patch("src.scheduler.httpx.Client",
                    return_value=_capture_stream_factory(fire_payloads)):
-            sched._run_job(job_id, trigger="auto")
+            sched._run_job(TEST_USER_ID, job_id, trigger="auto")
 
         # 2. Active one-time job is removed
         assert all(j["id"] != job_id for j in _store.load_jobs()), \
@@ -465,7 +484,7 @@ class TestRerunLifecycle:
         runs_before = len(_store.load_runs(job_id=job_id, limit=10))
         with patch("src.scheduler.httpx.Client",
                    return_value=_capture_stream_factory(rerun_payloads)):
-            ok = sched.rerun_run(job_id, source_run["started_at"])
+            ok = sched.rerun_run(job_id, source_run["started_at"], user_id=TEST_USER_ID)
             assert ok, "rerun_run must return True for an existing run record"
 
             # Wait for the async executor to complete (run record appended)
@@ -505,7 +524,7 @@ class TestRecurringDeleteRerunLifecycle:
     history is still retained and rerunnable."""
 
     def test_recurring_delete_retains_durable_session_for_history_rerun(
-        self, tmp_path, _store, _resource_store,
+        self, tmp_path, _store, _resource_store, _ws,
     ):
         """Delete recurring job after fire → history rerun still works."""
         rec = _resource_store.upload(
@@ -559,7 +578,7 @@ class TestRecurringDeleteRerunLifecycle:
 
         with patch("src.scheduler.httpx.Client",
                    return_value=_capture_stream_factory(fire_payloads)):
-            sched._run_job(job_id, trigger="auto")
+            sched._run_job(TEST_USER_ID, job_id, trigger="auto")
 
         # 2. Run history retains the durable session refs
         runs = _store.load_runs(job_id=job_id, limit=10)
@@ -569,7 +588,7 @@ class TestRecurringDeleteRerunLifecycle:
         assert source_run["flow"]["resource_refs"] == durable_refs
 
         # 3. Delete the active recurring job
-        ok = sched.remove_job(job_id)
+        ok = sched.remove_job(job_id, user_id=TEST_USER_ID)
         assert ok, "remove_job must return True"
         assert all(j["id"] != job_id for j in _store.load_jobs()), \
             "recurring job must be removed from active list"
@@ -583,7 +602,7 @@ class TestRecurringDeleteRerunLifecycle:
         runs_before = len(_store.load_runs(job_id=job_id, limit=10))
         with patch("src.scheduler.httpx.Client",
                    return_value=_capture_stream_factory(rerun_payloads)):
-            ok = sched.rerun_run(job_id, source_run["started_at"])
+            ok = sched.rerun_run(job_id, source_run["started_at"], user_id=TEST_USER_ID)
             assert ok, "rerun_run must return True for retained history"
 
             import time
@@ -604,7 +623,7 @@ class TestRecurringDeleteRerunLifecycle:
         assert runs_after[0]["trigger"] == "rerun"
 
     def test_delete_never_run_job_cleans_durable_session(
-        self, tmp_path, _store, _resource_store,
+        self, tmp_path, _store, _resource_store, _ws,
     ):
         """Deleting a job that never fired must clean its durable session."""
         rec = _resource_store.upload(
@@ -633,13 +652,13 @@ class TestRecurringDeleteRerunLifecycle:
         assert durable_dir.exists()
 
         # No run history exists — deleting must clean the durable session
-        sched.remove_job(job_id)
+        sched.remove_job(job_id, user_id=TEST_USER_ID)
 
         assert not durable_dir.exists(), \
             "durable session must be cleaned when no history references it"
 
     def test_history_eviction_cleans_orphaned_durable_session(
-        self, tmp_path, _resource_store,
+        self, tmp_path, _resource_store, _ws,
     ):
         """After run history is evicted by retention, orphan cleanup deletes the session."""
         from src.scheduler import JsonJobStore
@@ -676,11 +695,11 @@ class TestRecurringDeleteRerunLifecycle:
 
         # Fire the job → run history references the durable session
         with patch("src.scheduler.httpx.Client", return_value=_fake_httpx_stream(_sse_lines_ok())):
-            sched._run_job(job_id, trigger="auto")
+            sched._run_job(TEST_USER_ID, job_id, trigger="auto")
         assert durable_dir.exists(), "durable session must exist while history references it"
 
         # Delete the active job → durable session still retained (history references it)
-        sched.remove_job(job_id)
+        sched.remove_job(job_id, user_id=TEST_USER_ID)
         assert durable_dir.exists(), \
             "durable session must survive job deletion while history references it"
 

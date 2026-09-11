@@ -4206,6 +4206,12 @@ def _attach_schedule_endpoints(app, scheduler):
 
 class _SchedulerProxy:
     """Proxy สำหรับ lazy scheduler — ส่งต่อไปยัง instance จริงตอนเรียก."""
+    def _current_user_id(self):
+        """Resolve the current request's user_id from the workspace context."""
+        from src.workspace_context import get_workspace
+        ws = get_workspace()
+        return ws.user_id if ws else None
+
     def list_jobs(self):
         s = _get_scheduler()
         return s.list_jobs() if s else []
@@ -4216,27 +4222,27 @@ class _SchedulerProxy:
 
     def remove_job(self, jid):
         s = _get_scheduler()
-        return s.remove_job(jid) if s else False
+        return s.remove_job(jid, user_id=self._current_user_id()) if s else False
 
     def toggle_job(self, jid, en):
         s = _get_scheduler()
-        return s.toggle_job(jid, en) if s else False
+        return s.toggle_job(jid, en, user_id=self._current_user_id()) if s else False
 
     def run_now(self, jid):
         s = _get_scheduler()
-        return s.run_now(jid) if s else False
+        return s.run_now(jid, user_id=self._current_user_id()) if s else False
 
     def rerun_run(self, jid, started_at):
         s = _get_scheduler()
-        return s.rerun_run(jid, started_at) if s else False
+        return s.rerun_run(jid, started_at, user_id=self._current_user_id()) if s else False
 
     def get_run_log(self, **kw):
         s = _get_scheduler()
-        return s.get_run_log(**kw) if s else []
+        return s.get_run_log(user_id=self._current_user_id(), **kw) if s else []
 
     def get_running_status(self):
         s = _get_scheduler()
-        return s.get_running_status() if s else {}
+        return s.get_running_status(user_id=self._current_user_id()) if s else {}
 
 
 _attach_schedule_endpoints(app, _SchedulerProxy())

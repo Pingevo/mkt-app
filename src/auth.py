@@ -287,8 +287,17 @@ _session_manager: SessionManager | None = None
 _store_lock = threading.Lock()
 
 
-def get_user_store() -> UserStore:
+def get_user_store(project_root: Path | None = None) -> UserStore:
+    """Return the UserStore singleton.
+
+    When ``project_root`` is provided, returns a UserStore bound to that
+    root's ``data/auth/users.json``.  This is used by Scheduler so its
+    authoritative user enumeration matches its own project root.  The
+    default (no-arg) behavior is unchanged for normal application startup.
+    """
     global _user_store
+    if project_root is not None:
+        return UserStore(project_root / "data" / "auth" / "users.json")
     if _user_store is None:
         with _store_lock:
             if _user_store is None:
