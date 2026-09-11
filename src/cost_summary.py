@@ -12,17 +12,18 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .ai_usage import USAGE_LOG_PATH as _USAGE_LOG_PATH
+    from .ai_usage import usage_log_path as _usage_log_path
 except ImportError:
-    from ai_usage import USAGE_LOG_PATH as _USAGE_LOG_PATH  # type: ignore
+    from ai_usage import usage_log_path as _usage_log_path  # type: ignore
 
 
 def collect_flow_entries(flow_id: str) -> list[dict[str, Any]]:
     """อ่าน llm_usage.jsonl แล้วกรองเฉพาะ entries ที่ flow_id ตรง — คืน list."""
-    if not _USAGE_LOG_PATH.exists():
+    _log_path = _usage_log_path()
+    if not _log_path.exists():
         return []
     entries: list[dict[str, Any]] = []
-    with open(_USAGE_LOG_PATH, encoding="utf-8") as f:
+    with open(_log_path, encoding="utf-8") as f:
         for line in f:
             try:
                 d = json.loads(line)

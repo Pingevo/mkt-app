@@ -25,6 +25,8 @@ import os
 import socket
 import threading
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -45,6 +47,22 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _api_get(url: str, server: dict, **kw) -> "urllib.request.urlopen":
+    """GET with the test session cookie."""
+    req = urllib.request.Request(url, headers={"Cookie": f"mktapp_session={server['session_token']}"})
+    return urllib.request.urlopen(req, **kw)
+
+
+def _api_post(url: str, server: dict, data: bytes = None, **kw) -> "urllib.request.urlopen":
+    """POST with the test session cookie."""
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json", "Cookie": f"mktapp_session={server['session_token']}"},
+        method="POST",
+    )
+    return urllib.request.urlopen(req, **kw)
+
+
 @pytest.fixture(scope="module")
 def _server(tmp_path_factory):
     """Start a real uvicorn server with mocked LLM/Orchestrator."""
@@ -63,14 +81,29 @@ def _server(tmp_path_factory):
     (tmp / "brand").mkdir(exist_ok=True)
     (tmp / "output").mkdir(exist_ok=True)
 
-    # Initialize product DB with "ready" status so the UI enables the product card.
-    # Without this, the product shows as "pending" and the wizard disables it.
-    # product_db._project_root() uses the file location, so we must patch it
-    # to point at our temp directory. Save original to restore after tests.
+    # Save original product_db._project_root for cleanup later.
+    # The actual patch is applied below after the per-user workspace is created.
     from src import product_db
     _orig_project_root = product_db._project_root
-    product_db._project_root = lambda: tmp
-    product_db.set_status("TestProduct", product_db.STATUS_READY)
+
+    # Save original web_viewer globals to prevent cross-module leakage
+    _orig_wv = {
+        "PROJECT_ROOT": web_viewer.PROJECT_ROOT,
+        "OUTPUT_DIR": web_viewer.OUTPUT_DIR,
+        "DATA_DIR": web_viewer.DATA_DIR,
+        "CACHE_DIR": web_viewer.CACHE_DIR,
+        "BRAND_DIR": web_viewer.BRAND_DIR,
+        "Orchestrator": web_viewer.Orchestrator,
+        "_read_folder": getattr(web_viewer, "_read_folder", None),
+        "_current_llm": getattr(web_viewer, "_current_llm", None),
+        "_session_ts": getattr(web_viewer, "_session_ts", ""),
+        "_cancel_requested": getattr(web_viewer, "_cancel_requested", False),
+    }
+    import src.auth as _auth_mod
+    _orig_auth = {
+        "_user_store": getattr(_auth_mod, "_user_store", None),
+        "_session_manager": getattr(_auth_mod, "_session_manager", None),
+    }
 
     # Config with agent instructions
     config_dir = tmp / "config"
@@ -91,10 +124,36 @@ def _server(tmp_path_factory):
 
     # Patch filesystem paths
     web_viewer.PROJECT_ROOT = tmp
-    web_viewer.OUTPUT_DIR = tmp / "output"
-    web_viewer.DATA_DIR = tmp / "data"
-    web_viewer.CACHE_DIR = tmp / "cache"
-    web_viewer.BRAND_DIR = tmp / "brand"
+    web_viewer.OUTPUT_DIR = lambda: tmp / "output"
+    web_viewer.DATA_DIR = lambda: tmp / "data"
+    web_viewer.CACHE_DIR = lambda: tmp / "cache"
+    web_viewer.BRAND_DIR = lambda: tmp / "brand"
+
+    # Register a test user for auth
+    from src.auth import UserStore, SessionManager
+    import src.auth as auth_mod
+    _users_path = tmp / "data" / "auth" / "users.json"
+    _sessions_path = tmp / "data" / "auth" / "sessions.json"
+    _users_path.parent.mkdir(parents=True, exist_ok=True)
+    _store = UserStore(_users_path)
+    _sess = SessionManager(_sessions_path)
+    auth_mod._user_store = _store
+    auth_mod._session_manager = _sess
+    _user = _store.register("browser_test", "testpass")
+    # Create per-user workspace dirs
+    (tmp / "users" / _user.user_id / "data" / "TestProduct").mkdir(parents=True)
+    (tmp / "users" / _user.user_id / "data" / "TestProduct" / "info.txt").write_text(
+        "Test product: Lagenio K2 smartwatch. AMOLED display, SpO2, GPS. Price 2990 THB.",
+        encoding="utf-8",
+    )
+    (tmp / "users" / _user.user_id / "cache" / "TestProduct").mkdir(parents=True)
+    (tmp / "users" / _user.user_id / "brand").mkdir(parents=True)
+    (tmp / "users" / _user.user_id / "output").mkdir(parents=True)
+    # Also patch product_db._project_root to the per-user workspace
+    from src import product_db
+    _orig_project_root = product_db._project_root
+    product_db._project_root = lambda: tmp / "users" / _user.user_id
+    product_db.set_status("TestProduct", product_db.STATUS_READY)
 
     # Mock folder reading
     web_viewer._read_folder = lambda f: (["Test product info text"], [], {})
@@ -285,13 +344,22 @@ def _server(tmp_path_factory):
     else:
         raise RuntimeError("Server did not start")
 
-    yield {"port": port, "url": f"http://127.0.0.1:{port}", "tmp": tmp}
+    # Create a session token for direct urllib requests in tests
+    _test_token = _sess.create_session(_user.user_id)
+
+    yield {"port": port, "url": f"http://127.0.0.1:{port}", "tmp": tmp, "session_token": _test_token}
 
     server.should_exit = True
     thread.join(timeout=5)
 
     # Restore original product_db._project_root to prevent leak
     product_db._project_root = _orig_project_root
+
+    # Restore original web_viewer globals to prevent cross-module leakage
+    for _name, _val in _orig_wv.items():
+        setattr(web_viewer, _name, _val)
+    for _name, _val in _orig_auth.items():
+        setattr(_auth_mod, _name, _val)
 
     # Restore original media_gen functions to prevent leak
     for _name, _fn in _orig_media.items():
@@ -320,7 +388,12 @@ def _browser(_server):
         page.on("requestfailed", lambda req: failed_requests.append(req))
 
         url = _server["url"]
-        page.goto(url, wait_until="networkidle", timeout=15000)
+        # Authenticate first — login via API to get the session cookie
+        page.goto(f"{url}/login", wait_until="networkidle", timeout=15000)
+        page.fill("#username", "browser_test")
+        page.fill("#password", "testpass")
+        page.click("#submit-btn")
+        page.wait_for_url(f"{url}/", timeout=10000)
 
         # Wait for wizard JS to initialize
         page.wait_for_selector("#flow-wizard-list", timeout=10000)
@@ -464,8 +537,8 @@ class TestApplicationBoot:
     def test_no_critical_failed_requests(self, _browser):
         """No critical network requests failed on boot."""
         failed = _browser["failed_requests"]
-        # Filter out non-critical failures (favicon, etc.)
-        critical = [r for r in failed if "favicon" not in r.url]
+        # Filter out non-critical failures (favicon, auth login redirect, etc.)
+        critical = [r for r in failed if "favicon" not in r.url and "/api/auth/" not in r.url]
         assert not critical, f"Critical failed requests: {[r.url for r in critical]}"
 
 
@@ -571,18 +644,11 @@ class TestAgent3CampaignStrategy:
                 "custom": "",
             }
         }).encode("utf-8")
-        req = urllib.request.Request(
-            f"{server['url']}/api/agent_instructions/campaign_strategy",
-            data=settings_body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        resp = urllib.request.urlopen(req, timeout=5)
+        resp = _api_post(f"{server['url']}/api/agent_instructions/campaign_strategy", server, data=settings_body, timeout=5)
         assert resp.status == 200
 
         # Verify settings were saved
-        req2 = urllib.request.Request(f"{server['url']}/api/agent_instructions/campaign_strategy")
-        resp2 = urllib.request.urlopen(req2, timeout=5)
+        resp2 = _api_get(f"{server['url']}/api/agent_instructions/campaign_strategy", server, timeout=5)
         data = json.loads(resp2.read())
         saved = data.get("settings", data)
         assert saved.get("budget_max") == "5000", f"budget_max not saved: {saved}"
@@ -976,8 +1042,7 @@ class TestImageGenerationBrowserE2E:
         server = _browser["server"]
         import urllib.request
         # Get sessions list
-        req = urllib.request.Request(f"{server['url']}/api/sessions")
-        resp = urllib.request.urlopen(req, timeout=5)
+        resp = _api_get(f"{server['url']}/api/sessions", server, timeout=5)
         sessions = json.loads(resp.read())
         assert len(sessions) > 0, "No sessions after content_creator run"
 
@@ -985,11 +1050,8 @@ class TestImageGenerationBrowserE2E:
         latest_session = sessions[0]
         session_name = latest_session.get("session") or latest_session.get("name") or ""
         if session_name:
-            req2 = urllib.request.Request(
-                f"{server['url']}/api/session_files/{urllib.parse.quote(session_name)}"
-            )
             try:
-                resp2 = urllib.request.urlopen(req2, timeout=5)
+                resp2 = _api_get(f"{server['url']}/api/session_files/{urllib.parse.quote(session_name)}", server, timeout=5)
                 files = json.loads(resp2.read())
                 image_files = [f for f in files if f.get("name", "").lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
                 assert len(image_files) > 0, f"No image files in session {session_name}: {[f.get('name') for f in files]}"
@@ -1172,19 +1234,15 @@ class TestVideoGenerationBrowserE2E:
         # Verify video file was persisted
         server = _browser["server"]
         import urllib.request
-        req = urllib.request.Request(f"{server['url']}/api/sessions")
-        resp = urllib.request.urlopen(req, timeout=5)
+        resp = _api_get(f"{server['url']}/api/sessions", server, timeout=5)
         sessions = json.loads(resp.read())
         assert len(sessions) > 0
 
         latest_session = sessions[0]
         session_name = latest_session.get("session") or latest_session.get("name") or ""
         if session_name:
-            req2 = urllib.request.Request(
-                f"{server['url']}/api/session_files/{urllib.parse.quote(session_name)}"
-            )
             try:
-                resp2 = urllib.request.urlopen(req2, timeout=5)
+                resp2 = _api_get(f"{server['url']}/api/session_files/{urllib.parse.quote(session_name)}", server, timeout=5)
                 files = json.loads(resp2.read())
                 video_files = [f for f in files if f.get("name", "").lower().endswith((".mp4", ".webm", ".mov"))]
                 assert len(video_files) > 0, f"No video files in session: {[f.get('name') for f in files]}"
@@ -1248,18 +1306,14 @@ class TestVideoGenerationBrowserE2E:
         if current_session:
             session_name = current_session
         else:
-            req = urllib.request.Request(f"{server['url']}/api/sessions")
-            resp = urllib.request.urlopen(req, timeout=5)
+            resp = _api_get(f"{server['url']}/api/sessions", server, timeout=5)
             sessions = json.loads(resp.read())
             assert len(sessions) > 0
             session_name = sessions[0].get("session") or sessions[0].get("name") or ""
 
         assert session_name, "Could not determine session name"
-        req2 = urllib.request.Request(
-            f"{server['url']}/api/session_files/{urllib.parse.quote(session_name)}"
-        )
         try:
-            resp2 = urllib.request.urlopen(req2, timeout=5)
+            resp2 = _api_get(f"{server['url']}/api/session_files/{urllib.parse.quote(session_name)}", server, timeout=5)
             files = json.loads(resp2.read())
             video_files = [f for f in files if f.get("name", "").lower().endswith((".mp4", ".webm", ".mov"))]
             assert len(video_files) > 0, f"No video files after manual generation: {[f.get('name') for f in files]}"
@@ -1513,7 +1567,9 @@ class TestScheduleModalBrowserE2E:
         # Verify the job was persisted via API
         import httpx
         port = _browser["server"]["port"]
-        resp = httpx.get(f"http://localhost:{port}/api/schedule/jobs")
+        token = _browser["server"]["session_token"]
+        resp = httpx.get(f"http://localhost:{port}/api/schedule/jobs",
+                        cookies={"mktapp_session": token})
         assert resp.status_code == 200
         jobs = resp.json()
         assert any(j.get("name") == "Browser E2E schedule test" for j in jobs), \

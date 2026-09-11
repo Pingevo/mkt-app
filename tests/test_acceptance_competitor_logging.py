@@ -126,14 +126,14 @@ def _make_fixture_runner(tmp_log_path):
     runner = _load_runner()
     FakeLLMClient._log_usage = llm_client.LLMClient._log_usage  # type: ignore
     runner.LLMClient = FakeLLMClient
-    ai_usage.USAGE_LOG_PATH = tmp_log_path
+    ai_usage.usage_log_path = lambda: tmp_log_path
     return runner
 
 
 def test_acceptance_runner_records_local_usage_with_reference(monkeypatch):
     """Runner must call record_ai_usage so local log gets user, reference, request_id and cost."""
     path = _tmp_log()
-    original_path = ai_usage.USAGE_LOG_PATH
+    original_fn = ai_usage.usage_log_path
     try:
         monkeypatch.setattr(ai_usage, "_read_hub_credentials", lambda: (None, None))
         runner = _make_fixture_runner(path)
@@ -163,7 +163,7 @@ def test_acceptance_runner_records_local_usage_with_reference(monkeypatch):
         assert entries[0]["status"] == "success"
         assert entries[0]["metadata"]["case_id"] == 1
     finally:
-        ai_usage.USAGE_LOG_PATH = original_path
+        ai_usage.usage_log_path = original_fn
         flow_context.clear_usage_context()
         if path.exists():
             shutil.rmtree(path.parent)
@@ -172,7 +172,7 @@ def test_acceptance_runner_records_local_usage_with_reference(monkeypatch):
 def test_acceptance_runner_dispatches_to_hub_when_token_present(monkeypatch):
     """When Hub token is configured the same payload must be POSTed synchronously."""
     path = _tmp_log()
-    original_path = ai_usage.USAGE_LOG_PATH
+    original_fn = ai_usage.usage_log_path
     posted = []
 
     def _capture_post(endpoint, token, payload):
@@ -203,7 +203,7 @@ def test_acceptance_runner_dispatches_to_hub_when_token_present(monkeypatch):
         assert payload["metadata"]["case_id"] == 1
         assert _entries(path)
     finally:
-        ai_usage.USAGE_LOG_PATH = original_path
+        ai_usage.usage_log_path = original_fn
         flow_context.clear_usage_context()
         if path.exists():
             shutil.rmtree(path.parent)
@@ -212,7 +212,7 @@ def test_acceptance_runner_dispatches_to_hub_when_token_present(monkeypatch):
 def test_acceptance_runner_logging_failure_does_not_break_run(monkeypatch):
     """If record_ai_usage throws, the agent run must still return output."""
     path = _tmp_log()
-    original_path = ai_usage.USAGE_LOG_PATH
+    original_fn = ai_usage.usage_log_path
 
     def _boom(*args, **kwargs):
         raise RuntimeError("hub down")
@@ -234,7 +234,7 @@ def test_acceptance_runner_logging_failure_does_not_break_run(monkeypatch):
         assert "CACGO K77" in result["output"]
         assert result["validation_ok"] is True
     finally:
-        ai_usage.USAGE_LOG_PATH = original_path
+        ai_usage.usage_log_path = original_fn
         flow_context.clear_usage_context()
         if path.exists():
             shutil.rmtree(path.parent)

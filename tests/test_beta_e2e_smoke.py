@@ -34,18 +34,19 @@ from starlette.testclient import TestClient
 
 @pytest.fixture
 def _client(tmp_path, monkeypatch):
-    """FastAPI TestClient with isolated filesystem and no real API key."""
+    """FastAPI TestClient with isolated filesystem, auth, and no real API key."""
     import importlib
     import web_viewer
 
     # Reload first to get a clean module state
     importlib.reload(web_viewer)
 
-    # Isolate all filesystem paths AFTER reload
+    # Isolate all filesystem paths AFTER reload — these are now functions
     monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
-    monkeypatch.setattr(web_viewer, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(web_viewer, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: tmp_path / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: tmp_path / "cache")
+    monkeypatch.setattr(web_viewer, "BRAND_DIR", lambda: tmp_path / "brand")
 
     # Create minimal data structure
     (tmp_path / "data" / "TestProduct").mkdir(parents=True)
@@ -74,7 +75,30 @@ def _client(tmp_path, monkeypatch):
     monkeypatch.setattr(web_viewer, "_session_ts", "", raising=False)
     monkeypatch.setattr(web_viewer, "_cancel_requested", False, raising=False)
 
-    return TestClient(web_viewer.app)
+    # Register a test user and create an authenticated client
+    from src.auth import UserStore, SessionManager, SESSION_COOKIE_NAME
+    import src.auth as auth_mod
+    _users_path = tmp_path / "data" / "auth" / "users.json"
+    _sessions_path = tmp_path / "data" / "auth" / "sessions.json"
+    _users_path.parent.mkdir(parents=True, exist_ok=True)
+    _store = UserStore(_users_path)
+    _sess = SessionManager(_sessions_path)
+    monkeypatch.setattr(auth_mod, "_user_store", _store)
+    monkeypatch.setattr(auth_mod, "_session_manager", _sess)
+    user = _store.register("testuser", "testpass")
+
+    # Create per-user workspace dirs
+    (tmp_path / "users" / user.user_id / "data" / "TestProduct").mkdir(parents=True)
+    (tmp_path / "users" / user.user_id / "data" / "TestProduct" / "info.txt").write_text("Test product info", encoding="utf-8")
+    (tmp_path / "users" / user.user_id / "cache" / "TestProduct").mkdir(parents=True)
+    (tmp_path / "users" / user.user_id / "output").mkdir(parents=True)
+    (tmp_path / "users" / user.user_id / "brand").mkdir(parents=True)
+
+    client = TestClient(web_viewer.app)
+    # Login via API to set the session cookie naturally
+    resp = client.post("/api/auth/login", json={"username": "testuser", "password": "testpass"})
+    assert resp.status_code == 200, f"login failed: {resp.status_code} {resp.text}"
+    return client
 
 
 @pytest.fixture

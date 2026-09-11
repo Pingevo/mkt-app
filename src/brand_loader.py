@@ -235,10 +235,21 @@ def load_brand_context(brand_dir: str | Path | None = None, *, product_id: str |
 
 
 def _resolve_brand_dir(brand_dir: str | Path | None) -> Path | None:
-    """Resolve brand_dir — คืน None ถ้าไม่มี directory."""
-    if brand_dir is None:
-        project_root = Path(__file__).resolve().parent.parent
-        brand_dir = project_root / "brand"
+    """Resolve brand_dir — local workspace first, then product brand/.
+
+    When ``brand_dir`` is None or the default ``"brand"``, returns the local
+    workspace brand dir if it exists, otherwise the product ``brand/`` directory.
+    When an explicit path is passed, uses that path directly (backward compat).
+    """
+    if brand_dir is None or brand_dir == "brand":
+        from .local_workspace import local_brand_dir, product_brand_dir
+        local = local_brand_dir()
+        if local.exists() and any(local.iterdir()):
+            return local
+        prod = product_brand_dir()
+        if prod.exists() and prod.is_dir():
+            return prod
+        return None
     brand_dir = Path(brand_dir)
     if not brand_dir.exists() or not brand_dir.is_dir():
         return None
@@ -283,12 +294,14 @@ def load_product_profile(product_id: str) -> dict[str, Any]:
     """
     if not product_id:
         return {}
-    # ค้นจาก cwd/cache ก่อน แล้ว fallback ไป project root/cache และ data/
+    # Resolve through per-user workspace when active, else cwd/project_root fallbacks
+    from .workspace_context import user_state_root
+    _ws_root = user_state_root(Path(__file__).resolve().parent.parent)
     candidates = [
+        _ws_root / "cache" / product_id / "product_profile.json",
+        _ws_root / "data" / product_id / "product_profile.json",
         Path.cwd() / "cache" / product_id / "product_profile.json",
-        Path(__file__).resolve().parent.parent / "cache" / product_id / "product_profile.json",
         Path.cwd() / "data" / product_id / "product_profile.json",
-        Path(__file__).resolve().parent.parent / "data" / product_id / "product_profile.json",
     ]
     for path in candidates:
         data = _read_json(path)

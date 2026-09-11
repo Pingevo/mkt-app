@@ -3,6 +3,12 @@
 .env.local
 .env.*.local
 
+# Recovery archive — historical backups, never runtime state
+.recovery_archive/
+
+# Local user workspace — mutable state, never product config
+workspace/
+
 # Python
 __pycache__/
 *.pyc
@@ -24,68 +30,22 @@ venv/
 # Output / generated deliverables
 output/
 
-# Customer data (real product data — keep examples only)
-data/Lagenio*/
-cache/Lagenio*/
+# Customer data — ignore ALL user product data, preserve tracked fixtures
+/data/*
+!/data/.gitkeep
+!/data/agent3_beta_status.md
+!/data/m6_uplift/
 
-# Test / mockup data (not for production)
-data/Mockup*/
-cache/Mockup*/
-data/Coffee/
-cache/Coffee/
-data/ZMI*/
-cache/ZMI*/
-mockup_data/
+# User-derived cache — ignore ALL, preserve product infrastructure
+/cache/*
+!/cache/.gitkeep
+!/cache/_media_capabilities/
 
-# Brand profiles (real customer data — keep .example.md + .example.json only)
-brand/brand_profile.md
-brand/tone_of_voice.md
-brand/target_audience.md
-brand/visual_guidelines.md
-brand/*.md.bak
-brand/voice.json
-brand/terms.json
-brand/visual.json
-brand/audience.json
-
-# Asset Library — user uploaded files + catalog DB (system space)
-brand/assets/
-cache/assets/
-
-# Scheduler — job store + run log (user data, not templates)
-cache/scheduled_jobs.json
-cache/scheduled_runs.json
-
-# Content history — runtime state, เปลี่ยนทุกครั้งที่รัน
-cache/content_history.json
-
-# Runtime qualification / debug outputs
-data/all_agents_beta_qualification/
-cache/all_agents_beta_qualification/
-data/campaign_*/
-cache/campaign_*/
-data/CACGO*/
-cache/CACGO*/
-data/.staging/
-
-# Runtime test/fixture product directories (not source of truth)
-cache/DirectImageProduct/
-cache/ImageOnly/
-cache/ImageScoped/
-cache/LegacyProduct/
-cache/OneProduct/
-cache/ProductA/
-cache/ProductB/
-cache/ProfileOnlyProduct/
-cache/ScopedProduct/
-cache/TestProduct/
-cache/ValidA/
-cache/ValidB/
-cache/m6_frontier_uat/
-cache/m6_uplift/
-cache/run_resources/
-data/m6_frontier_uat/
-data/m6_uplift/
+# Brand profiles — ignore user state, keep .example.* templates
+/brand/*
+!/brand/.gitkeep
+!/brand/*.example.json
+!/brand/*.example.md
 
 # Evaluation artifacts (preserved M6 harnesses, not production code)
 evaluation_artifacts/

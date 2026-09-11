@@ -41,7 +41,24 @@ def _client(monkeypatch, tmp_path):
     # monkeypatch ingestion._make_llm ให้คืน None — ไม่เรียก LLM จริงใน test
     import src.ingestion as ing
     monkeypatch.setattr(ing, "_make_llm", lambda: None)
-    return TestClient(web_viewer.app), tmp_path
+
+    # Authenticate the client
+    from tests.conftest import make_authed_client
+    client, user_id, ws_root = make_authed_client(web_viewer.app, tmp_path, monkeypatch)
+    # Patch path functions to per-user workspace
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: ws_root / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: ws_root / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: ws_root / "cache")
+    monkeypatch.setattr(web_viewer, "BRAND_DIR", lambda: ws_root / "brand")
+    # Patch state modules to per-user workspace
+    monkeypatch.setattr(product_db, "_project_root", lambda: ws_root)
+    monkeypatch.setattr(staging, "_project_root", lambda: ws_root)
+    monkeypatch.setattr(ing, "_project_root", lambda: ws_root)
+    # Create per-user dirs
+    (ws_root / "data").mkdir(parents=True, exist_ok=True)
+    (ws_root / "cache").mkdir(parents=True, exist_ok=True)
+    (ws_root / "output").mkdir(parents=True, exist_ok=True)
+    return client, ws_root
 
 
 # ------------------------------------------------------------------

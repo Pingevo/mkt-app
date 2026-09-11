@@ -39,7 +39,9 @@ def _generate_product_profile(product_id: str, llm=None) -> None:
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    """Resolve user-state root — per-user workspace when active, else project root."""
+    from .workspace_context import user_state_root
+    return user_state_root(Path(__file__).resolve().parent.parent)
 
 
 def _staging_root() -> Path:

@@ -95,9 +95,9 @@ def test_make_entry_includes_all_hub_fields():
 def test_record_ai_usage_writes_local_even_without_hub_token():
     """When no Hub token is configured, only the local JSONL should be written."""
     path = _tmp_log()
-    original_log_path = ai_usage.USAGE_LOG_PATH
+    original_log_fn = ai_usage.usage_log_path
     try:
-        ai_usage.USAGE_LOG_PATH = path
+        ai_usage.usage_log_path = lambda: path
         # Ensure no Hub credentials leak from environment
         with mock.patch.dict(os.environ, {}, clear=False):
             for key in ("AI_USAGE_HUB_URL", "AI_USAGE_HUB_TOKEN"):
@@ -117,7 +117,7 @@ def test_record_ai_usage_writes_local_even_without_hub_token():
             assert entries[0]["reference"] == "K5"
             assert "timestamp" in entries[0]
     finally:
-        ai_usage.USAGE_LOG_PATH = original_log_path
+        ai_usage.usage_log_path = original_log_fn
         shutil.rmtree(path.parent)
         flow_context.clear_usage_context()
 
@@ -125,7 +125,7 @@ def test_record_ai_usage_writes_local_even_without_hub_token():
 def test_record_ai_usage_dispatches_to_hub_when_token_present():
     """When Hub token is present, the same payload (plus defaults) is POSTed."""
     path = _tmp_log()
-    original_log_path = ai_usage.USAGE_LOG_PATH
+    original_log_fn = ai_usage.usage_log_path
     posted = []
     fake_thread = threading.Thread
 
@@ -133,7 +133,7 @@ def test_record_ai_usage_dispatches_to_hub_when_token_present():
         posted.append((endpoint, token, payload))
 
     try:
-        ai_usage.USAGE_LOG_PATH = path
+        ai_usage.usage_log_path = lambda: path
         flow_context.clear_usage_context()
         flow_context.set_flow_id("flow-abc")
         flow_context.set_usage_actor("scheduler")
@@ -165,7 +165,7 @@ def test_record_ai_usage_dispatches_to_hub_when_token_present():
             assert len(entries) == 1
             assert entries[0]["flow_id"] == "flow-abc"
     finally:
-        ai_usage.USAGE_LOG_PATH = original_log_path
+        ai_usage.usage_log_path = original_log_fn
         if path.exists():
             shutil.rmtree(path.parent)
         flow_context.clear_usage_context()
@@ -174,13 +174,13 @@ def test_record_ai_usage_dispatches_to_hub_when_token_present():
 def test_record_ai_usage_swallows_hub_errors():
     """A Hub dispatch exception must not escape the public interface."""
     path = _tmp_log()
-    original_log_path = ai_usage.USAGE_LOG_PATH
+    original_log_fn = ai_usage.usage_log_path
 
     def _boom(endpoint, token, payload):
         raise RuntimeError("network down")
 
     try:
-        ai_usage.USAGE_LOG_PATH = path
+        ai_usage.usage_log_path = lambda: path
         flow_context.clear_usage_context()
         with mock.patch.object(ai_usage, "_read_hub_credentials",
                                lambda: ("https://digital.in.th", "svc_testtoken")):
@@ -190,7 +190,7 @@ def test_record_ai_usage_swallows_hub_errors():
             # local still written, no exception raised
             assert len(_entries(path)) == 1
     finally:
-        ai_usage.USAGE_LOG_PATH = original_log_path
+        ai_usage.usage_log_path = original_log_fn
         if path.exists():
             shutil.rmtree(path.parent)
         flow_context.clear_usage_context()
@@ -199,9 +199,9 @@ def test_record_ai_usage_swallows_hub_errors():
 def test_context_merge_does_not_override_caller_fields():
     """Caller-provided fields win over context; missing fields use context."""
     path = _tmp_log()
-    original_log_path = ai_usage.USAGE_LOG_PATH
+    original_log_fn = ai_usage.usage_log_path
     try:
-        ai_usage.USAGE_LOG_PATH = path
+        ai_usage.usage_log_path = lambda: path
         flow_context.clear_usage_context()
         flow_context.set_usage_actor("web")
         flow_context.set_usage_reference("K9")
@@ -217,7 +217,7 @@ def test_context_merge_does_not_override_caller_fields():
         assert entries[0]["user"] == "overridden_user"
         assert entries[0]["reference"] == "overridden_ref"
     finally:
-        ai_usage.USAGE_LOG_PATH = original_log_path
+        ai_usage.usage_log_path = original_log_fn
         if path.exists():
             shutil.rmtree(path.parent)
         flow_context.clear_usage_context()

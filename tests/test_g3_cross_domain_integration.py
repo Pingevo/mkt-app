@@ -298,17 +298,20 @@ def test_saas_evidence_mode_through_orchestrator(store, isolated_project, tmp_pa
 
 
 def _setup_route_isolation(monkeypatch, tmp_path: Path):
-    """Patch filesystem roots so routes use tmp_path. Returns (data_dir, cache_dir)."""
+    """Patch filesystem roots so routes use tmp_path. Returns (data_dir, cache_dir, client, ws_root)."""
     import web_viewer
 
     monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(web_viewer, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(web_viewer, "CACHE_DIR", tmp_path / "cache")
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
-    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "output").mkdir(parents=True, exist_ok=True)
-    return tmp_path / "data", tmp_path / "cache"
+    # Authenticate first — creates per-user workspace
+    from tests.conftest import make_authed_client
+    client, user_id, ws_root = make_authed_client(web_viewer.app, tmp_path, monkeypatch)
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: ws_root / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: ws_root / "cache")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: ws_root / "output")
+    (ws_root / "data").mkdir(parents=True, exist_ok=True)
+    (ws_root / "cache").mkdir(parents=True, exist_ok=True)
+    (ws_root / "output").mkdir(parents=True, exist_ok=True)
+    return ws_root / "data", ws_root / "cache", client, ws_root
 
 
 def _patch_llm_boundary(monkeypatch, fake_llm: _FakeLLM):
@@ -341,7 +344,7 @@ def test_single_agent_http_route(monkeypatch, tmp_path):
     # exists after reload so the worker can read/write it.
     monkeypatch.setattr(web_viewer, "_current_llm", None, raising=False)
 
-    data_dir, cache_dir = _setup_route_isolation(monkeypatch, tmp_path)
+    data_dir, cache_dir, client, ws_root = _setup_route_isolation(monkeypatch, tmp_path)
     _write_data_product(data_dir, "G3-Route-A", "Restaurant data: menu, price 120-180 baht")
 
     # Write a READY product DB record so _get_product_data finds it
@@ -357,7 +360,6 @@ def test_single_agent_http_route(monkeypatch, tmp_path):
     # brand_dir from the HTTP body.  This proves the brand directory
     # sent in the request is loaded through the real production path.
 
-    client = TestClient(web_viewer.app)
     resp = client.post("/api/run_agent", json={
         "agent": "product_spec",
         "folder": "G3-Route-A",
@@ -410,13 +412,13 @@ def test_multi_product_http_route(monkeypatch, tmp_path):
     importlib.reload(web_viewer)
     monkeypatch.setattr(web_viewer, "_current_llm", None, raising=False)
 
-    data_dir, cache_dir = _setup_route_isolation(monkeypatch, tmp_path)
+    data_dir, cache_dir, client, ws_root = _setup_route_isolation(monkeypatch, tmp_path)
     _write_data_product(data_dir, "G3-Multi-A", "Restaurant: ramen, price 120 baht")
     _write_data_product(data_dir, "G3-Multi-B", "SaaS: CloudApp, plan $49/mo, API 1000 req/min")
 
-    monkeypatch.setattr(product_db, "_project_root", lambda: tmp_path)
-    _write_product(tmp_path, "G3-Multi-A", "Restaurant: ramen, price 120 baht", "restaurant")
-    _write_product(tmp_path, "G3-Multi-B", "SaaS: CloudApp, plan $49/mo, API 1000 req/min", "saas")
+    monkeypatch.setattr(product_db, "_project_root", lambda: ws_root)
+    _write_product(ws_root, "G3-Multi-A", "Restaurant: ramen, price 120 baht", "restaurant")
+    _write_product(ws_root, "G3-Multi-B", "SaaS: CloudApp, plan $49/mo, API 1000 req/min", "saas")
 
     brand = _make_brand_dir(tmp_path, "brand_multi", "BrandMultiVoice")
     fake = _FakeLLM(output="## สเปคสินค้า\n\nร้านอาหาร + SaaS รวม")
@@ -426,7 +428,6 @@ def test_multi_product_http_route(monkeypatch, tmp_path):
     # directly (not via _get_orchestrator).  brand_dir from the HTTP
     # body flows through the production constructor → load_brand_rules.
 
-    client = TestClient(web_viewer.app)
     resp = client.post("/api/run_agents", json={
         "agents": ["product_spec"],
         "folders": ["G3-Multi-A", "G3-Multi-B"],

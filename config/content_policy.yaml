@@ -8,46 +8,6 @@ content_history:
   dedup_similarity_threshold: 0.85
   dedup_window_days: 30
   dedup_max_retries: 3
-  script_review_enabled: true         # self-review อัตโนมัติ (ไม่ต้อง approve user)
-  script_review_threshold: 70         # score ≥ 70 = พอใช้, ต่ำกว่า = แก้แล้วตรวจใหม่
-  script_review_max_iterations: 2     # max 2 รอบ (review + 1 re-check) — กัน loop ไม่รู้จบ
-pillars:
-- รีวิวสินค้า
-- เปรียบเทียบ
-- ทดสอบความทน
-- ฟังก์ชันเด่น
-- ไลฟ์สไตล์
-pillar_keywords:
-  รีวิวสินค้า:
-  - รีวิว
-  - แนะนำ
-  - นำเสนอ
-  - สินค้าใหม่
-  เปรียบเทียบ:
-  - เปรียบเทียบ
-  - เทียบ
-  - vs
-  - ต่างกัน
-  - เลือก
-  ทดสอบความทน:
-  - ทดสอบ
-  - ทิ้งน้ำ
-  - ทน
-  - ip68
-  - กันน้ำ
-  - ทิ้งพื้น
-  ฟังก์ชันเด่น:
-  - ฟังก์ชัน
-  - feature
-  - make friends
-  - geo-fence
-  - nio ai
-  - class disable
-  ไลฟ์สไตล์:
-  - ไลฟ์สไตล์
-  - ครอบครัว
-  - เดินทาง
-  - ทุกวัน
-  - ประจำวัน
-  - ห้องนอน
-  - บรรยากาศ
+  script_review_enabled: true
+  script_review_threshold: 70
+  script_review_max_iterations: 2

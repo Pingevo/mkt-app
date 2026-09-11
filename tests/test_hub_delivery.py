@@ -23,7 +23,7 @@ def _temp_usage_log(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Any:
     # deliver into this test's callback.
     flush_usage_log(timeout=2.0)
     log_path = tmp_path / "llm_usage.jsonl"
-    monkeypatch.setattr("src.ai_usage.USAGE_LOG_PATH", log_path)
+    monkeypatch.setattr("src.ai_usage.usage_log_path", lambda: log_path)
     yield log_path
 
 

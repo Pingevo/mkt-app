@@ -38,7 +38,7 @@ from .campaign_qualification import (
 )
 from ..ai_usage import (
     HubReceiptCollector,
-    USAGE_LOG_PATH,
+    usage_log_path,
     flush_usage_log,
     reconcile_hub_receipts,
 )
@@ -70,10 +70,10 @@ def _read_usage_log(reference: str) -> float:
     """Return the sum of cost_usd for the given reference from local usage log."""
     total = 0.0
     try:
-        from ..ai_usage import USAGE_LOG_PATH
-        if not USAGE_LOG_PATH.exists():
+        from ..ai_usage import usage_log_path
+        if not usage_log_path().exists():
             return 0.0
-        with open(USAGE_LOG_PATH, "r", encoding="utf-8") as f:
+        with open(usage_log_path(), "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -95,11 +95,11 @@ def _read_usage_log(reference: str) -> float:
 def _read_usage_entry(reference: str) -> dict[str, Any] | None:
     """Return the last usage log entry for the given reference, or None."""
     try:
-        from ..ai_usage import USAGE_LOG_PATH
-        if not USAGE_LOG_PATH.exists():
+        from ..ai_usage import usage_log_path
+        if not usage_log_path().exists():
             return None
         last: dict[str, Any] | None = None
-        with open(USAGE_LOG_PATH, "r", encoding="utf-8") as f:
+        with open(usage_log_path(), "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -476,7 +476,7 @@ class CampaignRealEvalHarness:
 
         # Snapshot the local usage log before any call so we only read entries
         # that are appended during this run.
-        usage_log_offset = snapshot_usage_log_offset(USAGE_LOG_PATH)
+        usage_log_offset = snapshot_usage_log_offset(usage_log_path())
 
         with HubReceiptCollector() as hub_collector:
             try:
@@ -529,7 +529,7 @@ class CampaignRealEvalHarness:
 
                 # Cost and token counts are read from the usage log by reference and
                 # byte offset, then aggregated across every call owned by this run.
-                run_entries = read_usage_log_for_reference(USAGE_LOG_PATH, run_ref, usage_log_offset)
+                run_entries = read_usage_log_for_reference(usage_log_path(), run_ref, usage_log_offset)
                 # Expected calls: the initial generation plus every repair attempt.
                 expected_calls = 1 + (repair_count or 0)
                 run_summary = aggregate_run_usage(
@@ -584,7 +584,7 @@ class CampaignRealEvalHarness:
                 }
 
                 # Aggregate every usage entry appended during this run.
-                run_entries = read_usage_log_for_reference(USAGE_LOG_PATH, run_ref, usage_log_offset)
+                run_entries = read_usage_log_for_reference(usage_log_path(), run_ref, usage_log_offset)
                 expected_calls = 1 + (repair_count or 0)
                 run_summary = aggregate_run_usage(
                     run_entries,

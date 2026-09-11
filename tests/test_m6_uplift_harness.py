@@ -699,9 +699,30 @@ class TestNoUpstreamGeneration:
 
 class TestPillarsFromProduction:
     def test_pillars_loaded_from_content_policy(self, harness):
+        """Pillars now come from local user state, not factory config/content_policy.yaml.
+
+        A fresh workspace has no pillars. Saving local pillars makes them
+        appear through the same production loader the harness uses.
+        """
+        from src.local_workspace import (
+            reset_local_workspace,
+            save_content_pillars_local,
+        )
+        # Fresh workspace → no pillars
+        reset_local_workspace()
+        assert harness._load_configured_pillars() == []
+
+        # Save local pillars → harness sees them through load_config()
+        save_content_pillars_local(
+            ["รีวิวสินค้า", "โปรโมชัน", "ความรู้", "คอมมูนิตี้", "ไลฟ์สไตล์"],
+            {},
+        )
         pillars = harness._load_configured_pillars()
         assert len(pillars) == 5
         assert "รีวิวสินค้า" in pillars
+
+        # Clean up
+        reset_local_workspace()
 
     def test_pillars_match_orchestrator_source(self, harness):
         from src.config_loader import load_config

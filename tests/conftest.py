@@ -28,7 +28,7 @@ def _isolate_ai_usage_hub(monkeypatch, tmp_path):
 
     - patch ``_read_hub_credentials`` ให้คืน ``(None, None)`` เสมอ
       → ``record_ai_usage`` ข้าม Hub POST ไม่ว่า env จะถูกโหลดใหม่กี่ครั้ง
-    - redirect ``USAGE_LOG_PATH`` ไป tmp_path → ไม่เขียนทับ logs/llm_usage.jsonl จริง
+    - redirect ``usage_log_path`` ไป tmp_path → ไม่เขียนทับ logs/llm_usage.jsonl จริง
 
     เทสต์ที่ต้องการ Hub behavior จริง override โดย:
     ``monkeypatch.setattr(ai_usage, "_read_hub_credentials", lambda: (url, token))``
@@ -38,6 +38,7 @@ def _isolate_ai_usage_hub(monkeypatch, tmp_path):
     monkeypatch.setattr("src.ai_usage._read_hub_credentials", lambda: (None, None))
 
     log_path = tmp_path / "llm_usage.jsonl"
+    monkeypatch.setattr("src.ai_usage.usage_log_path", lambda: log_path)
     monkeypatch.setattr("src.ai_usage.USAGE_LOG_PATH", log_path)
 
 
@@ -56,3 +57,46 @@ def _restore_gate_make_client(monkeypatch):
     yield
     openrouter_gateway._make_client = original_make_client
     openrouter_gateway.record_ai_usage = original_record
+
+
+# ---------------------------------------------------------------------------
+# Auth helper — creates an authenticated TestClient for API tests
+# ---------------------------------------------------------------------------
+
+def make_authed_client(app, tmp_path, monkeypatch=None):
+    """Create an authenticated TestClient for the given FastAPI app.
+
+    Registers a test user, creates a session, and sets the session cookie.
+
+    Returns (client, user_id, workspace_root).
+    """
+    from starlette.testclient import TestClient
+    from src.auth import UserStore, SessionManager, SESSION_COOKIE_NAME
+    import src.auth as auth_mod
+
+    _users_path = tmp_path / "data" / "auth" / "users.json"
+    _sessions_path = tmp_path / "data" / "auth" / "sessions.json"
+    _users_path.parent.mkdir(parents=True, exist_ok=True)
+    _store = UserStore(_users_path)
+    _sess = SessionManager(_sessions_path)
+    if monkeypatch:
+        monkeypatch.setattr(auth_mod, "_user_store", _store)
+        monkeypatch.setattr(auth_mod, "_session_manager", _sess)
+    else:
+        auth_mod._user_store = _store
+        auth_mod._session_manager = _sess
+    user = _store.register("testuser", "testpass")
+    token = _sess.create_session(user.user_id)
+
+    # Create per-user workspace dirs
+    ws_root = tmp_path / "users" / user.user_id
+    (ws_root / "data").mkdir(parents=True, exist_ok=True)
+    (ws_root / "cache").mkdir(parents=True, exist_ok=True)
+    (ws_root / "output").mkdir(parents=True, exist_ok=True)
+    (ws_root / "brand").mkdir(parents=True, exist_ok=True)
+
+    client = TestClient(app)
+    # Login via API to set the session cookie naturally (more robust than manual cookie set)
+    resp = client.post("/api/auth/login", json={"username": "testuser", "password": "testpass"})
+    assert resp.status_code == 200, f"login failed: {resp.status_code} {resp.text}"
+    return client, user.user_id, ws_root

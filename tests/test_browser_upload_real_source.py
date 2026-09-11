@@ -317,7 +317,8 @@ def _server(tmp_path_factory):
     # has its own _project_root() must return the temp directory so that
     # staging, ingestion, product_db, config_loader, and asset_library all
     # read/write within tmp_path, not the real project root.
-    product_db._project_root = lambda: tmp
+    # Patch _project_root() functions — staging, ingestion, config_loader, asset_library
+    # product_db._project_root is patched below after the per-user workspace is created.
     staging._project_root = lambda: tmp
     ingestion._project_root = lambda: tmp
     config_loader._project_root = lambda: tmp
@@ -325,10 +326,33 @@ def _server(tmp_path_factory):
     # Ensure staging uses the patched product_db (not a stale import-time ref)
     staging.product_db = product_db
     web_viewer.PROJECT_ROOT = tmp
-    web_viewer.OUTPUT_DIR = tmp / "output"
-    web_viewer.DATA_DIR = tmp / "data"
-    web_viewer.CACHE_DIR = tmp / "cache"
-    web_viewer.BRAND_DIR = tmp / "brand"
+    web_viewer.OUTPUT_DIR = lambda: tmp / "output"
+    web_viewer.DATA_DIR = lambda: tmp / "data"
+    web_viewer.CACHE_DIR = lambda: tmp / "cache"
+    web_viewer.BRAND_DIR = lambda: tmp / "brand"
+
+    # Register a test user for auth
+    from src.auth import UserStore, SessionManager
+    import src.auth as auth_mod
+    _users_path = tmp / "data" / "auth" / "users.json"
+    _sessions_path = tmp / "data" / "auth" / "sessions.json"
+    _users_path.parent.mkdir(parents=True, exist_ok=True)
+    _store = UserStore(_users_path)
+    _sess = SessionManager(_sessions_path)
+    auth_mod._user_store = _store
+    auth_mod._session_manager = _sess
+    _user = _store.register("testuser", "testpass")
+    # Create per-user workspace dirs
+    _ws_root = tmp / "users" / _user.user_id
+    (_ws_root / "data").mkdir(parents=True)
+    (_ws_root / "cache").mkdir(parents=True)
+    (_ws_root / "brand").mkdir(parents=True)
+    (_ws_root / "output").mkdir(parents=True)
+    # Patch _project_root functions to per-user workspace
+    product_db._project_root = lambda: _ws_root
+    staging._project_root = lambda: _ws_root
+    ingestion._project_root = lambda: _ws_root
+    _test_token = _sess.create_session(_user.user_id)
 
     # Copy the real production brand directory into tmp/brand so that
     # /api/brand_json_save writes to tmp/brand/ and the Orchestrator
@@ -452,6 +476,7 @@ def _server(tmp_path_factory):
         "brand_marker": BRAND_MARKER,
         "brand_audience_marker": BRAND_AUDIENCE_MARKER,
         "media_call_log": _media_call_log,
+        "session_token": _test_token,
     }
 
     # Cleanup
@@ -469,10 +494,10 @@ def _server(tmp_path_factory):
     ingestion._make_llm = _orig["ingestion_make_llm"]
     CompetitorReportRenderer.validate = _orig["renderer_validate"]
     web_viewer.PROJECT_ROOT = _orig["PROJECT_ROOT"]
-    web_viewer.OUTPUT_DIR = _orig["OUTPUT_DIR"]
-    web_viewer.DATA_DIR = _orig["DATA_DIR"]
-    web_viewer.CACHE_DIR = _orig["CACHE_DIR"]
-    web_viewer.BRAND_DIR = _orig["BRAND_DIR"]
+    web_viewer.OUTPUT_DIR = lambda: _orig["OUTPUT_DIR"]
+    web_viewer.DATA_DIR = lambda: _orig["DATA_DIR"]
+    web_viewer.CACHE_DIR = lambda: _orig["CACHE_DIR"]
+    web_viewer.BRAND_DIR = lambda: _orig["BRAND_DIR"]
     _bl_mod._resolve_brand_dir = _orig_resolve_brand_dir
     _bl_mod.load_product_profile = _orig_load_product_profile
     web_viewer._current_llm = _orig["current_llm"]
@@ -507,7 +532,12 @@ def _browser(_server):
         page.on("pageerror", lambda err: console_errors.append(err))
 
         url = _server["url"]
-        page.goto(url, wait_until="networkidle", timeout=15000)
+        # Authenticate first — login via API to get the session cookie
+        page.goto(f"{url}/login", wait_until="networkidle", timeout=15000)
+        page.fill("#username", "testuser")
+        page.fill("#password", "testpass")
+        page.click("#submit-btn")
+        page.wait_for_url(f"{url}/", timeout=10000)
         page.wait_for_selector("#flow-wizard-list", timeout=10000)
 
         yield {

@@ -13,12 +13,17 @@ from starlette.testclient import TestClient
 
 
 @pytest.fixture
-def _client():
-    """import web_viewer ใหม่ทุกครั้ง — กัน state รั่วระหว่าง tests."""
-    import importlib
+def _client(tmp_path, monkeypatch):
+    """Authenticated TestClient for API tests."""
     import web_viewer
-    importlib.reload(web_viewer)
-    return TestClient(web_viewer.app)
+    from tests.conftest import make_authed_client
+    client, user_id, ws_root = make_authed_client(web_viewer.app, tmp_path, monkeypatch)
+    # Patch path functions to per-user workspace
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: ws_root / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: ws_root / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: ws_root / "cache")
+    monkeypatch.setattr(web_viewer, "BRAND_DIR", lambda: ws_root / "brand")
+    return client
 
 
 def _content_creator_json():
@@ -49,9 +54,9 @@ def test_run_flows_ask_mode_does_not_auto_generate_media(_client, tmp_path, monk
 
     # monkeypatch PROJECT_ROOT + DATA_DIR + CACHE_DIR + OUTPUT_DIR ของ web_viewer
     monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(web_viewer, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(web_viewer, "CACHE_DIR", tmp_path / "cache")
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: tmp_path / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: tmp_path / "cache")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
 
     # --- mock Orchestrator ทั้งก้อน — เราสนแต่ media gen path ---
     fake_orch = MagicMock()
@@ -120,7 +125,7 @@ def test_run_auto_ask_mode_does_not_auto_generate_media(_client, tmp_path, monke
     import web_viewer
 
     monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
 
     # --- mock Orchestrator.run_content_creator_auto คืน result dict ---
     fake_orch = MagicMock()
@@ -184,9 +189,9 @@ def test_run_flows_null_auto_image_does_not_auto_generate_media(_client, tmp_pat
     (product_dir / "info.txt").write_text("test product info", encoding="utf-8")
 
     monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(web_viewer, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(web_viewer, "CACHE_DIR", tmp_path / "cache")
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: tmp_path / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: tmp_path / "cache")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
 
     fake_orch = MagicMock()
     fake_orch._make_client.return_value = MagicMock()

@@ -66,10 +66,16 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _resolve_brand_dir(brand_dir: str | Path | None) -> Path | None:
-    """Resolve brand_dir — คืน None ถ้าไม่มี directory."""
-    if brand_dir is None:
-        project_root = Path(__file__).resolve().parent.parent
-        brand_dir = project_root / "brand"
+    """Resolve brand_dir — local workspace first, then product brand/."""
+    if brand_dir is None or brand_dir == "brand":
+        from .local_workspace import local_brand_dir, product_brand_dir
+        local = local_brand_dir()
+        if local.exists() and any(local.iterdir()):
+            return local
+        prod = product_brand_dir()
+        if prod.exists() and prod.is_dir():
+            return prod
+        return None
     brand_dir = Path(brand_dir)
     if not brand_dir.exists() or not brand_dir.is_dir():
         return None

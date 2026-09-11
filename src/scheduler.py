@@ -69,28 +69,47 @@ class JsonJobStore:
         self._retention_days = retention_days
         self._lock = threading.Lock()
 
+    def _resolve_jobs_path(self) -> Path:
+        """Resolve jobs path — per-user workspace when active."""
+        from .workspace_context import get_workspace
+        ws = get_workspace()
+        if ws:
+            return ws.cache_dir() / "scheduled_jobs.json"
+        return self._jobs_path
+
+    def _resolve_runs_path(self) -> Path:
+        """Resolve runs path — per-user workspace when active."""
+        from .workspace_context import get_workspace
+        ws = get_workspace()
+        if ws:
+            return ws.cache_dir() / "scheduled_runs.json"
+        return self._runs_path
+
     def load_jobs(self) -> list[dict]:
-        if not self._jobs_path.exists():
+        jobs_path = self._resolve_jobs_path()
+        if not jobs_path.exists():
             return []
         try:
-            data = json.loads(self._jobs_path.read_text(encoding="utf-8"))
+            data = json.loads(jobs_path.read_text(encoding="utf-8"))
             return data.get("jobs", [])
         except (json.JSONDecodeError, OSError):
             return []
 
     def save_jobs(self, jobs: list[dict]) -> None:
         with self._lock:
-            self._jobs_path.parent.mkdir(parents=True, exist_ok=True)
-            self._jobs_path.write_text(
+            jobs_path = self._resolve_jobs_path()
+            jobs_path.parent.mkdir(parents=True, exist_ok=True)
+            jobs_path.write_text(
                 json.dumps({"jobs": jobs}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
 
     def load_runs(self, job_id: str | None = None, limit: int = 50) -> list[dict]:
-        if not self._runs_path.exists():
+        runs_path = self._resolve_runs_path()
+        if not runs_path.exists():
             return []
         try:
-            data = json.loads(self._runs_path.read_text(encoding="utf-8"))
+            data = json.loads(runs_path.read_text(encoding="utf-8"))
             runs = data.get("runs", [])
         except (json.JSONDecodeError, OSError):
             return []
@@ -101,9 +120,10 @@ class JsonJobStore:
 
     def append_run(self, run: dict) -> None:
         with self._lock:
-            self._runs_path.parent.mkdir(parents=True, exist_ok=True)
+            runs_path = self._resolve_runs_path()
+            runs_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                data = json.loads(self._runs_path.read_text(encoding="utf-8")) if self._runs_path.exists() else {"runs": []}
+                data = json.loads(runs_path.read_text(encoding="utf-8")) if runs_path.exists() else {"runs": []}
             except (json.JSONDecodeError, OSError):
                 data = {"runs": []}
             runs = data.get("runs", [])
@@ -121,7 +141,8 @@ class JsonJobStore:
             if len(runs) > self._max_runs:
                 runs = runs[-self._max_runs:]
             data["runs"] = runs
-            self._runs_path.write_text(
+            runs_path = self._resolve_runs_path()
+            runs_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
@@ -129,8 +150,9 @@ class JsonJobStore:
     def update_run(self, job_id: str, started_at: str, updates: dict) -> bool:
         """Update run record ที่ระบุด้วย (job_id, started_at) — คืน True ถ้าเจอ."""
         with self._lock:
+            runs_path = self._resolve_runs_path()
             try:
-                data = json.loads(self._runs_path.read_text(encoding="utf-8")) if self._runs_path.exists() else {"runs": []}
+                data = json.loads(runs_path.read_text(encoding="utf-8")) if runs_path.exists() else {"runs": []}
             except (json.JSONDecodeError, OSError):
                 return False
             runs = data.get("runs", [])
@@ -141,7 +163,7 @@ class JsonJobStore:
                     found = True
                     break
             if found:
-                self._runs_path.write_text(
+                runs_path.write_text(
                     json.dumps(data, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
@@ -508,6 +530,11 @@ class Scheduler:
             flow = self._clone_attachments(flow)
             durable_session_id = flow.get("upload_session_id", "")
 
+        # Capture the owning user_id from the current workspace context.
+        from .workspace_context import get_workspace
+        ws = get_workspace()
+        user_id = ws.user_id if ws else job_spec.get("user_id", "")
+
         job = {
             "id": job_id,
             "name": job_spec.get("name", "unnamed"),
@@ -517,6 +544,7 @@ class Scheduler:
             "flow": flow,
             "quick_brief": job_spec.get("quick_brief", ""),
             "durable_session_id": durable_session_id,
+            "user_id": user_id,
             "created_at": datetime.now().astimezone().isoformat(),
             "last_run": "",
             "next_run": "",
@@ -674,6 +702,23 @@ class Scheduler:
         # error ที่ไม่มี output = placeholder (พลาดเวลา/ถูกตัด) → update แทน append
         should_update_original = source_status == "error" and not source_run.get("output_files")
 
+        # Set per-user workspace context — look up the job to get user_id.
+        from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
+        from .auth import get_session_manager
+        _project_root = Path(__file__).resolve().parent.parent
+        jobs = self._store.load_jobs()
+        job = next((j for j in jobs if j["id"] == source_job_id), None)
+        user_id = (job or {}).get("user_id", "")
+        ws_token = None
+        session_token = None
+        if user_id:
+            ws = WorkspaceContext.for_user(user_id, _project_root)
+            ws_token = set_workspace(ws)
+            try:
+                session_token = get_session_manager().create_session(user_id)
+            except Exception:
+                session_token = None
+
         started_at = datetime.now().astimezone().isoformat()
         run_record = {
             "job_id": source_job_id,
@@ -710,7 +755,9 @@ class Scheduler:
         try:
             flow = dict(source_run.get("flow", {}))
             quick_brief = str(source_run.get("quick_brief", ""))
-            output_files, session_ts, error = self._execute_flow(flow, quick_brief, source_job_id)
+            output_files, session_ts, error = self._execute_flow(
+                flow, quick_brief, source_job_id, session_token=session_token
+            )
 
             run_record["finished_at"] = datetime.now().astimezone().isoformat()
             run_record["status"] = "error" if error else "success"
@@ -742,11 +789,21 @@ class Scheduler:
             # Retention may have evicted old runs — clean up orphaned durable sessions.
             self._cleanup_orphaned_durable_sessions()
 
-    def _execute_flow(self, flow: dict, quick_brief: str, job_id_for_status: str) -> tuple[list[str], str, str]:
+        # Cleanup: revoke the temporary session token and reset the workspace context.
+        if session_token:
+            try:
+                get_session_manager().revoke_session(session_token)
+            except Exception:
+                pass
+        if ws_token is not None:
+            reset_workspace(ws_token)
+
+    def _execute_flow(self, flow: dict, quick_brief: str, job_id_for_status: str, *, session_token: str | None = None) -> tuple[list[str], str, str]:
         """ยิง flow ผ่าน HTTP SSE แล้ว parse events — ใช้ร่วมโดย _run_job และ _rerun_from_record.
 
         คืน (output_files, session_ts, error)
         """
+        from .auth import SESSION_COOKIE_NAME
         is_auto = bool(flow.get("is_auto", False))
         if is_auto:
             url = f"http://localhost:{self._web_port}/api/run_auto"
@@ -772,7 +829,11 @@ class Scheduler:
         session_ts = ""
         error = ""
 
-        with httpx.Client(timeout=httpx.Timeout(self._job_timeout)) as client:
+        # Pass the per-user session cookie so the web server resolves the
+        # correct WorkspaceContext for this job's owner.
+        cookies = {SESSION_COOKIE_NAME: session_token} if session_token else None
+
+        with httpx.Client(timeout=httpx.Timeout(self._job_timeout), cookies=cookies) as client:
             with client.stream("POST", url, json=payload, headers={"Accept": "text/event-stream"}) as res:
                 if res.status_code != 200:
                     body = res.read() or b""
@@ -824,6 +885,24 @@ class Scheduler:
             print(f"[Scheduler] job {job_id} ไม่พบ", flush=True)
             return
 
+        # Set per-user workspace context for this job execution.
+        from .workspace_context import WorkspaceContext, set_workspace, reset_workspace, get_workspace
+        from .auth import get_session_manager, SESSION_COOKIE_NAME
+        _project_root = Path(__file__).resolve().parent.parent
+        user_id = job.get("user_id", "")
+        ws_token = None
+        session_token = None
+        if user_id:
+            ws = WorkspaceContext.for_user(user_id, _project_root)
+            ws_token = set_workspace(ws)
+            # Create a short-lived session token for the HTTP call to the web server.
+            # This avoids persisting a reusable credential — the token is revoked
+            # after the job completes.
+            try:
+                session_token = get_session_manager().create_session(user_id)
+            except Exception:
+                session_token = None
+
         started_at = datetime.now().astimezone().isoformat()
         run_record = {
             "job_id": job_id,
@@ -850,7 +929,9 @@ class Scheduler:
         try:
             flow = dict(job.get("flow", {}))
             quick_brief = str(job.get("quick_brief", ""))
-            output_files, session_ts, error = self._execute_flow(flow, quick_brief, job_id)
+            output_files, session_ts, error = self._execute_flow(
+                flow, quick_brief, job_id, session_token=session_token
+            )
 
             run_record["finished_at"] = datetime.now().astimezone().isoformat()
             run_record["status"] = "error" if error else "success"
@@ -894,3 +975,12 @@ class Scheduler:
                     pass
 
             self._store.save_jobs(jobs)
+
+        # Cleanup: revoke the temporary session token and reset the workspace context.
+        if session_token:
+            try:
+                get_session_manager().revoke_session(session_token)
+            except Exception:
+                pass
+        if ws_token is not None:
+            reset_workspace(ws_token)

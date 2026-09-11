@@ -61,9 +61,12 @@ def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
 
     Falls back to ``config/agents.yaml`` relative to project root if no path given.
 
+    Product config is immutable.  User overrides from ``workspace/local/`` are
+    merged on top for agent settings and content pillars.
+
     Returns dict with:
       - "defaults": default agent config
-      - "agents": per-agent merged config
+      - "agents": per-agent merged config (product + local overrides)
       - "system", "content_history", "auto_mode", "pillars", ...: non-agent sections
     """
     config_dir = _project_root() / "config"
@@ -103,14 +106,25 @@ def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
         if section in raw:
             result[section] = raw[section]
 
-    # 4. Agent sections — merge with defaults
+    # 4. Agent sections — merge with defaults, then apply local user overrides
+    from .local_workspace import load_agent_overrides, load_content_pillars_local
+    local_overrides = load_agent_overrides()
     for key, value in raw.items():
         if key in _NON_AGENT_SECTIONS:
             continue
         if not isinstance(value, dict):
             continue
         merged = {**defaults, **value}
+        # Apply local user overrides for editable fields
+        agent_override = local_overrides.get(key, {})
+        if agent_override:
+            merged = {**merged, **agent_override}
         result["agents"][key] = merged
+
+    # 5. Load content pillars from local workspace (user state)
+    local_pillars = load_content_pillars_local()
+    result["pillars"] = local_pillars.get("pillars", [])
+    result["pillar_keywords"] = local_pillars.get("pillar_keywords", {})
 
     return result
 

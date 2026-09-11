@@ -46,7 +46,9 @@ ALL_STATUSES = [STATUS_EMPTY, STATUS_PENDING, STATUS_NO_USABLE, STATUS_PROCESSIN
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    """Resolve user-state root — per-user workspace when active, else project root."""
+    from .workspace_context import user_state_root
+    return user_state_root(Path(__file__).resolve().parent.parent)
 
 
 def _product_dir(product_id: str) -> Path:

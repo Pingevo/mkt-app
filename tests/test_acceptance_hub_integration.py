@@ -125,12 +125,12 @@ def test_acceptance_runner_posts_to_local_hub_and_local_log(monkeypatch, tmp_pat
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    original_log_path = ai_usage.USAGE_LOG_PATH
+    original_log_fn = ai_usage.usage_log_path
     try:
         monkeypatch.setattr(ai_usage, "_HUB_ENDPOINT", "/test-logs")
         monkeypatch.setattr(ai_usage, "_read_hub_credentials", lambda: (f"http://127.0.0.1:{port}", "testtoken"))
         log_path = _tmp_log()
-        ai_usage.USAGE_LOG_PATH = log_path
+        ai_usage.usage_log_path = lambda: log_path
 
         runner = _load_runner()
         FakeLLMClient._log_usage = llm_client.LLMClient._log_usage
@@ -165,7 +165,7 @@ def test_acceptance_runner_posts_to_local_hub_and_local_log(monkeypatch, tmp_pat
         assert result["total_cost_usd"] == 0.012
         assert any(entry.get("request_id") == "req-acceptance-001" for entry in result["usage_log"])
     finally:
-        ai_usage.USAGE_LOG_PATH = original_log_path
+        ai_usage.usage_log_path = original_log_fn
         flow_context.clear_usage_context()
         server.shutdown()
         server.server_close()

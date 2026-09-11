@@ -55,10 +55,24 @@ except ImportError:
     pass
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DATA_DIR = PROJECT_ROOT / "data"
-OUTPUT_DIR = PROJECT_ROOT / "output"
-BRAND_DIR = PROJECT_ROOT / "brand"
-CACHE_DIR = PROJECT_ROOT / "cache"
+
+from src.workspace_context import user_state_root as _user_state_root
+
+def DATA_DIR() -> Path:
+    """Per-user data dir — resolves via workspace context."""
+    return _user_state_root(PROJECT_ROOT) / "data"
+
+def OUTPUT_DIR() -> Path:
+    """Per-user output dir — resolves via workspace context."""
+    return _user_state_root(PROJECT_ROOT) / "output"
+
+def BRAND_DIR() -> Path:
+    """Per-user brand dir — resolves via workspace context."""
+    return _user_state_root(PROJECT_ROOT) / "brand"
+
+def CACHE_DIR() -> Path:
+    """Per-user cache dir — resolves via workspace context."""
+    return _user_state_root(PROJECT_ROOT) / "cache"
 
 app = FastAPI(title="MKTApp Viewer")
 
@@ -67,6 +81,130 @@ _resource_store = RunResourceStore(
     PROJECT_ROOT,
     config=get_section(load_config(), "run_resources", {}),
 )
+
+# ============================================================
+# Auth — login / register / logout / current user
+# ============================================================
+from src.auth import (
+    SESSION_COOKIE_NAME,
+    get_user_store,
+    get_session_manager,
+    get_workspace_ctx,
+    get_workspace_ctx_optional,
+)
+from src.workspace_context import set_workspace as _set_ws, reset_workspace as _reset_ws
+from fastapi import Depends, HTTPException, Response
+
+@app.post("/api/auth/register")
+async def api_register(request: Request) -> JSONResponse:
+    body = await request.json()
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", ""))
+    if not username or not password:
+        return JSONResponse({"error": "username and password required"}, status_code=400)
+    user = get_user_store().register(username, password)
+    if user is None:
+        return JSONResponse({"error": "username already taken"}, status_code=409)
+    token = get_session_manager().create_session(user.user_id)
+    resp = JSONResponse({"user_id": user.user_id, "username": user.username})
+    resp.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=7 * 24 * 3600,
+        path="/",
+    )
+    return resp
+
+@app.post("/api/auth/login")
+async def api_login(request: Request) -> JSONResponse:
+    body = await request.json()
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", ""))
+    if not username or not password:
+        return JSONResponse({"error": "username and password required"}, status_code=400)
+    user = get_user_store().verify(username, password)
+    if user is None:
+        return JSONResponse({"error": "invalid credentials"}, status_code=401)
+    token = get_session_manager().create_session(user.user_id)
+    resp = JSONResponse({"user_id": user.user_id, "username": user.username})
+    resp.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=7 * 24 * 3600,
+        path="/",
+    )
+    return resp
+
+@app.post("/api/auth/logout")
+async def api_logout(request: Request) -> JSONResponse:
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if token:
+        get_session_manager().revoke_session(token)
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    return resp
+
+@app.get("/api/auth/me")
+async def api_auth_me(request: Request) -> JSONResponse:
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
+        return JSONResponse({"authenticated": False})
+    user_id = get_session_manager().verify_token(token)
+    if not user_id:
+        return JSONResponse({"authenticated": False})
+    record = get_user_store().get_by_id(user_id)
+    return JSONResponse({
+        "authenticated": True,
+        "user_id": user_id,
+        "username": record.get("username", "") if record else "",
+    })
+
+# ============================================================
+# Auth middleware — protect all /api/* routes except /api/auth/*
+# ============================================================
+from starlette.middleware.base import BaseHTTPMiddleware
+
+_PUBLIC_API_PREFIXES = ("/api/auth/",)
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """Enforce authentication on all /api/* routes except /api/auth/*.
+
+    Sets the per-user WorkspaceContext via the context-var for protected routes.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        # Only protect /api/* routes
+        if not path.startswith("/api/"):
+            return await call_next(request)
+        # Allow auth endpoints (login, register, logout, me)
+        for prefix in _PUBLIC_API_PREFIXES:
+            if path.startswith(prefix):
+                return await call_next(request)
+
+        # Verify session
+        token = request.cookies.get(SESSION_COOKIE_NAME)
+        if not token:
+            return JSONResponse({"error": "Not authenticated"}, status_code=401)
+        user_id = get_session_manager().verify_token(token)
+        if not user_id:
+            return JSONResponse({"error": "Invalid or expired session"}, status_code=401)
+
+        # Set per-user workspace context for this request
+        from src.workspace_context import WorkspaceContext
+        ws = WorkspaceContext.for_user(user_id, PROJECT_ROOT)
+        ws_token = _set_ws(ws)
+        try:
+            response = await call_next(request)
+        finally:
+            _reset_ws(ws_token)
+        return response
+
+app.add_middleware(AuthMiddleware)
 
 # Central conflict cache — ตรวจครั้งเดียวตอน brand/agent settings เปลี่ยน
 # ทุก UI ดึงจาก GET /api/conflicts แทนการตรวจใหม่ทุกครั้ง
@@ -80,7 +218,7 @@ def _refresh_conflict_cache() -> None:
     ไม่ตรวจ Quick Brief (per-run, ไม่ได้ save)
     """
     from src.brand_priority import load_brand_priority, detect_conflicts
-    rules = load_brand_priority(BRAND_DIR)
+    rules = load_brand_priority(None)
     data = _load_instructions()
     cache: dict[str, list] = {}
     for agent_key in ("product_spec", "competitor_analysis", "campaign_strategy", "content_creator"):
@@ -108,14 +246,14 @@ def _get_brand_visual(product_id: str | None = None) -> dict:
     global _BRAND_VISUAL_CACHE
     if _BRAND_VISUAL_CACHE is None:
         try:
-            _BRAND_VISUAL_CACHE = load_brand_visual(BRAND_DIR)
+            _BRAND_VISUAL_CACHE = load_brand_visual(None)
         except Exception:
             _BRAND_VISUAL_CACHE = {}
     if not product_id:
         return _BRAND_VISUAL_CACHE
     # Product-specific override — อ่านใหม่ไม่ cache (product profile เปลี่ยนได้)
     try:
-        return load_brand_visual(BRAND_DIR, product_id=product_id)
+        return load_brand_visual(None, product_id=product_id)
     except Exception:
         return _BRAND_VISUAL_CACHE
 
@@ -354,10 +492,10 @@ def _scan_data_folders() -> list[dict[str, Any]]:
     from src.ingestion import check_and_mark_stale
 
     folders = []
-    if not DATA_DIR.exists():
+    if not DATA_DIR().exists():
         return folders
     image_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
-    for item in sorted(DATA_DIR.iterdir()):
+    for item in sorted(DATA_DIR().iterdir()):
         if not item.is_dir() or item.name.startswith("."):
             continue
         # ตรวจ raw data เปลี่ยนไหม → ถ้าเปลี่ยน ตั้ง stale
@@ -388,14 +526,14 @@ def _scan_data_folders() -> list[dict[str, Any]]:
             product_db.set_status(item.name, status)
         progress = product_db.get_progress(item.name)
         # นับ deliverables ใน cache/ (product_spec/competitor — สำหรับ user ไม่ใช่ data source)
-        cache_dir = CACHE_DIR / item.name
+        cache_dir = CACHE_DIR() / item.name
         deliverable_count = 0
         if cache_dir.exists() and cache_dir.is_dir():
             for f in cache_dir.iterdir():
                 if f.is_file() and not f.name.startswith(".") and f.name != ".DS_Store":
                     deliverable_count += 1
         # ตรวจว่ามี product_profile.json ไหม — สำหรับ sidebar indicator
-        has_product_profile = (CACHE_DIR / item.name / "product_profile.json").exists()
+        has_product_profile = (CACHE_DIR() / item.name / "product_profile.json").exists()
         folders.append({
             "name": item.name,
             "path": item.name,
@@ -470,9 +608,9 @@ def _scan_sessions() -> list[dict[str, Any]]:
     session ที่ไม่มี _flow_meta จะไม่แสดง (ย้ายไป output_archive แล้ว)
     """
     sessions = []
-    if not OUTPUT_DIR.exists():
+    if not OUTPUT_DIR().exists():
         return sessions
-    for item in sorted(OUTPUT_DIR.iterdir(), reverse=True):
+    for item in sorted(OUTPUT_DIR().iterdir(), reverse=True):
         if not item.is_dir() or item.name.startswith(".") or item.name == ".DS_Store":
             continue
 
@@ -522,6 +660,11 @@ def _scan_sessions() -> list[dict[str, Any]]:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return HTML_PAGE
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page() -> str:
+    return LOGIN_HTML
 
 
 @app.get("/wizard_ui.js", response_class=Response)
@@ -576,20 +719,13 @@ def api_media_config() -> JSONResponse:
 
 @app.post("/api/media_config")
 async def api_media_config_save(request: Request) -> JSONResponse:
-    """บันทึก media config — ใช้สำหรับ toggle auto + เปลี่ยน model."""
+    """บันทึก media config overrides ลง local workspace (never mutates product media.yaml)."""
+    from src.local_workspace import load_media_overrides, save_media_overrides
     body = await request.json()
-    import yaml as _yaml
-    cfg_path = PROJECT_ROOT / "config" / "media.yaml"
-    try:
-        with cfg_path.open(encoding="utf-8") as f:
-            cfg = _yaml.safe_load(f) or {}
-    except Exception:
-        cfg = {}
-    # อัปเดตเฉพาะ field ที่ส่งมา
+    cfg = load_media_overrides()
     for k, v in body.items():
         cfg[k] = v
-    with cfg_path.open("w", encoding="utf-8") as f:
-        _yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+    save_media_overrides(cfg)
     return JSONResponse({"ok": True})
 
 
@@ -685,7 +821,7 @@ async def api_generate_media(request: Request) -> StreamingResponse:
     body: {
       type: "image" | "video",
       prompt: "...",
-      output_dir: "session/folder",  # relative to OUTPUT_DIR
+      output_dir: "session/folder",  # relative to OUTPUT_DIR()
       filename: "image_1.png",
       usage: "feed post"  # optional
     }
@@ -707,7 +843,7 @@ async def api_generate_media(request: Request) -> StreamingResponse:
     if media_type not in ("image", "video"):
         return JSONResponse({"error": "type must be image or video"})
 
-    output_dir = OUTPUT_DIR / output_dir_str
+    output_dir = OUTPUT_DIR() / output_dir_str
     output_path = output_dir / filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -919,7 +1055,7 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
     videos = parsed.get("videos", [])
 
     output_dir = p.parent
-    session_rel = str(output_dir.relative_to(OUTPUT_DIR)) if output_dir.is_relative_to(OUTPUT_DIR) else str(output_dir)
+    session_rel = str(output_dir.relative_to(OUTPUT_DIR())) if output_dir.is_relative_to(OUTPUT_DIR()) else str(output_dir)
 
     # Resolve run-resource images: explicit request takes priority, then recover from session meta
     request_upload_session_id = body.get("upload_session_id", "")
@@ -1175,7 +1311,7 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
 @app.get("/api/media_status/{session}")
 def api_media_status(session: str) -> JSONResponse:
     """ดึงสถานะ media generation ของ session — ใช้ตอนเปิดหน้า output ใหม่."""
-    status_file = OUTPUT_DIR / session / "_media_status.json"
+    status_file = OUTPUT_DIR() / session / "_media_status.json"
     if not status_file.exists():
         return JSONResponse({"status": "none"})
     try:
@@ -1187,7 +1323,7 @@ def api_media_status(session: str) -> JSONResponse:
 @app.get("/api/media_retry_log/{session}")
 def api_media_retry_log(session: str) -> JSONResponse:
     """ดึงประวัติการ retry ของ session — ดูได้ผ่านหน้าเว็บ."""
-    session_dir = OUTPUT_DIR / session
+    session_dir = OUTPUT_DIR() / session
     if not session_dir.exists():
         return JSONResponse({"error": "session not found", "entries": []})
     entries = media_gen.load_retry_history(session_dir)
@@ -1204,7 +1340,7 @@ def api_cost_summary(session: str, file: str = "") -> JSONResponse:
 
     คืน: cost summary dict หรือ {"status": "none"} ถ้าไม่มี
     """
-    session_dir = OUTPUT_DIR / session
+    session_dir = OUTPUT_DIR() / session
     if not session_dir.exists():
         return JSONResponse({"status": "none"})
 
@@ -1234,11 +1370,11 @@ async def api_media_retry(session: str, request: Request) -> JSONResponse:
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     auto_image = body.get("auto_image", True)
     auto_video = body.get("auto_video", True)
-    status_file = OUTPUT_DIR / session / "_media_status.json"
+    status_file = OUTPUT_DIR() / session / "_media_status.json"
     if status_file.exists():
         status_file.unlink()
     # หาไฟล์ content_creator ใน session
-    session_dir = OUTPUT_DIR / session
+    session_dir = OUTPUT_DIR() / session
     if not session_dir.exists():
         return JSONResponse({"error": "session not found"})
     cc_files = [f for f in session_dir.iterdir() if f.is_file() and "content_creator" in f.name.lower() and f.suffix == ".md"]
@@ -1249,7 +1385,7 @@ async def api_media_retry(session: str, request: Request) -> JSONResponse:
         if f.is_file() and f.suffix in (".mp4", ".png", ".jpg", ".jpeg", ".webp"):
             # เก็บไฟล์ที่สร้างสำเร็จไว้ — ลบเฉพาะที่อาจจะ fail
             pass
-    return JSONResponse({"ok": True, "file": str(cc_files[0].relative_to(OUTPUT_DIR)), "auto_image": auto_image, "auto_video": auto_video})
+    return JSONResponse({"ok": True, "file": str(cc_files[0].relative_to(OUTPUT_DIR())), "auto_image": auto_image, "auto_video": auto_video})
 
 
 @app.get("/api/data_folders")
@@ -1267,7 +1403,7 @@ async def api_upload(
         return JSONResponse({"error": "กรุณาตั้งชื่อสินค้า"}, status_code=400)
 
     folder_name = product_name.strip()
-    product_dir = DATA_DIR / folder_name
+    product_dir = DATA_DIR() / folder_name
     # ตรวจว่าเป็นการอัปโหลดสินค้าใหม่ (โฟลเดอร์ยังไม่มี) — ใช้เปิด catalog segmentation
     is_new_upload = not product_dir.exists()
     product_dir.mkdir(parents=True, exist_ok=True)
@@ -1404,7 +1540,7 @@ async def api_ingest(folder: str, request: Request) -> JSONResponse:
     from src import product_db
     from src.ingestion import ingest_product
 
-    product_dir = DATA_DIR / folder
+    product_dir = DATA_DIR() / folder
     if not product_dir.exists() or not product_dir.is_dir():
         return JSONResponse({"error": "ไม่พบโฟลเดอร์"}, status_code=404)
 
@@ -1460,7 +1596,7 @@ def api_folder_files(folder: str) -> JSONResponse:
     from src import product_db
     from src.ingestion import _classify_file, _load_config
 
-    product_dir = DATA_DIR / folder
+    product_dir = DATA_DIR() / folder
     if not product_dir.exists() or not product_dir.is_dir():
         return JSONResponse({"error": "ไม่พบโฟลเดอร์"})
 
@@ -1500,7 +1636,7 @@ def api_folder_files(folder: str) -> JSONResponse:
 @app.get("/api/product_image/{folder}")
 def api_product_image(folder: str):
     """Serve the first image file found in a product folder as a thumbnail."""
-    product_dir = DATA_DIR / folder
+    product_dir = DATA_DIR() / folder
     if not product_dir.exists() or not product_dir.is_dir():
         return JSONResponse({"error": "ไม่พบโฟลเดอร์"}, status_code=404)
     image_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
@@ -1534,14 +1670,14 @@ async def api_delete_file(request: Request) -> JSONResponse:
         real_name = filepath[len("cache/"):]
         if ".." in real_name:
             return JSONResponse({"error": "เส้นทางไม่ถูกต้อง"}, status_code=400)
-        full_path = CACHE_DIR / folder / real_name
+        full_path = CACHE_DIR() / folder / real_name
         if full_path.exists() and full_path.is_file():
             full_path.unlink()
             return JSONResponse({"ok": True})
         return JSONResponse({"error": "ไม่พบไฟล์"})
     # User files in data/ — ลบไฟล์ + sync DB
-    full_path = DATA_DIR / folder / filepath
-    if ".." in filepath or not full_path.resolve().is_relative_to((DATA_DIR / folder).resolve()):
+    full_path = DATA_DIR() / folder / filepath
+    if ".." in filepath or not full_path.resolve().is_relative_to((DATA_DIR() / folder).resolve()):
         return JSONResponse({"error": "เส้นทางไม่ถูกต้อง"}, status_code=400)
     if full_path.exists() and full_path.is_file():
         full_path.unlink()
@@ -1593,21 +1729,23 @@ async def api_delete_file(request: Request) -> JSONResponse:
 
 @app.delete("/api/folder")
 async def api_delete_folder(request: Request) -> JSONResponse:
-    """Delete an entire product folder — both data/ and cache/."""
+    """Delete an entire product folder — data/, cache/, and Content History entries."""
     import shutil
     body = await request.json()
     folder = body.get("folder", "")
     if not folder:
         return JSONResponse({"error": "ไม่ระบุโฟลเดอร์"}, status_code=400)
-    folder_path = DATA_DIR / folder
+    folder_path = DATA_DIR() / folder
     if not folder_path.exists() or not folder_path.is_dir():
         return JSONResponse({"error": "ไม่พบโฟลเดอร์"})
     shutil.rmtree(folder_path)
     # Also clean up cache/
-    cache_path = CACHE_DIR / folder
+    cache_path = CACHE_DIR() / folder
     if cache_path.exists() and cache_path.is_dir():
         shutil.rmtree(cache_path)
-    return JSONResponse({"ok": True})
+    # Clean Content History entries referencing this product (lifecycle symmetry)
+    removed_history = content_history.delete_entries_for_product(PROJECT_ROOT, folder)
+    return JSONResponse({"ok": True, "removed_history_entries": removed_history})
 
 
 _MEDIA_SUFFIXES = ('.png', '.jpg', '.jpeg', '.webp', '.mp4', '.mov', '.webm')
@@ -1632,14 +1770,14 @@ async def api_delete_output_file(request: Request) -> JSONResponse:
 
     p = Path(filepath)
     if not p.exists():
-        # ลอง relative to OUTPUT_DIR
-        p = OUTPUT_DIR / filepath
+        # ลอง relative to OUTPUT_DIR()
+        p = OUTPUT_DIR() / filepath
     if not p.exists():
         return JSONResponse({"error": "ไม่พบไฟล์"}, status_code=404)
 
-    # ตรวจว่าอยู่ใน OUTPUT_DIR จริง (security — ห้ามลบนอก output/)
+    # ตรวจว่าอยู่ใน OUTPUT_DIR() จริง (security — ห้ามลบนอก output/)
     try:
-        p.resolve().relative_to(OUTPUT_DIR.resolve())
+        p.resolve().relative_to(OUTPUT_DIR().resolve())
     except ValueError:
         return JSONResponse({"error": "path ไม่ถูกต้อง"}, status_code=400)
 
@@ -1703,27 +1841,27 @@ async def api_rename_folder(request: Request) -> JSONResponse:
         return JSONResponse({"error": "ไม่ระบุชื่อโฟลเดอร์"}, status_code=400)
     if old_name == new_name:
         return JSONResponse({"ok": True, "folder": new_name, "renamed": False})
-    old_path = DATA_DIR / old_name
+    old_path = DATA_DIR() / old_name
     if not old_path.exists() or not old_path.is_dir():
         return JSONResponse({"error": "ไม่พบโฟลเดอร์เดิม"}, status_code=400)
-    new_path = DATA_DIR / new_name
+    new_path = DATA_DIR() / new_name
     if new_path.exists():
         return JSONResponse({"error": "มีสินค้าชื่อนี้แล้ว"}, status_code=400)
     old_path.rename(new_path)
     # Also rename cache/ folder if it exists
-    old_cache = CACHE_DIR / old_name
+    old_cache = CACHE_DIR() / old_name
     if old_cache.exists() and old_cache.is_dir():
-        new_cache = CACHE_DIR / new_name
+        new_cache = CACHE_DIR() / new_name
         if not new_cache.exists():
             old_cache.rename(new_cache)
     # Update product_db record: product_id + paths inside data/cache
     record = product_db.load(new_name)
     if record:
         record["product_id"] = new_name
-        old_data_prefix = str(DATA_DIR / old_name)
-        new_data_prefix = str(DATA_DIR / new_name)
-        old_cache_prefix = str(CACHE_DIR / old_name)
-        new_cache_prefix = str(CACHE_DIR / new_name)
+        old_data_prefix = str(DATA_DIR() / old_name)
+        new_data_prefix = str(DATA_DIR() / new_name)
+        old_cache_prefix = str(CACHE_DIR() / old_name)
+        new_cache_prefix = str(CACHE_DIR() / new_name)
         for f in record.get("files", []):
             if f.get("path"):
                 f["path"] = f["path"].replace(old_data_prefix, new_data_prefix).replace(old_cache_prefix, new_cache_prefix)
@@ -1736,32 +1874,41 @@ async def api_rename_folder(request: Request) -> JSONResponse:
 
 @app.get("/api/brand_files")
 def api_brand_files() -> JSONResponse:
-    """List brand files."""
+    """List brand files — local user state + product examples."""
+    from src.local_workspace import local_brand_dir, product_brand_dir
     files = []
-    if not BRAND_DIR.exists():
-        return JSONResponse(files)
-    for f in sorted(BRAND_DIR.iterdir()):
-        if f.is_file() and f.suffix.lower() in {".md", ".txt"} and not f.name.startswith("."):
-            files.append({
-                "name": f.name,
-                "title": f.stem.replace("_", " ").title(),
-                "size": f.stat().st_size,
-            })
+    seen = set()
+    for d in [local_brand_dir(), product_brand_dir()]:
+        if not d.exists():
+            continue
+        for f in sorted(d.iterdir()):
+            if f.name in seen:
+                continue
+            if f.is_file() and f.suffix.lower() in {".md", ".txt"} and not f.name.startswith("."):
+                seen.add(f.name)
+                files.append({
+                    "name": f.name,
+                    "title": f.stem.replace("_", " ").title(),
+                    "size": f.stat().st_size,
+                })
     return JSONResponse(files)
 
 
 @app.get("/api/brand_file/{filename}")
 def api_brand_file_get(filename: str) -> JSONResponse:
-    """Get brand file content."""
-    filepath = BRAND_DIR / filename
-    if not filepath.exists() or not filepath.is_file():
-        return JSONResponse({"error": "ไม่พบไฟล์"})
-    return JSONResponse({"content": filepath.read_text(encoding="utf-8")})
+    """Get brand file content — local first, then product example."""
+    from src.local_workspace import local_brand_dir, product_brand_dir
+    for d in [local_brand_dir(), product_brand_dir()]:
+        filepath = d / filename
+        if filepath.exists() and filepath.is_file():
+            return JSONResponse({"content": filepath.read_text(encoding="utf-8")})
+    return JSONResponse({"error": "ไม่พบไฟล์"})
 
 
 @app.post("/api/brand_save")
 async def api_brand_save(request: Request) -> JSONResponse:
-    """Save brand file content."""
+    """Save brand file content to local workspace (never mutates product brand/)."""
+    from src.local_workspace import local_brand_dir
     body = await request.json()
     filename = body.get("filename", "")
     content = body.get("content", "")
@@ -1769,8 +1916,9 @@ async def api_brand_save(request: Request) -> JSONResponse:
         return JSONResponse({"error": "ไม่ระบุชื่อไฟล์"}, status_code=400)
     if "/" in filename or ".." in filename:
         return JSONResponse({"error": "ชื่อไฟล์ไม่ถูกต้อง"}, status_code=400)
-    filepath = BRAND_DIR / filename
-    BRAND_DIR.mkdir(parents=True, exist_ok=True)
+    bdir = local_brand_dir()
+    bdir.mkdir(parents=True, exist_ok=True)
+    filepath = bdir / filename
     filepath.write_text(content, encoding="utf-8")
     return JSONResponse({"ok": True})
 
@@ -1781,44 +1929,55 @@ async def api_brand_save(request: Request) -> JSONResponse:
 
 @app.get("/api/brand_json")
 def api_brand_json_get() -> JSONResponse:
-    """อ่าน brand config ทั้งหมด — voice.json, terms.json, visual.json, audience.json + brand_profile.md."""
+    """อ่าน brand config ทั้งหมด — local first, then product examples."""
+    from src.local_workspace import local_brand_dir, product_brand_dir
     import json as _json
     result: dict = {}
-    # JSON files
+    # JSON files — local overrides product example
     for name in ("voice.json", "terms.json", "visual.json", "audience.json"):
-        path = BRAND_DIR / name
-        if path.exists():
-            try:
-                result[name.removesuffix(".json")] = _json.loads(path.read_text(encoding="utf-8"))
-            except (_json.JSONDecodeError, OSError):
-                result[name.removesuffix(".json")] = {}
-        else:
-            result[name.removesuffix(".json")] = {}
-    # profile.md (text)
-    profile_path = BRAND_DIR / "brand_profile.md"
-    result["profile"] = profile_path.read_text(encoding="utf-8") if profile_path.exists() else ""
+        data = None
+        for d in [local_brand_dir(), product_brand_dir()]:
+            path = d / name
+            if path.exists():
+                try:
+                    data = _json.loads(path.read_text(encoding="utf-8"))
+                except (_json.JSONDecodeError, OSError):
+                    pass
+                if data:
+                    break
+        result[name.removesuffix(".json")] = data or {}
+    # profile.md (text) — local first
+    profile = ""
+    for d in [local_brand_dir(), product_brand_dir()]:
+        profile_path = d / "brand_profile.md"
+        if profile_path.exists():
+            profile = profile_path.read_text(encoding="utf-8")
+            break
+    result["profile"] = profile
     return JSONResponse(result)
 
 
 @app.post("/api/brand_json_save")
 async def api_brand_json_save(request: Request) -> JSONResponse:
-    """บันทึก brand config — รับ dict {voice, terms, visual, audience, profile}."""
+    """บันทึก brand config ลง local workspace — รับ dict {voice, terms, visual, audience, profile}."""
+    from src.local_workspace import local_brand_dir
     import json as _json
     body = await request.json()
-    BRAND_DIR.mkdir(parents=True, exist_ok=True)
+    bdir = local_brand_dir()
+    bdir.mkdir(parents=True, exist_ok=True)
     saved: list[str] = []
     # JSON files
     for key, fname in [("voice", "voice.json"), ("terms", "terms.json"),
                        ("visual", "visual.json"), ("audience", "audience.json")]:
         data = body.get(key)
         if data is not None:
-            path = BRAND_DIR / fname
+            path = bdir / fname
             path.write_text(_json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             saved.append(fname)
     # profile.md (text)
     profile = body.get("profile")
     if profile is not None:
-        (BRAND_DIR / "brand_profile.md").write_text(profile, encoding="utf-8")
+        (bdir / "brand_profile.md").write_text(profile, encoding="utf-8")
         saved.append("brand_profile.md")
     # Clear visual cache เพื่อโหลดใหม่ในครั้งต่อไป
     global _BRAND_VISUAL_CACHE
@@ -1830,11 +1989,14 @@ async def api_brand_json_save(request: Request) -> JSONResponse:
 
 @app.post("/api/brand_migrate")
 async def api_brand_migrate(request: Request) -> JSONResponse:
-    """Migrate brand .md → .json (one-time conversion)."""
+    """Migrate brand .md → .json (one-time conversion) — operates on local workspace."""
+    from src.local_workspace import local_brand_dir
     from src.brand_migrate import migrate_brand
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     force = bool(body.get("force", False)) if body else False
-    status = migrate_brand(BRAND_DIR, force=force)
+    bdir = local_brand_dir()
+    bdir.mkdir(parents=True, exist_ok=True)
+    status = migrate_brand(bdir, force=force)
     # Clear visual cache
     global _BRAND_VISUAL_CACHE
     _BRAND_VISUAL_CACHE = None
@@ -1856,7 +2018,7 @@ async def api_product_profile_save(folder: str, request: Request) -> JSONRespons
     """บันทึก product_profile.json ลง cache/ — รับ dict จาก body."""
     import json as _json
     body = await request.json()
-    profile_dir = CACHE_DIR / folder
+    profile_dir = CACHE_DIR() / folder
     profile_dir.mkdir(parents=True, exist_ok=True)
     path = profile_dir / "product_profile.json"
     path.write_text(_json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2020,8 +2182,9 @@ async def api_assets_upload(
     เหมือน /api/upload ของ product — เซฟไฟล์ก่อน แล้ว trigger ingestion ใน background thread.
     """
     from src import asset_library
+    from src.local_workspace import local_brand_dir
 
-    assets_dir = Path(__file__).parent / "brand" / "assets"
+    assets_dir = local_brand_dir() / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
 
     saved: list[str] = []
@@ -2225,32 +2388,22 @@ async def api_video_style_upload(request: Request) -> JSONResponse:
 
 @app.get("/api/pillars")
 def api_pillars_get() -> JSONResponse:
-    """อ่าน pillars + pillar_keywords จาก config/content_policy.yaml."""
-    import yaml as _yaml
-    cfg_path = PROJECT_ROOT / "config" / "content_policy.yaml"
-    if not cfg_path.exists():
-        return JSONResponse({"pillars": [], "pillar_keywords": {}})
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            data = _yaml.safe_load(f) or {}
-        pillars = data.get("pillars", [])
-        keywords = data.get("pillar_keywords", {})
-        # รับประกันว่าทุก pillar มี entry ใน keywords
-        for p in pillars:
-            if p not in keywords:
-                keywords[p] = []
-        return JSONResponse({"pillars": pillars, "pillar_keywords": keywords})
-    except Exception as e:
-        return JSONResponse({"error": f"อ่าน config ไม่ได้: {e}"}, status_code=500)
+    """อ่าน pillars + pillar_keywords จาก local workspace."""
+    from src.local_workspace import load_content_pillars_local
+    data = load_content_pillars_local()
+    pillars = data.get("pillars", [])
+    keywords = data.get("pillar_keywords", {})
+    # รับประกันว่าทุก pillar มี entry ใน keywords
+    for p in pillars:
+        if p not in keywords:
+            keywords[p] = []
+    return JSONResponse({"pillars": pillars, "pillar_keywords": keywords})
 
 
 @app.post("/api/pillars_save")
 async def api_pillars_save(request: Request) -> JSONResponse:
-    """บันทึก pillars + pillar_keywords กลับลง content_policy.yaml.
-
-    อ่านไฟล์เดิมทั้งหมด แก้เฉพาะส่วน pillars + pillar_keywords เก็บส่วนอื่นไว้
-    """
-    import yaml as _yaml
+    """บันทึก pillars + pillar_keywords ลง local workspace (never mutates product config)."""
+    from src.local_workspace import save_content_pillars_local
     body = await request.json()
     pillars = body.get("pillars", [])
     keywords = body.get("pillar_keywords", {})
@@ -2267,21 +2420,8 @@ async def api_pillars_save(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    cfg_path = PROJECT_ROOT / "config" / "content_policy.yaml"
     try:
-        # อ่านไฟล์เดิม (ถ้ามี) เพื่อรักษาส่วนอื่นไว้
-        existing = {}
-        if cfg_path.exists():
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                existing = _yaml.safe_load(f) or {}
-
-        # แทนที่เฉพาะส่วน pillars + pillar_keywords
-        existing["pillars"] = pillars
-        existing["pillar_keywords"] = clean_keywords
-
-        # เขียนกลับ — ใช้ default_flow_style=False เพื่อให้อ่านง่าย
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            _yaml.dump(existing, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        save_content_pillars_local(pillars, clean_keywords)
         return JSONResponse({"ok": True})
     except Exception as e:
         return JSONResponse({"error": f"บันทึกไม่ได้: {e}"}, status_code=500)
@@ -2391,8 +2531,9 @@ async def api_pillars_suggest(request: Request) -> JSONResponse:
 
 @app.get("/api/agent_config/{agent_key}")
 def api_agent_config_get(agent_key: str) -> JSONResponse:
-    """Get agent config from agents.yaml."""
+    """Get agent config — product defaults merged with local user overrides."""
     import yaml as _yaml
+    from src.local_workspace import load_agent_overrides
     config_path = PROJECT_ROOT / "config" / "agents.yaml"
     if not config_path.exists():
         return JSONResponse({"error": "ไม่พบ config/agents.yaml"})
@@ -2401,6 +2542,10 @@ def api_agent_config_get(agent_key: str) -> JSONResponse:
     defaults = config.get("defaults", {})
     agent_cfg = config.get(agent_key, {})
     merged = {**defaults, **agent_cfg}
+    # Apply local user overrides
+    overrides = load_agent_overrides()
+    agent_overrides = overrides.get(agent_key, {})
+    merged = {**merged, **agent_overrides}
     return JSONResponse({
         "model": merged.get("model", ""),
         "temperature": merged.get("temperature", 0.7),
@@ -2414,38 +2559,40 @@ def api_agent_config_get(agent_key: str) -> JSONResponse:
 
 @app.post("/api/agent_config/{agent_key}")
 async def api_agent_config_save(agent_key: str, request: Request) -> JSONResponse:
-    """Save agent config to agents.yaml."""
-    import yaml as _yaml
+    """Save agent config overrides to local workspace (never mutates product agents.yaml)."""
+    from src.local_workspace import load_agent_overrides, save_agent_overrides
     body = await request.json()
-    config_path = PROJECT_ROOT / "config" / "agents.yaml"
-    if not config_path.exists():
-        return JSONResponse({"error": "ไม่พบ config/agents.yaml"}, status_code=400)
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = _yaml.safe_load(f)
-    if agent_key not in config:
-        config[agent_key] = {}
+    overrides = load_agent_overrides()
+    if agent_key not in overrides:
+        overrides[agent_key] = {}
     for field in ["model", "temperature", "max_tokens", "max_retry_limit",
                    "max_review_iterations", "review_temperature", "timeout_seconds"]:
         if field in body:
-            config[agent_key][field] = body[field]
-    with open(config_path, "w", encoding="utf-8") as f:
-        _yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+            overrides[agent_key][field] = body[field]
+    save_agent_overrides(overrides)
     return JSONResponse({"ok": True})
 
 
 def _load_instructions() -> dict:
-    """Load agent instructions JSON. Returns dict with _presets and per-agent settings."""
-    path = PROJECT_ROOT / "config" / "agent_instructions.json"
-    if not path.exists():
-        return {"_presets": {}}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """Load agent instructions — product presets merged with local user state.
+
+    Product keys (``_schema``, ``_defaults``, ``_presets``) come from
+    ``config/agent_instructions.json`` (immutable).
+    Per-agent active sections come from ``workspace/local/config/agent_instructions.json``.
+    """
+    from src.local_workspace import load_agent_instructions_merged
+    return load_agent_instructions_merged()
 
 
 def _save_instructions(data: dict) -> None:
-    path = PROJECT_ROOT / "config" / "agent_instructions.json"
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Save user's active per-agent instructions to local workspace only.
+
+    Product keys (``_schema``, ``_defaults``, ``_presets``) are stripped —
+    they live in ``config/agent_instructions.json`` and are immutable from UI.
+    """
+    from src.local_workspace import save_agent_instructions_local
+    local_only = {k: v for k, v in data.items() if not k.startswith("_")}
+    save_agent_instructions_local(local_only)
 
 
 @app.get("/api/agent_instructions/{agent_key}")
@@ -2522,7 +2669,7 @@ async def api_conflicts_check_live(request: Request) -> JSONResponse:
     from src.brand_priority import load_brand_priority, detect_conflicts
     body = await request.json()
     settings = body.get("settings", body)
-    rules = load_brand_priority(BRAND_DIR)
+    rules = load_brand_priority(None)
     conflicts = detect_conflicts(rules, settings)
     return JSONResponse({
         "conflicts": [
@@ -2547,7 +2694,7 @@ def api_sessions() -> JSONResponse:
 @app.get("/api/session_files/{session}")
 def api_session_files(session: str) -> JSONResponse:
     """List files in a single session — ใช้หาภาพประกอบที่เกี่ยวข้องกับ content_creator."""
-    session_dir = OUTPUT_DIR / session
+    session_dir = OUTPUT_DIR() / session
     if not session_dir.exists() or not session_dir.is_dir():
         return JSONResponse([])
     files = []
@@ -2567,7 +2714,7 @@ def api_content_history_for_product(folder: str, limit: int = 20) -> JSONRespons
 @app.get("/api/file/{session}/{filename:path}")
 def api_file(session: str, filename: str, download: int = 0):
     from fastapi.responses import Response
-    filepath = OUTPUT_DIR / session / filename
+    filepath = OUTPUT_DIR() / session / filename
     if not filepath.exists() or not filepath.is_file():
         return JSONResponse({"content": "ไม่พบไฟล์"})
     # Binary files (images, videos) — serve raw bytes
@@ -2645,7 +2792,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
         def worker():
             global _current_llm
             try:
-                output_dir = OUTPUT_DIR / _session_ts
+                output_dir = OUTPUT_DIR() / _session_ts
                 output_dir.mkdir(parents=True, exist_ok=True)
 
                 if _current_llm is None:
@@ -2754,8 +2901,8 @@ def _read_folder(folder: str) -> tuple[list[str], list[str], dict[str, str]]:
     Raw files come from data/{folder}/ (user-uploaded).
     Ready files come from cache/{folder}/ (system-generated, kept separate).
     """
-    product_dir = DATA_DIR / folder
-    cache_dir = CACHE_DIR / folder
+    product_dir = DATA_DIR() / folder
+    cache_dir = CACHE_DIR() / folder
     raw_contents = []
     image_paths = []
     ready_contents = {}
@@ -3398,7 +3545,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
             global _active_llms
             llm = None
             try:
-                output_dir = OUTPUT_DIR / session_ts
+                output_dir = OUTPUT_DIR() / session_ts
                 output_dir.mkdir(parents=True, exist_ok=True)
 
                 # บันทึก session metadata — สำหรับหารูปสินค้าจริงตอน generate media
@@ -3792,7 +3939,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
 
         def master_worker():
             try:
-                output_dir = OUTPUT_DIR / session_ts
+                output_dir = OUTPUT_DIR() / session_ts
                 output_dir.mkdir(parents=True, exist_ok=True)
 
                 threads = []
@@ -4043,7 +4190,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
             flow_output_files: list[str] = []  # เก็บ output file paths ของ flow นี้
             llm = None
             try:
-                output_dir = OUTPUT_DIR / session_ts
+                output_dir = OUTPUT_DIR() / session_ts
                 output_dir.mkdir(parents=True, exist_ok=True)
 
                 llm = orch.make_client()
@@ -4382,7 +4529,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
             finally:
                 # เขียน cost summary + flow meta สำหรับ auto flow นี้ (เก็บไว้หลังบ้านสำหรับ dev)
                 try:
-                    output_dir_for_cost = OUTPUT_DIR / session_ts
+                    output_dir_for_cost = OUTPUT_DIR() / session_ts
                     write_cost_summary(
                         output_dir_for_cost, flow_id,
                         label=f"AUTO — {', '.join(agents)}",
@@ -4433,6 +4580,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MKTApp</title>
+<script>
+// Auth guard — redirect to login if not authenticated
+(async function() {
+  try {
+    const res = await fetch('/api/auth/me');
+    const data = await res.json();
+    if (!data.authenticated) { window.location.href = '/login'; return; }
+    window._mktapp_user = data;
+  } catch(e) { window.location.href = '/login'; }
+})();
+async function mktappLogout() {
+  await fetch('/api/auth/logout', {method: 'POST'});
+  window.location.href = '/login';
+}
+</script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   input::placeholder, textarea::placeholder { color: #555; font-style: italic; }
@@ -5094,6 +5256,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <div class="credits-badge" id="credits-badge" style="display:none">กำลังโหลด...</div>
     <button class="home-header-btn" onclick="openScheduleList()" id="schedule-header-btn" style="position:relative;">📅 ตารางเวลา<span id="schedule-badge" style="display:none;position:absolute;top:-4px;right:-4px;background:#fbbf24;color:#0f1117;border-radius:10px;font-size:10px;padding:1px 6px;font-weight:700;">●</span></button>
     <button class="home-header-btn" onclick="openPillarsModal()">🎯 Pillars</button>
+    <button class="home-header-btn" onclick="mktappLogout()" id="logout-btn">🚪 ออก</button>
   </div>
 </div>
 <div class="container">
@@ -11032,6 +11195,82 @@ async function deleteScheduleJob(id) {
   loadScheduleJobs();
   loadScheduleRuns();
 }
+</script>
+</body>
+</html>"""
+
+
+LOGIN_HTML = r"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MKTApp — Login</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+.login-card { background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 32px; width: 100%; max-width: 360px; }
+.login-card h1 { font-size: 20px; margin-bottom: 24px; text-align: center; color: #333; }
+.login-card input { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; margin-bottom: 12px; }
+.login-card button { width: 100%; padding: 10px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; margin-bottom: 8px; }
+.btn-primary { background: #4f46e5; color: white; }
+.btn-primary:hover { background: #4338ca; }
+.btn-secondary { background: #e5e7eb; color: #374151; }
+.btn-secondary:hover { background: #d1d5db; }
+.error { color: #dc2626; font-size: 13px; margin-bottom: 8px; display: none; }
+.tabs { display: flex; margin-bottom: 20px; border-bottom: 1px solid #e5e7eb; }
+.tab { flex: 1; padding: 8px; text-align: center; cursor: pointer; color: #6b7280; font-size: 14px; }
+.tab.active { color: #4f46e5; border-bottom: 2px solid #4f46e5; }
+</style>
+</head>
+<body>
+<div class="login-card">
+<h1>MKTApp</h1>
+<div class="tabs">
+<div class="tab active" id="tab-login" onclick="switchTab('login')">เข้าสู่ระบบ</div>
+<div class="tab" id="tab-register" onclick="switchTab('register')">สมัครใหม่</div>
+</div>
+<div class="error" id="error"></div>
+<input type="text" id="username" placeholder="ชื่อผู้ใช้" onkeypress="if(event.key==='Enter')submit()">
+<input type="password" id="password" placeholder="รหัสผ่าน" onkeypress="if(event.key==='Enter')submit()">
+<button class="btn-primary" id="submit-btn" onclick="submit()">เข้าสู่ระบบ</button>
+</div>
+<script>
+let mode = 'login';
+function switchTab(m) {
+  mode = m;
+  document.getElementById('tab-login').classList.toggle('active', m === 'login');
+  document.getElementById('tab-register').classList.toggle('active', m === 'register');
+  document.getElementById('submit-btn').textContent = m === 'login' ? 'เข้าสู่ระบบ' : 'สมัครใหม่';
+  document.getElementById('error').style.display = 'none';
+}
+async function submit() {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  if (!username || !password) return;
+  const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, password})
+    });
+    if (res.ok) {
+      window.location.href = '/';
+    } else {
+      const data = await res.json();
+      const err = document.getElementById('error');
+      err.textContent = data.error || 'เกิดข้อผิดพลาด';
+      err.style.display = 'block';
+    }
+  } catch(e) {
+    const err = document.getElementById('error');
+    err.textContent = 'การเชื่อมต่อล้มเหลว';
+    err.style.display = 'block';
+  }
+}
+// Redirect to main app if already logged in
+fetch('/api/auth/me').then(r => r.json()).then(d => { if (d.authenticated) window.location.href = '/'; });
 </script>
 </body>
 </html>"""

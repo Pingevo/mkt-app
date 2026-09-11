@@ -51,8 +51,9 @@ _DEFAULTS = {
 
 
 def _history_path(project_root: Path) -> Path:
-    """Path to global content history file."""
-    return project_root / "cache" / "content_history.json"
+    """Path to content history file — per-user workspace when active."""
+    from .workspace_context import user_state_root
+    return user_state_root(project_root) / "cache" / "content_history.json"
 
 
 def load_history(project_root: Path) -> dict:
@@ -214,6 +215,25 @@ def delete_entry_by_output_file(project_root: Path, output_file: str) -> int:
     entries = history.get("entries", [])
     before = len(entries)
     kept = [e for e in entries if e.get("output_file") != output_file]
+    removed = before - len(kept)
+    if removed > 0:
+        history["entries"] = kept
+        save_history(project_root, history)
+    return removed
+
+
+def delete_entries_for_product(project_root: Path, product_id: str) -> int:
+    """ลบ history entries ทั้งหมดที่อ้างถึง product_id.
+
+    ใช้ตอน user ลบ product — ลบ history ด้วยเพื่อไม่ให้ product ที่ลบแล้ว
+    มีอิทธิพลต่อ future output (dedup, get_entries_for_product).
+
+    Returns: จำนวน entries ที่ถูกลบ
+    """
+    history = load_history(project_root)
+    entries = history.get("entries", [])
+    before = len(entries)
+    kept = [e for e in entries if product_id not in (e.get("product_ids") or [e.get("product_id", "")])]
     removed = before - len(kept)
     if removed > 0:
         history["entries"] = kept

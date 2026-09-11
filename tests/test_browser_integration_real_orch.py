@@ -152,24 +152,10 @@ def _server(tmp_path_factory):
     # Output directory
     (tmp / "output").mkdir(exist_ok=True)
 
-    # Initialize product DB with "ready" status and raw_text
+    # Save original product_db._project_root for cleanup.
+    # The actual patch is applied below after the per-user workspace is created.
     from src import product_db
     _orig_project_root = product_db._project_root
-    product_db._project_root = lambda: tmp
-    for name, text in [(ALPHA_NAME, ALPHA_TEXT), (BETA_NAME, BETA_TEXT)]:
-        product_db.set_status(name, product_db.STATUS_READY)
-        rec = product_db.load(name)
-        rec["raw_text"] = text
-        rec["text_extracts"] = [{"file": "info.txt", "text": text}]
-        # Store file info with hash so check_and_mark_stale doesn't mark it stale
-        info_path = tmp / "data" / name / "info.txt"
-        rec["files"] = [{
-            "name": "info.txt",
-            "path": str(info_path),
-            "hash": product_db._file_hash(info_path),
-            "status": "ingested",
-        }]
-        product_db.save(name, rec)
 
     # Patch filesystem paths — save originals for cleanup
     _orig_paths = {
@@ -180,10 +166,47 @@ def _server(tmp_path_factory):
         "BRAND_DIR": web_viewer.BRAND_DIR,
     }
     web_viewer.PROJECT_ROOT = tmp
-    web_viewer.OUTPUT_DIR = tmp / "output"
-    web_viewer.DATA_DIR = tmp / "data"
-    web_viewer.CACHE_DIR = tmp / "cache"
-    web_viewer.BRAND_DIR = tmp / "brand"
+    web_viewer.OUTPUT_DIR = lambda: tmp / "output"
+    web_viewer.DATA_DIR = lambda: tmp / "data"
+    web_viewer.CACHE_DIR = lambda: tmp / "cache"
+    web_viewer.BRAND_DIR = lambda: tmp / "brand"
+
+    # Register a test user for auth
+    from src.auth import UserStore, SessionManager
+    import src.auth as auth_mod
+    _users_path = tmp / "data" / "auth" / "users.json"
+    _sessions_path = tmp / "data" / "auth" / "sessions.json"
+    _users_path.parent.mkdir(parents=True, exist_ok=True)
+    _store = UserStore(_users_path)
+    _sess = SessionManager(_sessions_path)
+    auth_mod._user_store = _store
+    auth_mod._session_manager = _sess
+    _user = _store.register("testuser", "testpass")
+    # Create per-user workspace dirs
+    _ws_root = tmp / "users" / _user.user_id
+    (_ws_root / "data" / ALPHA_NAME).mkdir(parents=True)
+    (_ws_root / "data" / ALPHA_NAME / "info.txt").write_text(ALPHA_TEXT, encoding="utf-8")
+    (_ws_root / "data" / BETA_NAME).mkdir(parents=True)
+    (_ws_root / "data" / BETA_NAME / "info.txt").write_text(BETA_TEXT, encoding="utf-8")
+    (_ws_root / "cache").mkdir(parents=True)
+    (_ws_root / "brand").mkdir(parents=True)
+    (_ws_root / "output").mkdir(parents=True)
+    # Patch product_db to the per-user workspace
+    product_db._project_root = lambda: _ws_root
+    for name, text in [(ALPHA_NAME, ALPHA_TEXT), (BETA_NAME, BETA_TEXT)]:
+        product_db.set_status(name, product_db.STATUS_READY)
+        rec = product_db.load(name)
+        rec["raw_text"] = text
+        rec["text_extracts"] = [{"file": "info.txt", "text": text}]
+        info_path = _ws_root / "data" / name / "info.txt"
+        rec["files"] = [{
+            "name": "info.txt",
+            "path": str(info_path),
+            "hash": product_db._file_hash(info_path),
+            "status": "ingested",
+        }]
+        product_db.save(name, rec)
+    _test_token = _sess.create_session(_user.user_id)
 
     # Initialize module globals — save originals
     _orig_current_llm = getattr(web_viewer, "_current_llm", None)
@@ -261,6 +284,7 @@ def _server(tmp_path_factory):
         "url": f"http://127.0.0.1:{port}",
         "tmp": tmp,
         "fake_llm": fake_llm,
+        "session_token": _test_token,
     }
 
     # Cleanup
@@ -274,10 +298,10 @@ def _server(tmp_path_factory):
     CompetitorReportRenderer.validate = _orig_validate
     comp_mod.BrandInterpretationPass.interpret = _orig_interpret
     web_viewer.PROJECT_ROOT = _orig_paths["PROJECT_ROOT"]
-    web_viewer.OUTPUT_DIR = _orig_paths["OUTPUT_DIR"]
-    web_viewer.DATA_DIR = _orig_paths["DATA_DIR"]
-    web_viewer.CACHE_DIR = _orig_paths["CACHE_DIR"]
-    web_viewer.BRAND_DIR = _orig_paths["BRAND_DIR"]
+    web_viewer.OUTPUT_DIR = lambda: _orig_paths["OUTPUT_DIR"]
+    web_viewer.DATA_DIR = lambda: _orig_paths["DATA_DIR"]
+    web_viewer.CACHE_DIR = lambda: _orig_paths["CACHE_DIR"]
+    web_viewer.BRAND_DIR = lambda: _orig_paths["BRAND_DIR"]
     web_viewer._current_llm = _orig_current_llm
     web_viewer._session_ts = _orig_session_ts
     web_viewer._cancel_requested = _orig_cancel
@@ -311,7 +335,12 @@ def _browser(_server):
         page.on("pageerror", lambda err: console_errors.append(err))
 
         url = _server["url"]
-        page.goto(url, wait_until="networkidle", timeout=15000)
+        # Authenticate first — login via API to get the session cookie
+        page.goto(f"{url}/login", wait_until="networkidle", timeout=15000)
+        page.fill("#username", "testuser")
+        page.fill("#password", "testpass")
+        page.click("#submit-btn")
+        page.wait_for_url(f"{url}/", timeout=10000)
 
         # Wait for wizard JS to initialize
         page.wait_for_selector("#flow-wizard-list", timeout=10000)

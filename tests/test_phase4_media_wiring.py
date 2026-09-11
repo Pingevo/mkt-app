@@ -12,12 +12,17 @@ from starlette.testclient import TestClient
 
 
 @pytest.fixture
-def _client():
-    """import web_viewer ใหม่ทุกครั้ง — กัน state รั่วระหว่าง tests."""
-    import importlib
+def _client(tmp_path, monkeypatch):
+    """Authenticated TestClient for API tests."""
     import web_viewer
-    importlib.reload(web_viewer)
-    return TestClient(web_viewer.app)
+    from tests.conftest import make_authed_client
+    client, user_id, ws_root = make_authed_client(web_viewer.app, tmp_path, monkeypatch)
+    # Patch path functions to per-user workspace
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: ws_root / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: ws_root / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: ws_root / "cache")
+    monkeypatch.setattr(web_viewer, "BRAND_DIR", lambda: ws_root / "brand")
+    return client
 
 
 def _make_content_json(posts):
@@ -132,7 +137,7 @@ def test_run_auto_wires_product_resource_and_asset_images(_client, tmp_path, mon
     monkeypatch.setattr(product_db, "get_product_image_paths", lambda pid: [str(prod_img)])
 
     monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
 
     # fake step context with a run-resource image
     def _fake_step_context(*a, **k):
@@ -298,7 +303,7 @@ def test_generate_all_media_recovers_run_resource_images_from_meta(_client, tmp_
 def test_generate_all_media_rejects_resource_refs_without_session(_client, tmp_path, monkeypatch):
     """endpoint ต้อง reject ถ้าส่ง resource_refs มาแต่ไม่มี upload_session_id."""
     import web_viewer
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
 
     # ต้องเป็นไฟล์จริง เพราะ endpoint จะ reject หลังหาไฟล์เจอ
     content_file = tmp_path / "04_content_creator.json"
@@ -350,9 +355,9 @@ def test_run_flows_wires_product_resource_and_asset_images(_client, tmp_path, mo
     monkeypatch.setattr(product_db, "get_product_image_paths", lambda pid: [str(prod_img)])
 
     monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(web_viewer, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(web_viewer, "CACHE_DIR", tmp_path / "cache")
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: tmp_path / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: tmp_path / "cache")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
 
     # fake step context with a run-resource image
     def _fake_step_context(*a, **k):
@@ -783,7 +788,7 @@ def test_single_item_generate_preserves_sibling_artifacts(_client, tmp_path, mon
     import web_viewer
     from src import product_db
 
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path)
 
     prod_img = tmp_path / "product.png"
     prod_img.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -839,7 +844,7 @@ def test_single_item_generate_reconstructs_resource_refs_from_meta(_client, tmp_
     import web_viewer
     from src import product_db
 
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path)
 
     prod_img = tmp_path / "product.png"
     prod_img.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -960,7 +965,7 @@ def test_catalog_asset_ids_survive_session_reload(_client, tmp_path, monkeypatch
     monkeypatch.setattr(web_viewer, "_get_brand_visual", lambda *a, **k: {})
 
     # Single-item generate WITHOUT asset_ids in request body
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
     resp = _client.post("/api/generate_media", json={
         "type": "image",
         "prompt": "a product photo with logo",  # no Reference N → fallback sends all refs
@@ -1048,7 +1053,7 @@ def test_single_item_regenerate_recovers_exact_per_item_assets_not_full_catalog(
     monkeypatch.setattr(web_viewer.media_gen, "generate_image_with_retry", _fake_gen)
     monkeypatch.setattr(web_viewer.media_gen, "save_retry_history", lambda *a, **k: None)
     monkeypatch.setattr(web_viewer, "_get_brand_visual", lambda *a, **k: {})
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
 
     resp = _client.post("/api/generate_media", json={
         "type": "image",
@@ -1123,7 +1128,7 @@ def test_single_item_reconstructs_catalog_asset_ids_for_remapping(_client, tmp_p
     monkeypatch.setattr(web_viewer.media_gen, "generate_image_with_retry", _fake_gen)
     monkeypatch.setattr(web_viewer.media_gen, "save_retry_history", lambda *a, **k: None)
     monkeypatch.setattr(web_viewer, "_get_brand_visual", lambda *a, **k: {})
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
 
     # Single-item generate with per-item asset_ids = [a_003] (subset of 3)
     # Agent 4's full catalog: prod=1, a_001=2, a_002=3, a_003=4

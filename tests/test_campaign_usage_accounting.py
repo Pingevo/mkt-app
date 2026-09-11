@@ -20,7 +20,7 @@ from src.evaluation.campaign_qualification import (
 def _temp_usage_log(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Route local usage logging to a temp file and disable Hub POST."""
     log_path = tmp_path / "llm_usage.jsonl"
-    monkeypatch.setattr("src.ai_usage.USAGE_LOG_PATH", log_path)
+    monkeypatch.setattr("src.ai_usage.usage_log_path", lambda: log_path)
     monkeypatch.setattr("src.ai_usage._read_hub_credentials", lambda: (None, None))
     return log_path
 

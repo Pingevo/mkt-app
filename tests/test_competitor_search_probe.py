@@ -110,6 +110,7 @@ def _run_with_patches(monkeypatch):
     path = Path("/tmp/probe_test_llm_usage.jsonl")
     original_path = ai_usage.USAGE_LOG_PATH
     ai_usage.USAGE_LOG_PATH = path
+    monkeypatch.setattr(ai_usage, "usage_log_path", lambda: path)
     flow_context.clear_usage_context()
     monkeypatch.setattr(ai_usage, "_read_hub_credentials", lambda: ("http://localhost", "tok"))
     return path, original_path

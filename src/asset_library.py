@@ -36,11 +36,15 @@ def _project_root() -> Path:
 
 
 def _assets_dir() -> Path:
-    return _project_root() / "brand" / "assets"
+    """Asset files directory — local workspace (user state)."""
+    from .local_workspace import local_brand_dir
+    return local_brand_dir() / "assets"
 
 
 def _db_path() -> Path:
-    return _project_root() / "cache" / "assets" / "db.json"
+    """Asset DB path — local workspace (user-derived catalog)."""
+    from .local_workspace import local_root
+    return local_root() / "cache" / "assets" / "db.json"
 
 
 def _load_config() -> dict[str, Any]:

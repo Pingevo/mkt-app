@@ -114,12 +114,8 @@ def _client(tmp_path, monkeypatch):
 
     # Isolate filesystem paths
     monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
-    monkeypatch.setattr(web_viewer, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(web_viewer, "CACHE_DIR", tmp_path / "cache")
-    monkeypatch.setattr(web_viewer, "BRAND_DIR", tmp_path / "brand")
 
-    # Create two products with known facts
+    # Create two products with known facts (global tmp for setup)
     for name, text in [(ALPHA_NAME, ALPHA_TEXT), (BETA_NAME, BETA_TEXT)]:
         prod_dir = tmp_path / "data" / name
         prod_dir.mkdir(parents=True)
@@ -182,7 +178,32 @@ def _client(tmp_path, monkeypatch):
     # Set a dummy API key so make_client doesn't raise
     monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-key-for-testing")
 
-    yield TestClient(web_viewer.app)
+    # Authenticate and create per-user workspace
+    from tests.conftest import make_authed_client
+    client, user_id, ws_root = make_authed_client(web_viewer.app, tmp_path, monkeypatch)
+    # Patch path functions to per-user workspace
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: ws_root / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: ws_root / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: ws_root / "cache")
+    monkeypatch.setattr(web_viewer, "BRAND_DIR", lambda: ws_root / "brand")
+    # Move product data to per-user workspace
+    for name, text in [(ALPHA_NAME, ALPHA_TEXT), (BETA_NAME, BETA_TEXT)]:
+        prod_dir = ws_root / "data" / name
+        prod_dir.mkdir(parents=True, exist_ok=True)
+        (prod_dir / "info.txt").write_text(text, encoding="utf-8")
+        (ws_root / "cache" / name).mkdir(parents=True, exist_ok=True)
+    # Patch product_db to per-user workspace
+    product_db._project_root = lambda: ws_root
+    for name, text in [(ALPHA_NAME, ALPHA_TEXT), (BETA_NAME, BETA_TEXT)]:
+        product_db.set_status(name, product_db.STATUS_READY)
+        rec = product_db.load(name)
+        rec["raw_text"] = text
+        rec["text_extracts"] = [{"file": "info.txt", "text": text}]
+        product_db.save(name, rec)
+    (ws_root / "output").mkdir(parents=True, exist_ok=True)
+    (ws_root / "brand").mkdir(parents=True, exist_ok=True)
+
+    yield client
 
     # Restore
     product_db._project_root = _orig_project_root

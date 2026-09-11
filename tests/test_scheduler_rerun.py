@@ -123,8 +123,14 @@ def test_rerun_run_loads_flow_from_run_record(_scheduler, _store):
 
     with patch("src.scheduler.httpx.Client", return_value=cm):
         ok = _scheduler.rerun_run(run_record["job_id"], run_record["started_at"])
+        assert ok is True, "rerun_run ต้องคืน True เมื่อยิงสำเร็จ"
+        # Wait for the executor thread to complete (inside the patch context)
+        import time
+        for _ in range(50):
+            if "json" in captured_payload:
+                break
+            time.sleep(0.1)
 
-    assert ok is True, "rerun_run ต้องคืน True เมื่อยิงสำเร็จ"
     assert captured_payload["json"]["quick_brief"] == quick_brief, "rerun ต้องส่ง quick_brief เดิม"
     assert captured_payload["json"]["content_count"] == 1, "rerun ต้องส่ง flow เดิม"
 

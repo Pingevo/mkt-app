@@ -74,43 +74,42 @@ def _make_orchestrator() -> Orchestrator:
 
 
 def test_save_instructions_then_orchestrator_reads_new_value():
-    """user save ผ่าน API → orchestrator อ่านค่าใหม่ได้."""
-    original = _backup_instructions()
+    """user save ผ่าน local workspace → orchestrator อ่านค่าใหม่ได้."""
+    from src.local_workspace import save_agent_instructions_local, reset_local_workspace
+    reset_local_workspace()
     try:
-        # 1. อ่านค่าปัจจุบัน
-        data = json.loads(original)
-        old_custom = data.get("campaign_strategy", {}).get("custom", "")
+        # 1. Save via local workspace (as the API endpoint does)
+        save_agent_instructions_local({
+            "campaign_strategy": {
+                "custom": "เน้นราคาเฉพาะเจาะจง ไม่ต้องเป็น range กว้าง",
+                "rules_must": ["ราคาต้องจบด้วยเลข 9"],
+            }
+        })
 
-        # 2. เขียนค่าใหม่เหมือนที่ API ทำ
-        data["campaign_strategy"]["custom"] = "เน้นราคาเฉพาะเจาะจง ไม่ต้องเป็น range กว้าง"
-        data["campaign_strategy"]["rules_must"] = ["ราคาต้องจบด้วยเลข 9"]
-        INSTR_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        # 3. orchestrator อ่านค่าใหม่
+        # 2. orchestrator อ่านค่าใหม่
         orch = _make_orchestrator()
         instructions = orch._load_agent_instructions("campaign_strategy")
 
         assert instructions.get("custom") == "เน้นราคาเฉพาะเจาะจง ไม่ต้องเป็น range กว้าง"
         assert "ราคาต้องจบด้วยเลข 9" in instructions.get("rules_must", [])
 
-        # 4. agent ที่สร้างจาก orchestrator ได้รับค่าจริง
+        # 3. agent ที่สร้างจาก orchestrator ได้รับค่าจริง
         from src.agents.campaign_strategy import CampaignStrategyAgent
         agent = orch._make_agent("campaign_strategy", CampaignStrategyAgent, FakeLLM())
         block = agent._format_instructions()
         assert "เน้นราคาเฉพาะเจาะจง" in block
         assert "ราคาต้องจบด้วยเลข 9" in block
     finally:
-        _restore_instructions(original)
+        reset_local_workspace()
 
 
 def test_quick_brief_from_ui_reaches_agent_run():
     """user พิมพ์ quick_brief ตอนกดปุ่ม → ส่งถึง agent.run จริง."""
-    original = _backup_instructions()
+    from src.local_workspace import save_agent_instructions_local, reset_local_workspace
+    reset_local_workspace()
     try:
         # เคลียร์ custom ให้เทสสะอาด
-        data = json.loads(original)
-        data["campaign_strategy"]["custom"] = ""
-        INSTR_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_agent_instructions_local({"campaign_strategy": {"custom": ""}})
 
         orch = _make_orchestrator()
         llm = FakeLLM()
@@ -126,20 +125,23 @@ def test_quick_brief_from_ui_reaches_agent_run():
         assert "อยากได้ราคาเฉพาะเจาะจง" in user_content
         assert "เน้น TikTok" in user_content
     finally:
-        _restore_instructions(original)
+        reset_local_workspace()
 
 
 def test_preset_change_in_ui_affects_agent_output():
     """user เปลี่ยน preset ใน UI → save → agent ได้รับ preset ใหม่."""
-    original = _backup_instructions()
+    from src.local_workspace import save_agent_instructions_local, reset_local_workspace
+    reset_local_workspace()
     try:
-        data = json.loads(original)
         # เปลี่ยนเป็น sales_focus
-        data["campaign_strategy"]["preset"] = "sales_focus"
-        data["campaign_strategy"]["campaign_objective"] = "sales"
-        data["campaign_strategy"]["risk_level"] = "aggressive"
-        data["campaign_strategy"]["priority"] = ["volume", "acquisition"]
-        INSTR_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_agent_instructions_local({
+            "campaign_strategy": {
+                "preset": "sales_focus",
+                "campaign_objective": "sales",
+                "risk_level": "aggressive",
+                "priority": ["volume", "acquisition"],
+            }
+        })
 
         orch = _make_orchestrator()
         from src.agents.campaign_strategy import CampaignStrategyAgent
@@ -150,7 +152,7 @@ def test_preset_change_in_ui_affects_agent_output():
         assert "กล้า" in block  # aggressive
         assert "Sales Volume" in block
     finally:
-        _restore_instructions(original)
+        reset_local_workspace()
 
 
 def test_orchestrator_wires_product_images_to_all_agents(monkeypatch, tmp_path):

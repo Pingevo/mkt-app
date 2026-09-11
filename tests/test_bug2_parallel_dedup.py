@@ -14,11 +14,17 @@ from starlette.testclient import TestClient
 
 
 @pytest.fixture
-def _client():
-    import importlib
+def _client(tmp_path, monkeypatch):
+    """Authenticated TestClient for API tests."""
     import web_viewer
-    importlib.reload(web_viewer)
-    return TestClient(web_viewer.app)
+    from tests.conftest import make_authed_client
+    client, user_id, ws_root = make_authed_client(web_viewer.app, tmp_path, monkeypatch)
+    # Patch path functions to per-user workspace
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: ws_root / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: ws_root / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: ws_root / "cache")
+    monkeypatch.setattr(web_viewer, "BRAND_DIR", lambda: ws_root / "brand")
+    return client
 
 
 def _content_json(concept: str):
@@ -45,9 +51,9 @@ def test_parallel_flows_serialize_content_creator(_client, tmp_path, monkeypatch
     (product_dir / "info.txt").write_text("shared product", encoding="utf-8")
 
     monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(web_viewer, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(web_viewer, "CACHE_DIR", tmp_path / "cache")
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: tmp_path / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: tmp_path / "cache")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
 
     # --- track content_creator execution timing ---
     execution_log = []  # list of ("start"/"end", flow_index, timestamp)

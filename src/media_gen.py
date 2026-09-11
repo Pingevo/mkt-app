@@ -107,15 +107,23 @@ from .config_loader import get_env
 # ---------------------------------------------------------------------------
 
 def _media_cfg() -> dict:
-    """อ่าน media config จาก config/media.yaml — fallback {} ถ้าโหลดไม่ได้."""
+    """อ่าน media config — product media.yaml merged with local user overrides."""
+    # Product config (immutable)
     cfg_path = Path("config/media.yaml")
-    if not cfg_path.exists():
-        return {}
+    product_cfg: dict = {}
+    if cfg_path.exists():
+        try:
+            with cfg_path.open(encoding="utf-8") as f:
+                product_cfg = yaml.safe_load(f) or {}
+        except Exception:
+            pass
+    # Local user overrides
     try:
-        with cfg_path.open(encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+        from .local_workspace import load_media_overrides
+        local_cfg = load_media_overrides()
     except Exception:
-        return {}
+        local_cfg = {}
+    return {**product_cfg, **local_cfg}
 
 
 def _system_cfg() -> dict:

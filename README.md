@@ -14,7 +14,9 @@
 
 เอกสารรายงาน/qualification ในอดีต (เช่น `M6_*`, `PAID_*`, `OFFLINE_*`, `audit_*`, `consult_*`) เป็นหลักฐานทางประวัติศาสตร์ที่ไม่เปลี่ยน — ห้ามใช้เป็นคำสั่งงานปัจจุบัน การตั้งค่าโมเดล การอนุญาต paid call หรือสถานะความพร้อม สถานะการส่งมอบปัจจุบันอยู่ใน `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md` และเกณฑ์ความพร้อมอยู่ใน `AGENT_PRODUCTION_READINESS_SPEC.md`
 
-โมเดล production ปัจจุบันสำหรับ text/reasoning อ่านจาก `config/agents.yaml` (ขณะนี้คือ `google/gemini-3.8-flash`) — อย่าคัดลอกชื่อโมเดลลงเอกสาร ให้อ้าง config
+โมเดล production ปัจจุบันสำหรับ text/reasoning อ่านจาก `config/agents.yaml` — อย่าคัดลอกชื่อโมเดลลงเอกสาร ให้อ้าง config
+
+> **คำเตือนสำหรับ AI/engineer:** ก่อนเขียนถึง input ของ Agent ต้องตรวจ execution path ของ Web UI ปัจจุบันจากโค้ดจริง สัญญา CLI pipeline และสัญญา future orchestration ต้องไม่ถูกนำเสนอเป็นพฤติกรรมของ Web UI ปัจจุบัน — ดู `For AI / Engineer Handoff` ท้ายเอกสาร
 
 ## Product documents
 
@@ -27,12 +29,107 @@ Web UI ปัจจุบันรองรับการเลือกสิ�
 
 ## Agent ทั้ง 4 ตัว
 
-| # | Agent | หน้าที่ | รับ input | ผลลัพธ์ |
-|---|-------|--------|----------|---------|
-| 1 | นักวิเคราะห์สินค้า | สร้างสเปคสินค้าจากข้อมูลดิบ | ข้อมูลดิบ (text/file) | สเปคสินค้ามาตรฐาน |
-| 2 | นักวิเคราะห์คู่แข่ง | วิเคราะห์เปรียบเทียบคู่แข่ง | สเปคสินค้า + ข้อมูลคู่แข่ง | ตารางเปรียบเทียบ + คำแนะนำ |
-| 3 | นักวางกลยุทธ์แคมเปญ | คิดแคมเปญ + ราคาแนะนำ | สเปคสินค้า + ผลวิเคราะห์คู่แข่ง | แคมเปญ + โครงสร้างราคา |
-| 4 | นักสร้างคอนเทนต์ | สร้าง content + prompt + hashtag | สเปคสินค้า + ผลวิเคราะห์ + แคมเปญ | FB/TikTok content + gen image/video prompt |
+หน้าที่ของแต่ละ Agent อธิบายตามบทบาท ส่วน **input จริงใน Web UI ปัจจุบัน** อ้างอิงจากโค้ด production (ดู `CURRENT WEB UI BEHAVIOR` ด้านล่าง) — ไม่ใช่ pipeline 1→2→3→4
+
+### Agent 1 — นักวิเคราะห์สินค้า (Product Analyst)
+
+สร้างสเปค/รายงานสินค้าจากข้อมูลดิบที่เลือก
+
+Input ใน Web UI ปัจจุบัน:
+- ข้อมูลสินค้าจาก **Product DB** (scoped context ของสินค้าที่เลือก)
+- รูปภาพสินค้าจริง (ส่งเป็น multimodal ให้ LLM vision)
+- Quick Brief (optional)
+- Agent Settings (optional)
+- ไฟล์แนบ/resources (optional)
+- brand context (voice/terms/audience)
+
+ผลลัพธ์:
+- สเปค/รายงานสินค้า
+- บันทึกลง run/session output เท่านั้น
+- **ไม่เขียนกลับลง Product DB** — Product DB ถูก populate โดย ingestion pipeline ไม่ใช่โดย Agent 1
+
+### Agent 2 — นักวิเคราะห์คู่แข่ง (Competitor Analyst)
+
+วิเคราะห์เปรียบเทียบคู่แข่ง
+
+Input ใน Web UI ปัจจุบัน:
+- ข้อมูลสินค้าจาก **Product DB** (ไม่ใช่ output ของ Agent 1)
+- รูปภาพสินค้าจริง
+- Quick Brief (optional)
+- Agent Settings (optional)
+- ไฟล์แนบ/resources (optional)
+- brand context
+- ค้นเว็บหาคู่แข่งอัตโนมัติเมื่อ config เปิดและไม่มีข้อมูลคู่แข่งที่ผู้ใช้ระบุ
+
+ผลลัพธ์:
+- รายงานวิเคราะห์คู่แข่ง (ตารางเปรียบเทียบ + คำแนะนำ)
+- บันทึกลง run/session output
+
+**ไม่ต้องรัน Agent 1 ก่อน** ใน Web UI ปัจจุบัน
+
+### Agent 3 — นักวางกลยุทธ์แคมเปญ (Campaign Strategist)
+
+คิดแคมเปญ + ราคาแนะนำ
+
+Input ใน Web UI ปัจจุบัน:
+- ข้อมูลสินค้าจาก **Product DB** (ไม่ใช่ output ของ Agent 1)
+- Quick Brief (optional)
+- Agent Settings (optional)
+- ไฟล์แนบ/resources (optional)
+- brand context
+- web research เมื่อ config/Quick Brief กำหนด
+
+ใน Flow ที่มี Agent 3 เดี่ยว (กรณีเดียวที่ Web UI อนุญาตวันนี้) output ของ Agent 2 ไม่ถูกส่งเข้า เพราะ Web UI lock 1 Agent ต่อ Flow
+
+ผลลัพธ์:
+- แคมเปญ + โครงสร้างราคา
+- บันทึกลง run/session output
+
+**ไม่ต้องรัน Agent 1 หรือ Agent 2 ก่อน** ใน Web UI ปัจจุบัน
+
+### Agent 4 — นักสร้างคอนเทนต์ (Content Creator)
+
+สร้าง content + prompt รูป/วิดีโอ + hashtag
+
+Input ใน Web UI ปัจจุบัน:
+- ข้อมูลสินค้าจาก **Product DB** (ไม่ใช่ output ของ Agent 1)
+- รูปสินค้า/วัตถุดิบอ้างอิง (reference assets)
+- Quick Brief (optional)
+- Agent Settings (optional)
+- ไฟล์แนบ/resources (optional)
+- brand/visual context
+- Content History (เพื่อห้ามซ้ำมุมมองเดิม)
+- ตัวเลือก UI: platform (Facebook/TikTok), จำนวนโพสต์, media type, สร้างรูป/วิดีโอทันทีหรือถามก่อน
+- Content Pillars (optional)
+
+ใน Flow ที่มี Agent 4 เดี่ยว output ของ Agent 1/2/3 ไม่ถูกส่งเข้า เพราะ Web UI lock 1 Agent ต่อ Flow
+
+ผลลัพธ์:
+- โพสต์ FB/TikTok + image/video prompt + hashtag
+- บันทึกเป็น `.json` (structured) + `.md` (rendered) ลง run/session output
+- บันทึก concept ลง Content History
+
+### การสร้างรูป/วิดีโอ (Media generation)
+
+การสร้างรูป/วิดีโอเป็นความสามารถ downstream ของ Content Creator — ทำงานหลัง Agent 4 สร้าง prompt แล้ว โดยใช้ prompt ที่ Agent 4 เขียน + รูปอ้างอิงที่เลือก ผ่าน media generation provider ที่ตั้งใน config ไม่ใช่ขั้นตอนของ Agent 1–3
+
+## CURRENT WEB UI BEHAVIOR
+
+Web UI ปัจจุบัน lock ที่ **1 Agent ต่อ Flow** (`MAX_AGENTS_PER_FLOW = 1` ใน `src/wizard_ui.js`) ผู้ใช้เลือกสินค้า เลือก Agent หนึ่งตัว ใส่ Quick Brief/ไฟล์แนบ/ตัวเลือก แล้วรัน แต่ละ Agent อ่านข้อมูลสินค้าจาก **Product DB** โดยตรง — ไม่ได้รับ output จาก Agent อื่น เพราะแต่ละ Flow มี Agent เดียว
+
+```text
+Product ingestion (data/ → ingestion pipeline)
+      ↓
+Product DB (cache/{product_id}/product.json)
+  ├── Agent 1: Product Analyst      (อ่าน Product DB)
+  ├── Agent 2: Competitor Analyst     (อ่าน Product DB + web search)
+  ├── Agent 3: Campaign Strategist   (อ่าน Product DB)
+  └── Agent 4: Content Creator        (อ่าน Product DB + assets + history)
+```
+
+**ไม่ใช่** pipeline `Agent 1 → Agent 2 → Agent 3 → Agent 4` ใน Web UI ปัจจุบัน — ผู้ใช้เลือก Agent ใด Agent หนึ่งรันได้โดยอิสระ และทุก Agent ดึงข้อมูลสินค้าจาก Product DB ไม่ใช่จาก output ของ Agent ก่อนหน้า
+
+Product DB ถูก populate โดย ingestion pipeline (ไม่ใช่โดย Agent 1) ดังนั้น Agent 2/3/4 ทำงานได้โดยไม่ต้องรัน Agent 1 ก่อน
 
 ## การติดตั้ง
 
@@ -46,6 +143,8 @@ cp .env.example .env
 ```
 
 ## วิธีใช้งาน
+
+> **หมายเหตุ:** ส่วน CLI ด้านล่างเป็น **CLI / backward compatibility** — เป็น runtime surface แยกจาก Web UI ใน CLI pipeline ผลลัพธ์ของ Agent ก่อนหน้าถูกส่งต่อเป็น string parameter ให้ Agent ถัดไป แต่นี่ไม่ใช่พฤติกรรมของ Web UI ปัจจุบัน (ดู `CURRENT WEB UI BEHAVIOR` ด้านบน) แม้ใน CLI เมื่อระบุ `--product-id` และ Product DB พร้อม orchestrator จะดึงข้อมูลสินค้าจาก Product DB ไม่ใช่จาก parameter ที่ส่งมา
 
 ### Interactive mode (ง่ายสุด)
 
@@ -125,7 +224,7 @@ python main.py pipeline --raw-file data/raw.txt
 python main.py pipeline --raw-file data/raw.txt --product-image data/product.jpg
 ```
 
-ใช้ `--product-image` เพื่อเพิ่มรูปภาพสินค้าเพิ่มเติม (.png, .jpg, .jpeg) — ระบบจะใช้ OCR ดึงข้อความจากรูปภาพแล้วส่งให้ ProductSpecAgent วิเคราะห์ร่วมกับข้อมูลดิบ
+ใช้ `--product-image` เพื่อเพิ่มรูปภาพสินค้าเพิ่มเติม (.png, .jpg, .jpeg) — ระบบส่งรูปจริงให้ LLM vision เป็น multimodal input (ไม่ใช่ OCR) ให้ Agent วิเคราะห์ร่วมกับข้อมูลดิบ
 
 ### Auto-detect ไฟล์จากโฟลเดอร์ data/
 
@@ -142,14 +241,15 @@ python main.py pipeline
 ```
 data/
 └── product1/
-    ├── raw/                    # ข้อมูลดิบที่ยังไม่ได้ผ่านการดู (ใช้เฉพาะ ProductSpecAgent)
+    ├── raw/                    # ข้อมูลดิบที่ยังไม่ได้ผ่านการดู (ingestion จะประมวลผล)
     │   ├── product_raw.txt
     │   ├── product_image_1.jpg
     │   └── product_image_2.jpg
-    └── ready/                  # ข้อมูลที่ผ่านการดูแล้ว พร้อมใช้ทำงาน (ใช้ agents อื่นๆ)
-        ├── competitors.txt
-        └── product_spec.txt     # สเปคสินค้าจาก ProductSpecAgent
+    └── ready/                  # ข้อมูลที่ผู้ใช้เตรียมไว้ (เช่น competitors.txt)
+        └── competitors.txt
 ```
+
+> **หมายเหตุ:** ใน Web UI ปัจจุบัน Agent 2/3/4 อ่านข้อมูลสินค้าจาก **Product DB** (ผ่าน ingestion pipeline) ไม่ใช่จาก `data/{product_id}/ready/` โฟลเดอร์ `ready/` เป็นที่เก็บไฟล์ที่ผู้ใช้เตรียมไว้เท่านั้น ไม่ใช่แหล่งข้อมูล runtime ของ Agent
 
 ### โครงสร้างแบบรวม (backward compatible)
 
@@ -164,10 +264,9 @@ data/
 
 | ชื่อไฟล์ | สำหรับ | รองรับ format | โฟลเดอร์ |
 |---------|--------|---------------|---------|
-| `product_raw.*` | ข้อมูลดิบสินค้า | .txt, .md, .pdf, .jpg, .jpeg, .png | raw/ |
+| `product_raw.*` | ข้อมูลดิบสินค้า (ingestion ประมวลผล → Product DB) | .txt, .md, .pdf, .jpg, .jpeg, .png | raw/ |
 | `product_image.*` หรือ `product_image_1.*`, `product_image_2.*`, ... | รูปภาพสินค้า (รองรับหลายรูป) | .jpg, .jpeg, .png | raw/ |
-| `competitors.*` | ข้อมูลคู่แข่ง | .txt, .md, .pdf, .jpg, .jpeg, .png | ready/ |
-| `product_spec.*` | สเปคสินค้า (จาก ProductSpecAgent) | .txt, .md | ready/ |
+| `competitors.*` | ข้อมูลคู่แข่ง (optional — ถ้าไม่มี Agent 2 ค้นเว็บเอง) | .txt, .md, .pdf, .jpg, .jpeg, .png | ready/ |
 
 **ลำดับความสำคัญ:** CLI argument > Auto-detect > Error
 
@@ -179,10 +278,11 @@ python main.py pipeline --product-id product2
 ```
 
 ใช้ `--product-id` เพื่อระบุสินค้าแต่ละตัว — ระบบจะ:
-- ค้นหาไฟล์ใน `data/{product_id}/raw/` สำหรับข้อมูลดิบ (ProductSpecAgent)
-- ค้นหาไฟล์ใน `data/{product_id}/ready/` สำหรับข้อมูลที่ผ่านการดูแล้ว (agents อื่นๆ)
+- อ่านไฟล์ดิบจาก `data/{product_id}/raw/` (หรือ `data/{product_id}/` ถ้าไม่มี `raw/`) เพื่อ ingestion
+- ดึงข้อมูลสินค้า runtime จาก **Product DB** (`cache/{product_id}/product.json`) ให้ Agent 1–4
 - บันทึกผลลัพธ์ใน `output/{product_id}/`
-- **บันทึก product_spec ลง `data/{product_id}/ready/product_spec.txt` อัตโนมัติหลังจาก ProductSpecAgent ทำงานเสร็จ (อัพเดทถ้ามีไฟล์อยู่แล้ว)**
+
+> **หมายเหตุ:** ผลลัพธ์ของ Agent 1 (product_spec) ถูกบันทึกลง `output/` session folder เท่านั้น — ไม่มี code path ที่เขียนกลับลง `data/{product_id}/ready/product_spec.txt` และ Agent 2/3/4 ไม่ได้อ่านจาก path นั้น
 
 ตัวอย่างโครงสร้างสำหรับสินค้าหลายตัว:
 ```
@@ -193,8 +293,7 @@ data/
 │   │   ├── product_image_1.jpg
 │   │   └── product_image_2.jpg
 │   └── ready/
-│       ├── competitors.txt
-│       └── product_spec.txt
+│       └── competitors.txt
 └── product2/
     ├── raw/
     │   ├── product_raw.pdf
@@ -221,7 +320,7 @@ output/
 
 - **Text files** — `.txt`, `.md` (อ่านตรงๆ)
 - **PDF** — `.pdf` (ดึงข้อความออกมาด้วย PyPDF2)
-- **รูปภาพ** — `.png`, `.jpg`, `.jpeg` (OCR ดึงข้อความด้วย pytesseract)
+- **รูปภาพ** — `.png`, `.jpg`, `.jpeg` (ส่งรูปจริงให้ LLM vision เป็น multimodal input ไม่ใช่ OCR)
 
 ### ติดตั้งเพิ่มเติมสำหรับ PDF และรูปภาพ
 
@@ -229,7 +328,7 @@ output/
 pip install -r requirements.txt
 ```
 
-สำหรับรูปภาพ (OCR) ต้องติดตั้ง tesseract OCR engine บนระบบ:
+สำหรับรูปภาพ ระบบส่งรูปจริงให้ LLM vision เป็น multimodal input (ไม่ใช่ OCR) แต่ ingestion pipeline อาจใช้ tesseract OCR เป็น fallback ในการดึง text จากรูปเมื่อจำเป็น — ติดตั้ง tesseract OCR engine บนระบบ:
 - **macOS**: `brew install tesseract`
 - **Ubuntu/Debian**: `sudo apt-get install tesseract-ocr`
 - **Windows**: ดาวน์โหลดจาก https://github.com/UB-Mannheim/tesseract/wiki
@@ -326,7 +425,7 @@ MKTApp/
 │   ├── flow_runner.py          # รัน agent ตามลำดับใน flow + ส่ง context ต่อ
 │   ├── ingestion.py            # ประมวลผลไฟล์ดิบ → product DB
 │   ├── llm_client.py           # OpenRouter API client
-│   ├── media_gen.py            # สร้างรูป/วิดีโอ (Gemini image/video)
+│   ├── media_gen.py            # orchestration สำหรับสร้างรูป/วิดีโอผ่าน configured media provider
 │   ├── orchestrator.py         # ประสานงาน agent + auto mode
 │   ├── pillar_manager.py       # content pillar management
 │   ├── product_db.py           # product database (ready/stale status)
@@ -344,3 +443,14 @@ MKTApp/
 ├── data/                        # ใส่ไฟล์ข้อมูลดิบที่นี่
 └── output/                      # ผลลัพธ์ (auto-generated)
 ```
+
+## For AI / Engineer Handoff
+
+กฎสั้น ๆ สำหรับ AI หรือ engineer ที่จะแก้/เขียนต่อ — ป้องกันการเข้าใจผิดซ้ำ:
+
+1. README อธิบาย product ในระดับสูงเท่านั้น — รายละเอียด runtime ต้องตรวจจากโค้ด
+2. **CURRENT WEB UI** และ **CLI pipeline** เป็นคนละ runtime surface — อย่าสื่อสารสัญญาของอันหนึ่งเป็นอีกอัน
+3. **Product DB** (`cache/{product_id}/product.json`) คือแหล่งข้อมูลสินค้ากลางของ Agent 1–4 ใน Web UI ปัจจุบัน — ไม่ใช่ `data/{product_id}/ready/` และไม่ใช่ output ของ Agent 1
+4. อย่าสมมติว่า output ของ Agent ถูก chain ใน Web UI — ปัจจุบัน lock 1 Agent ต่อ Flow และทุก Agent อ่าน Product DB โดยตรง
+5. อย่าสมมติว่า `AGENT_ORCHESTRATION_SPEC.md` เป็นพฤติกรรมปัจจุบัน — เป็น future design ที่ยังไม่ใช่ runtime
+6. ก่อนเปลี่ยน team-flow architecture ต้องยืนยัน requirement ปัจจุบันจาก Product Owner ก่อน

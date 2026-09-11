@@ -43,11 +43,18 @@ from .llm_client import LLMClient
 
 
 def _project_root() -> Path:
+    """Resolve user-state root — per-user workspace when active, else project root."""
+    from .workspace_context import user_state_root
+    return user_state_root(Path(__file__).resolve().parent.parent)
+
+
+def _factory_root() -> Path:
+    """Actual project root — for Product Factory config (global, read-only)."""
     return Path(__file__).resolve().parent.parent
 
 
 def _load_config() -> dict[str, Any]:
-    path = _project_root() / "config" / "ingestion.yaml"
+    path = _factory_root() / "config" / "ingestion.yaml"
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -394,7 +401,6 @@ PREPROCESSORS = {
 def _generate_product_profile(product_id: str, llm=None) -> None:
     """สร้าง/บันทึก product_profile.json อัตโนมัติจากเนื้อหาที ingest ได้."""
     from .voice_learner import analyze_product_positioning
-    from .config_loader import _project_root
 
     spec_text = product_db.get_agent_context_text(product_id)
     if not spec_text or not spec_text.strip():

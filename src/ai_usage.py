@@ -38,7 +38,15 @@ _HUB_ENDPOINT = get_env("AI_USAGE_HUB_ENDPOINT", "/internal/ai-usage/logs")
 
 # Local usage log — เก็บทุก AI call ลงไฟล์เพื่อ track ค่าใช้จ่าย (ไม่ต้องมี Hub token)
 # shared constant — cost_summary.py import จากที่นี่แทนการประกาศซ้ำ
+# ponytail: module-level constant kept for backward compat (CLI/global mode);
+# per-user mode resolves via usage_log_path() which checks the workspace context.
 USAGE_LOG_PATH = Path(__file__).resolve().parent.parent / "logs" / "llm_usage.jsonl"
+
+
+def usage_log_path() -> Path:
+    """Resolve usage log path — per-user workspace when active, else global fallback."""
+    from .workspace_context import user_state_root
+    return user_state_root(Path(__file__).resolve().parent.parent) / "logs" / "llm_usage.jsonl"
 
 
 def _default_actor() -> str:
@@ -83,7 +91,8 @@ def log_local_usage(entry: dict[str, Any]) -> None:
     อ่าน flow_id จาก thread-local (flow_context) — ใส่ลง entry ถ้าไม่ว่าง
     """
     try:
-        USAGE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _path = usage_log_path()
+        _path.parent.mkdir(parents=True, exist_ok=True)
         entry = dict(entry)  # copy ไม่แก้ของเดิม
         entry["timestamp"] = datetime.now().isoformat()
         # ผูก flow_id จาก thread-local — ว่าง = ไม่อยู่ใน flow (เช่น ingestion)
@@ -94,7 +103,7 @@ def log_local_usage(entry: dict[str, Any]) -> None:
         fid = get_flow_id()
         if fid:
             entry["flow_id"] = fid
-        with open(USAGE_LOG_PATH, "a", encoding="utf-8") as f:
+        with open(_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass  # ไม่ให้ logging error ทำลาย main flow

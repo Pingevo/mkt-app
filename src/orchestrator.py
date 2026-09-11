@@ -33,7 +33,7 @@ from .data_loader import get_agent_data
 from .llm_client import LLMClient
 from .run_context import StepRunContext, build_multimodal_content
 from .flow_context import set_usage_reference, set_usage_metadata, clear_usage_context
-from .ai_usage import HubReceiptCollector, flush_usage_log, reconcile_hub_receipts, USAGE_LOG_PATH
+from .ai_usage import HubReceiptCollector, flush_usage_log, reconcile_hub_receipts, usage_log_path
 from .evaluation.campaign_qualification import (
     read_usage_log_for_reference,
     snapshot_usage_log_offset,
@@ -176,18 +176,10 @@ class Orchestrator:
         return agent
 
     def _load_agent_instructions(self, agent_name: str) -> dict:
-        """Load user-set instructions for an agent from config/agent_instructions.json."""
-        import json as _json
-        from pathlib import Path as _Path
-        path = _Path(__file__).resolve().parent.parent / "config" / "agent_instructions.json"
-        if not path.exists():
-            return {}
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = _json.load(f)
-            return data.get(agent_name, {})
-        except Exception:
-            return {}
+        """Load user-set instructions for an agent from local workspace."""
+        from .local_workspace import load_agent_instructions_local
+        data = load_agent_instructions_local()
+        return data.get(agent_name, {})
 
     # ------------------------------------------------------------------
     #  Individual agent runners
@@ -412,7 +404,7 @@ class Orchestrator:
                 "agent": "campaign_strategy",
                 "run_ref": run_ref,
             })
-            usage_log_offset = snapshot_usage_log_offset(USAGE_LOG_PATH)
+            usage_log_offset = snapshot_usage_log_offset(usage_log_path())
             result: str = ""
             with HubReceiptCollector() as hub_collector:
                 try:
@@ -430,7 +422,7 @@ class Orchestrator:
                     final_text = result or last_repaired or last_draft
 
                     # Read local usage and flush Hub receipts even on exception.
-                    run_entries = read_usage_log_for_reference(USAGE_LOG_PATH, run_ref, usage_log_offset)
+                    run_entries = read_usage_log_for_reference(usage_log_path(), run_ref, usage_log_offset)
                     run_cost_usd = round(sum(float(e.get("cost_usd", 0) or 0) for e in run_entries), 6)
                     actual_model = run_entries[-1].get("model") if run_entries else "unknown"
                     request_ids = [e.get("request_id") for e in run_entries if e.get("request_id")]

@@ -20,9 +20,9 @@ def _client(tmp_path, monkeypatch):
     importlib.reload(web_viewer)
 
     monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", tmp_path / "output")
-    monkeypatch.setattr(web_viewer, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(web_viewer, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: tmp_path / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: tmp_path / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: tmp_path / "cache")
 
     (tmp_path / "data" / "TestProduct").mkdir(parents=True)
     (tmp_path / "data" / "TestProduct" / "info.txt").write_text("info", encoding="utf-8")
@@ -46,12 +46,11 @@ def _client(tmp_path, monkeypatch):
     monkeypatch.setattr(web_viewer, "_session_ts", "", raising=False)
     monkeypatch.setattr(web_viewer, "_cancel_requested", False, raising=False)
 
-    # Redirect _resource_store to tmp_path (it was created during reload with real PROJECT_ROOT)
+    # Redirect _resource_store to per-user workspace (no explicit storage_dir
+    # so it resolves via user_state_root, same as the scheduler's store)
     from src.run_resources import RunResourceStore
-    rr_storage = tmp_path / "cache" / "run_resources"
-    rr_storage.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(web_viewer, "_resource_store", RunResourceStore(
-        tmp_path, storage_dir=rr_storage,
+        tmp_path,
         config={"enabled": True, "ttl_hours": 24, "max_files_per_flow": 5,
                 "max_file_size_mb": 15, "max_total_size_mb": 30,
                 "max_extracted_chars_total": 120000,
@@ -70,7 +69,20 @@ def _client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(web_viewer, "_get_scheduler", _safe_get)
 
-    return TestClient(web_viewer.app)
+    # Authenticate the client
+    from tests.conftest import make_authed_client
+    client, user_id, ws_root = make_authed_client(web_viewer.app, tmp_path, monkeypatch)
+    # Patch path functions to per-user workspace
+    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: ws_root / "output")
+    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: ws_root / "data")
+    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: ws_root / "cache")
+    # Create per-user dirs
+    (ws_root / "data" / "TestProduct").mkdir(parents=True, exist_ok=True)
+    (ws_root / "data" / "TestProduct" / "info.txt").write_text("info", encoding="utf-8")
+    (ws_root / "cache" / "TestProduct").mkdir(parents=True, exist_ok=True)
+    (ws_root / "output").mkdir(parents=True, exist_ok=True)
+    (ws_root / "brand").mkdir(parents=True, exist_ok=True)
+    return client
 
 
 class TestScheduleRoundTrip:

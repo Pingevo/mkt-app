@@ -116,8 +116,8 @@ def test_orchestrator_preserves_artifacts_and_receipts_on_budget_exhausted(
     preserve draft/repaired output, audit it, flush Hub receipts, and reconcile.
     """
     log_path = tmp_path / "llm_usage.jsonl"
-    monkeypatch.setattr("src.ai_usage.USAGE_LOG_PATH", log_path)
-    monkeypatch.setattr("src.orchestrator.USAGE_LOG_PATH", log_path)
+    monkeypatch.setattr("src.ai_usage.usage_log_path", lambda: log_path)
+    monkeypatch.setattr("src.orchestrator.usage_log_path", lambda: log_path)
     monkeypatch.setattr("src.ai_usage._read_hub_credentials", lambda: ("http://hub.test", "token"))
 
     class _Resp:

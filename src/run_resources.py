@@ -84,11 +84,21 @@ class RunResourceStore:
     ) -> None:
         self.project_root = Path(project_root)
         self.config = {**DEFAULT_CONFIG, **(config or {})}
-        if storage_dir:
-            self.storage_dir = Path(storage_dir)
-        else:
-            self.storage_dir = self.project_root / self.config["storage_dir"]
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self._explicit_storage_dir = Path(storage_dir) if storage_dir else None
+        self._storage_subdir = self.config["storage_dir"]
+        # Create initial directory (global fallback when no workspace active)
+        self._resolve_storage_dir().mkdir(parents=True, exist_ok=True)
+
+    def _resolve_storage_dir(self) -> Path:
+        """Resolve storage_dir — per-user workspace when active, else project_root."""
+        if self._explicit_storage_dir:
+            return self._explicit_storage_dir
+        from .workspace_context import user_state_root
+        return user_state_root(self.project_root) / self._storage_subdir
+
+    @property
+    def storage_dir(self) -> Path:
+        return self._resolve_storage_dir()
 
     def create_upload_session(self) -> str:
         return _new_id("upload_session")
