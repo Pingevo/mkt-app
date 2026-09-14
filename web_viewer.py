@@ -1687,6 +1687,108 @@ async def api_upload(
     return JSONResponse({"ok": True, "folder": folder_name, "files": saved})
 
 
+@app.post("/api/product_from_url")
+async def api_product_from_url(request: Request) -> JSONResponse:
+    """Create a product from a public product URL — same ingestion seam as /api/upload.
+
+    Fetch+normalize happens in src/url_import.py; the result becomes ordinary
+    source files (source_page.txt + page_img_*.jpg/png/webp) fed through
+    product_db.save_uploaded_files → ingest_product, so URL-imported products
+    share the exact record/status/agent-context lifecycle as uploaded ones.
+    """
+    err = _require_brand_context()
+    if err is not None:
+        return err
+    from src import product_db
+    from src.url_import import fetch_product_page, UrlImportError
+    from src.workspace_context import contain_path, with_workspace_context
+
+    body = await request.json()
+    url = (body.get("url") or "").strip()
+    product_name = (body.get("product_name") or "").strip()
+    if not url:
+        return JSONResponse({"ok": False, "error": "กรุณาวางลิงก์สินค้า"}, status_code=400)
+
+    try:
+        # Sync fetch+render must run off the event loop (sync playwright
+        # cannot run inside asyncio; also keeps slow fetches non-blocking).
+        result = await asyncio.to_thread(fetch_product_page, url)
+    except UrlImportError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    # Product name — explicit name uses the same containment check as
+    # /api/upload; derived names sanitize the page title and dedup like the
+    # staging create path ("name (N)").  An existing folder + explicit name is
+    # rejected: refresh/merge from URL is out of scope for v1.
+    if product_name:
+        try:
+            contain_path(product_name, DATA_DIR())
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "ชื่อสินค้าไม่ถูกต้อง"}, status_code=400)
+        folder_name = product_name
+        if (DATA_DIR() / folder_name).exists():
+            return JSONResponse({
+                "ok": False,
+                "error": f'มีสินค้า "{folder_name}" อยู่แล้ว — ตั้งชื่ออื่น หรืออัปโหลดไฟล์เข้าสินค้าเดิมแทน',
+            }, status_code=409)
+    else:
+        base = re.sub(
+            r"[^\u0E00-\u0E7A\w\s-]", "",
+            result.get("og_title") or result.get("page_title") or "",
+        )
+        base = " ".join(base.split()).strip() or f"สินค้า-{uuid.uuid4().hex[:8]}"
+        folder_name = base
+        i = 1
+        while (DATA_DIR() / folder_name).exists():
+            i += 1
+            folder_name = f"{base} ({i})"
+
+    # URL artifacts → ordinary uploaded-source payloads [(name, bytes)]
+    header = (
+        f"Source URL: {result['original_url']}\n"
+        f"Final URL: {result['final_url']}\n"
+        f"Fetched: {result['fetched_at']}\n\n"
+    )
+    files_to_save = [("source_page.txt", (header + result["text"]).encode("utf-8"))]
+    files_to_save += [(img["name"], img["content"]) for img in result["images"]]
+    saved = product_db.save_uploaded_files(folder_name, files_to_save)
+
+    # Provenance — additive record key, written before the ingest thread so
+    # every later load/save keeps it.
+    record = product_db.load(folder_name)
+    record["source_import"] = {
+        "original_url": result["original_url"],
+        "final_url": result["final_url"],
+        "canonical_url": result.get("canonical_url", ""),
+        "fetched_at": result["fetched_at"],
+        "fetched_via": result.get("fetched_via", "static"),
+        "page_title": result.get("page_title", ""),
+        "source_file": "source_page.txt",
+        "image_count": len(result["images"]),
+    }
+    product_db.save(folder_name, record)
+
+    if saved:
+        import threading
+        from src.ingestion import ingest_product
+
+        if product_db.get_status(folder_name) != product_db.STATUS_PROCESSING:
+            def _run():
+                try:
+                    ingest_product(folder_name, force=False, is_new_upload=True)
+                except Exception as e:
+                    product_db.set_status(folder_name, product_db.STATUS_NO_USABLE, extra={
+                        "ingest_error": str(e),
+                    })
+            threading.Thread(target=with_workspace_context(_run), daemon=True).start()
+
+    return JSONResponse({
+        "ok": True, "folder": folder_name, "files": saved,
+        "title": result.get("page_title", ""), "final_url": result["final_url"],
+        "image_count": len(result["images"]),
+    })
+
+
 # ------------------------------------------------------------------
 #  Staging API (block A) — upload → preview → commit
 # ------------------------------------------------------------------
@@ -6381,6 +6483,10 @@ function openUploadModal() {
   if (nameInput) { nameInput.value = ''; nameInput.disabled = false; nameInput.style.display = 'none'; }
   const nameLabel = document.getElementById('upload-name-label');
   if (nameLabel) { nameLabel.textContent = ''; nameLabel.style.display = 'none'; }
+  const urlBlock = document.getElementById('url-import-block');
+  if (urlBlock) urlBlock.style.display = '';
+  const urlInput = document.getElementById('import-url-input');
+  if (urlInput) urlInput.value = '';
   renderUploadQueueModal();
   _uploadModalOriginal = _getUploadModalData();
   const status = document.getElementById('upload-modal-status');
@@ -6428,6 +6534,9 @@ function openUploadModalForFolder(folder, status) {
   const nameLabel = document.getElementById('upload-name-label');
   nameLabel.textContent = 'ชื่อสินค้า';
   nameLabel.style.display = 'block';
+  // URL import creates new products only — hide it in manage mode
+  const urlBlock = document.getElementById('url-import-block');
+  if (urlBlock) urlBlock.style.display = 'none';
   renderUploadQueueModal();
   document.getElementById('upload-modal-status').textContent = '';
   // Title is fixed in manage mode — no fetch needed
@@ -6897,6 +7006,43 @@ function cancelStaging() {
   if (submitBtn) submitBtn.style.display = '';
   const status = document.getElementById('upload-modal-status');
   if (status) { status.className = 'upload-status'; status.textContent = ''; }
+}
+
+function importProductFromUrl() {
+  const status = document.getElementById('upload-modal-status');
+  const urlEl = document.getElementById('import-url-input');
+  const btn = document.getElementById('import-url-btn');
+  const url = (urlEl.value || '').trim();
+  if (!url) { status.className = 'upload-status err'; status.textContent = 'กรุณาวางลิงก์สินค้า'; return; }
+  const nameInput = document.getElementById('upload-product-name-modal');
+  const name = nameInput ? nameInput.value.trim() : '';
+  btn.disabled = true;
+  status.className = 'upload-status';
+  status.textContent = 'กำลังดึงข้อมูลจากลิงก์...';
+  fetch('/api/product_from_url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: url, product_name: name }),
+  }).then(r => r.json()).then(data => {
+    btn.disabled = false;
+    if (data.ok) {
+      status.className = 'upload-status ok';
+      status.textContent = 'สร้างสินค้า "' + data.folder + '" แล้ว — กำลังประมวลผลข้อมูลอัตโนมัติ...';
+      urlEl.value = '';
+      _editingFolder = data.folder;
+      _uploadModalOriginal = _getUploadModalData();
+      loadFolderList();
+      startSidebarPolling();  // โชว์ progress ใน sidebar ทันที
+      setTimeout(() => closeUploadModal(true), 1500);
+    } else {
+      status.className = 'upload-status err';
+      status.textContent = data.error || 'นำเข้าจากลิงก์ไม่สำเร็จ';
+    }
+  }).catch(e => {
+    btn.disabled = false;
+    status.className = 'upload-status err';
+    status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+  });
 }
 
 function uploadFiles() {
@@ -11517,6 +11663,16 @@ function loadCredits() {
     <label>เลือกไฟล์ <span id="upload-formats-tooltip" style="cursor:help;color:#7c8aff;font-size:12px" title="กำลังโหลด...">ⓘ</span></label>
     <input type="file" id="upload-files-modal" multiple onchange="addFilesToQueueModal()">
     <div id="upload-queue-modal" class="upload-queue"></div>
+    <div id="url-import-block">
+      <div style="display:flex;align-items:center;gap:10px;margin:14px 0 8px 0;color:#666;font-size:12px">
+        <div style="flex:1;height:1px;background:#2a2d3a"></div>หรือ<div style="flex:1;height:1px;background:#2a2d3a"></div>
+      </div>
+      <label>วางลิงก์สินค้า (หน้าเว็บสาธารณะ)</label>
+      <div style="display:flex;gap:8px">
+        <input type="url" id="import-url-input" placeholder="https://..." style="flex:1">
+        <button id="import-url-btn" class="settings-save" onclick="importProductFromUrl()" style="white-space:nowrap">นำเข้าจากลิงก์</button>
+      </div>
+    </div>
     <div id="staging-preview-modal" style="display:none;margin-top:12px;max-height:420px;overflow-y:auto;padding:10px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px"></div>
     <div id="supported-formats-info" style="display:none"></div>
     <div id="existing-files-modal"></div>
