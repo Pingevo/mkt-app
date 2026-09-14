@@ -12,10 +12,14 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config_loader import load_config
 from src.orchestrator import Orchestrator
+
+pytestmark = pytest.mark.usefixtures("brand_ws")
 
 
 class FakeLLM:

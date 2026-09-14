@@ -39,9 +39,13 @@ def _generate_product_profile(product_id: str, llm=None) -> None:
 
 
 def _project_root() -> Path:
-    """Resolve user-state root — per-user workspace when active, else project root."""
-    from .workspace_context import user_state_root
-    return user_state_root(Path(__file__).resolve().parent.parent)
+    """Resolve brand-scoped state root — requires an active brand context (MB-02).
+
+    Staging batches live beneath ``users/<user_id>/brands/<brand_id>/data/.staging/``.
+    Fails closed when no verified brand context is active.
+    """
+    from .workspace_context import brand_state_root
+    return brand_state_root(Path(__file__).resolve().parent.parent)
 
 
 def _staging_root() -> Path:

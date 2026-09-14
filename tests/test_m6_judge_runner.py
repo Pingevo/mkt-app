@@ -20,6 +20,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 import m6_judge_runner as judge
 
+pytestmark = pytest.mark.usefixtures("brand_ws")
+
 
 @pytest.fixture
 def tmp_run_dir(tmp_path: Any) -> Any:

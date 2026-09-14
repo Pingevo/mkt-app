@@ -12,6 +12,8 @@ import httpx
 import json
 import pytest
 
+pytestmark = pytest.mark.usefixtures("brand_ws")
+
 # qual_runner is in scripts/, not src/.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 

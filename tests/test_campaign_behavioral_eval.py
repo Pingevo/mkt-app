@@ -13,6 +13,8 @@ from src.evaluation.campaign_behavioral_eval import (
 )
 from tests.test_campaign_real_eval import FakeLLM
 
+pytestmark = pytest.mark.usefixtures("brand_ws")
+
 
 def _positive_k2_output() -> str:
     return (

@@ -28,6 +28,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+pytestmark = pytest.mark.usefixtures("brand_ws")
+
 
 # ---------------------------------------------------------------------------
 # Fixtures

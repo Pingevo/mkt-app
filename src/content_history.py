@@ -51,9 +51,13 @@ _DEFAULTS = {
 
 
 def _history_path(project_root: Path) -> Path:
-    """Path to content history file — per-user workspace when active."""
-    from .workspace_context import user_state_root
-    return user_state_root(project_root) / "cache" / "content_history.json"
+    """Path to content history file — brand-scoped (MB-02).
+
+    Content history is brand-specific: ``users/<uid>/brands/<brand_id>/cache/content_history.json``.
+    Fails closed when no verified brand context is active.
+    """
+    from .workspace_context import brand_state_root
+    return brand_state_root(project_root) / "cache" / "content_history.json"
 
 
 def load_history(project_root: Path) -> dict:

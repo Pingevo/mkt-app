@@ -46,8 +46,8 @@ def _client(tmp_path, monkeypatch):
     monkeypatch.setattr(web_viewer, "_session_ts", "", raising=False)
     monkeypatch.setattr(web_viewer, "_cancel_requested", False, raising=False)
 
-    # Redirect _resource_store to per-user workspace (no explicit storage_dir
-    # so it resolves via user_state_root, same as the scheduler's store)
+    # Redirect _resource_store to per-brand workspace (no explicit storage_dir
+    # so it resolves via brand_state_root, same as the scheduler's store)
     from src.run_resources import RunResourceStore
     monkeypatch.setattr(web_viewer, "_resource_store", RunResourceStore(
         tmp_path,
@@ -82,6 +82,22 @@ def _client(tmp_path, monkeypatch):
     (ws_root / "cache" / "TestProduct").mkdir(parents=True, exist_ok=True)
     (ws_root / "output").mkdir(parents=True, exist_ok=True)
     (ws_root / "brand").mkdir(parents=True, exist_ok=True)
+
+    # MB-02: select a brand so the brand cookie is set — scheduler operations
+    # (add_job, JsonJobStore, RunResourceStore) resolve to brand-scoped paths
+    # via the workspace context established by AuthMiddleware.
+    resp = client.post("/api/brands", json={"name": "TestBrand"})
+    assert resp.status_code == 200, f"brand create failed: {resp.status_code} {resp.text}"
+    bid = resp.json()["brand_id"]
+    resp = client.post(f"/api/brands/{bid}/select")
+    assert resp.status_code == 200, f"brand select failed: {resp.status_code} {resp.text}"
+    # Create brand-scoped state dirs (brand_state_root = ws_root / "brands" / bid)
+    brand_root = ws_root / "brands" / bid
+    (brand_root / "cache").mkdir(parents=True, exist_ok=True)
+    (brand_root / "data" / "TestProduct").mkdir(parents=True, exist_ok=True)
+    (brand_root / "data" / "TestProduct" / "info.txt").write_text("info", encoding="utf-8")
+    (brand_root / "cache" / "TestProduct").mkdir(parents=True, exist_ok=True)
+    (brand_root / "output").mkdir(parents=True, exist_ok=True)
     return client
 
 

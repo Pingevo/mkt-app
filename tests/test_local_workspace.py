@@ -44,9 +44,12 @@ from src.local_workspace import (
 
 
 def _ws_root() -> Path:
-    """Workspace-aware root for user state (matches production resolution)."""
-    from src.workspace_context import user_state_root
-    return user_state_root(PROJECT_ROOT)
+    """Workspace-aware root for user state (matches production resolution).
+
+    MB-02: brand-scoped — returns the active brand root.
+    """
+    from src.workspace_context import brand_state_root
+    return brand_state_root(PROJECT_ROOT)
 
 
 @pytest.fixture(autouse=True)
@@ -55,10 +58,17 @@ def clean_workspace(tmp_path: Path, monkeypatch):
 
     Redirect all mutable roots to a temporary directory BEFORE any reset
     call, so destructive operations never touch the real repository checkout.
+
+    MB-02: state is brand-scoped, so a verified brand context is established.
     """
     # Redirect workspace to tmp_path before any reset
     from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
-    ws = WorkspaceContext.for_user("test_user", tmp_path)
+    from src.brand_registry import BrandRegistry
+    monkeypatch.setattr("src.local_workspace._archive_root",
+                        lambda: tmp_path / ".recovery_archive")
+    reg = BrandRegistry(user_id="test_user", project_root=tmp_path)
+    brand = reg.create("TestBrand")
+    ws = WorkspaceContext.for_brand("test_user", brand["brand_id"], tmp_path)
     token = set_workspace(ws)
     # Now safe to reset — operates on tmp_path, not the real repo
     reset_local_workspace()

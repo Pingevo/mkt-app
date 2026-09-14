@@ -1953,6 +1953,8 @@ def test_rerun_content_creator_success_stores_new():
 
 import pytest as _pytest
 
+pytestmark = _pytest.mark.usefixtures("brand_ws")
+
 
 @_pytest.mark.parametrize("agent_key,run_method,run_args,stale_keys,unrelated_key", [
     ("product_spec", "run_product_spec", ("raw",), ("product_spec",), "competitor_analysis"),

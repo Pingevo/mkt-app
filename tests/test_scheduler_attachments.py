@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.brand_registry import BrandRegistry
 from src.run_resources import RunResourceStore
 from src.scheduler import JsonJobStore, Scheduler
 from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
@@ -51,16 +52,27 @@ def _resource_store(tmp_path):
 
 @pytest.fixture
 def _ws(tmp_path):
-    """Set a workspace context with a test user for the duration of the test."""
+    """Set a brand workspace context for the test user; yield the brand_id.
+
+    MB-02: scheduler state and run resources are brand-scoped, so a brand
+    context must be active for add_job / _run_job / store operations.
+    """
     users_path = tmp_path / "data" / "auth" / "users.json"
     users_path.parent.mkdir(parents=True, exist_ok=True)
     users_path.write_text(json.dumps([
         {"user_id": TEST_USER_ID, "username": TEST_USER_ID,
          "password_hash": "$2b$12$dummy", "created_at": "2026-09-11T00:00:00"},
     ]), encoding="utf-8")
-    ws = WorkspaceContext.for_user(TEST_USER_ID, tmp_path)
+    reg = BrandRegistry(user_id=TEST_USER_ID, project_root=tmp_path)
+    brands = reg.list()
+    if brands:
+        brand_id = brands[0]["brand_id"]
+    else:
+        brand = reg.create("TestBrand")
+        brand_id = brand["brand_id"]
+    ws = WorkspaceContext.for_brand(TEST_USER_ID, brand_id, tmp_path)
     token = set_workspace(ws)
-    yield ws
+    yield brand_id
     reset_workspace(token)
 
 
@@ -97,6 +109,7 @@ class TestAutoForwardsAttachments:
 
     def test_auto_payload_includes_upload_session_id_and_resource_refs(self, tmp_path, _store, _ws):
         """_execute_flow auto branch must forward upload_session_id + resource_refs."""
+        brand_id = _ws
         sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
 
         flow = {
@@ -130,7 +143,7 @@ class TestAutoForwardsAttachments:
         cm.__exit__ = MagicMock(return_value=False)
 
         with patch("src.scheduler.httpx.Client", return_value=cm):
-            sched._execute_flow(flow, "test brief", "job_1")
+            sched._execute_flow(flow, "test brief", "job_1", brand_id=brand_id)
 
         assert "/api/run_auto" in captured["url"], "auto flow must call /api/run_auto"
         assert captured["json"].get("upload_session_id") == "upload_session_abc123", \
@@ -254,6 +267,7 @@ class TestDurableAttachmentCloning:
         The existing rerun feature reads that flow and calls _execute_flow again.
         Deleting the durable session immediately after fire would break rerun.
         """
+        brand_id = _ws
         rec = _resource_store.upload(
             filename="brief.txt", content=b"fire test", media_type="text/plain",
         )
@@ -281,7 +295,7 @@ class TestDurableAttachmentCloning:
 
         # Mock execution and fire the job
         with patch("src.scheduler.httpx.Client", return_value=_fake_httpx_stream(_sse_lines_ok())):
-            sched._run_job(TEST_USER_ID, job_id, trigger="auto")
+            sched._run_job(TEST_USER_ID, brand_id, job_id, trigger="auto")
 
         # One-time job must be removed from job list
         jobs = _store.load_jobs()
@@ -303,6 +317,7 @@ class TestDurableAttachmentCloning:
         self, tmp_path, _resource_store, _ws,
     ):
         """When run history is evicted by retention, orphaned durable sessions are cleaned up."""
+        brand_id = _ws
         from src.scheduler import JsonJobStore
 
         # Use a store with max_runs=1 so the second append evicts the first run
@@ -337,7 +352,7 @@ class TestDurableAttachmentCloning:
 
         # Fire the job — creates run record #1
         with patch("src.scheduler.httpx.Client", return_value=_fake_httpx_stream(_sse_lines_ok())):
-            sched._run_job(TEST_USER_ID, job_id, trigger="auto")
+            sched._run_job(TEST_USER_ID, brand_id, job_id, trigger="auto")
 
         # Durable session still exists (run history references it)
         assert durable_dir.exists(), \
@@ -412,6 +427,7 @@ class TestRerunLifecycle:
         self, tmp_path, _store, _resource_store, _ws,
     ):
         """Fire one-time job → rerun from history → same attachment forwarded."""
+        brand_id = _ws
         rec = _resource_store.upload(
             filename="brief.txt", content=b"rerun test", media_type="text/plain",
         )
@@ -461,7 +477,7 @@ class TestRerunLifecycle:
 
         with patch("src.scheduler.httpx.Client",
                    return_value=_capture_stream_factory(fire_payloads)):
-            sched._run_job(TEST_USER_ID, job_id, trigger="auto")
+            sched._run_job(TEST_USER_ID, brand_id, job_id, trigger="auto")
 
         # 2. Active one-time job is removed
         assert all(j["id"] != job_id for j in _store.load_jobs()), \
@@ -527,6 +543,7 @@ class TestRecurringDeleteRerunLifecycle:
         self, tmp_path, _store, _resource_store, _ws,
     ):
         """Delete recurring job after fire → history rerun still works."""
+        brand_id = _ws
         rec = _resource_store.upload(
             filename="brief.txt", content=b"recurring rerun test", media_type="text/plain",
         )
@@ -578,7 +595,7 @@ class TestRecurringDeleteRerunLifecycle:
 
         with patch("src.scheduler.httpx.Client",
                    return_value=_capture_stream_factory(fire_payloads)):
-            sched._run_job(TEST_USER_ID, job_id, trigger="auto")
+            sched._run_job(TEST_USER_ID, brand_id, job_id, trigger="auto")
 
         # 2. Run history retains the durable session refs
         runs = _store.load_runs(job_id=job_id, limit=10)
@@ -661,6 +678,7 @@ class TestRecurringDeleteRerunLifecycle:
         self, tmp_path, _resource_store, _ws,
     ):
         """After run history is evicted by retention, orphan cleanup deletes the session."""
+        brand_id = _ws
         from src.scheduler import JsonJobStore
 
         # max_runs=1 so the second append evicts the first run
@@ -695,7 +713,7 @@ class TestRecurringDeleteRerunLifecycle:
 
         # Fire the job → run history references the durable session
         with patch("src.scheduler.httpx.Client", return_value=_fake_httpx_stream(_sse_lines_ok())):
-            sched._run_job(TEST_USER_ID, job_id, trigger="auto")
+            sched._run_job(TEST_USER_ID, brand_id, job_id, trigger="auto")
         assert durable_dir.exists(), "durable session must exist while history references it"
 
         # Delete the active job → durable session still retained (history references it)

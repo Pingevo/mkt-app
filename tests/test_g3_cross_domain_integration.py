@@ -40,6 +40,8 @@ from src.orchestrator import Orchestrator
 from src.run_context import build_step_run_context
 from src.run_resources import RunResourceStore
 
+pytestmark = pytest.mark.usefixtures("brand_ws")
+
 
 # ---------------------------------------------------------------------------
 # Fixtures: real production construction with tmp_path isolation

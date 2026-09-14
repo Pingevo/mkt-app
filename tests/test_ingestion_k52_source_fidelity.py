@@ -16,6 +16,8 @@ import pytest
 import src.ingestion as ingestion
 import src.product_db as product_db
 
+pytestmark = pytest.mark.usefixtures("brand_ws")
+
 K52_PRODUCT_ID = "CACGO K52"
 K52_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / K52_PRODUCT_ID
 

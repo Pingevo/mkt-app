@@ -63,6 +63,14 @@ LAGENIO_K2_XLSX = PROJECT_ROOT / "data" / "Lagenio K2" / "Lagenio K2 -spec 20241
 LAGENIO_K5_XLSX = PROJECT_ROOT / "data" / "Lagenio K5" / "Lagenio K5 20241024.xlsx"
 CACGO_PDF = PROJECT_ROOT / "data" / "CACGO K73" / "CACGO Smart Watch Price List- Grace.pdf"
 
+# Skip entire module if real source fixtures are absent — these are external
+# non-repository data files that must not be fabricated or downloaded.
+_MISSING = [str(p) for p in (LAGENIO_K2_XLSX, LAGENIO_K5_XLSX, CACGO_PDF) if not p.exists()]
+if _MISSING:
+    pytestmark = pytest.mark.skip(
+        reason=f"External source fixtures missing: {_MISSING}"
+    )
+
 # ---------------------------------------------------------------------------
 # Source truth — manually verified from ORIGINAL files
 # ---------------------------------------------------------------------------
@@ -520,7 +528,12 @@ def _server(tmp_path_factory):
 
 @pytest.fixture
 def _browser(_server):
-    """Launch a browser, navigate to the app, yield the page."""
+    """Launch a browser, authenticate via API cookie, create+select brand, yield page.
+
+    MB-02: authenticates via session cookie (System81 login page has no
+    username/password form).  Creates and selects a brand so brand-scoped
+    endpoints (upload, run_agent, etc.) resolve to brand-scoped paths.
+    """
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1280, "height": 900})
@@ -531,12 +544,55 @@ def _browser(_server):
         page.on("pageerror", lambda err: console_errors.append(err))
 
         url = _server["url"]
-        # Authenticate first — login via API to get the session cookie
-        page.goto(f"{url}/login", wait_until="networkidle", timeout=15000)
-        page.fill("#username", "testuser")
-        page.fill("#password", "testpass")
-        page.click("#submit-btn")
-        page.wait_for_url(f"{url}/", timeout=10000)
+        # Authenticate via API — set session cookie directly
+        context.add_cookies([{
+            "name": "mktapp_session",
+            "value": _server["session_token"],
+            "url": url,
+        }])
+
+        # Create and select a brand via API
+        import urllib.request, json as _json
+        req = urllib.request.Request(
+            f"{url}/api/brands",
+            data=_json.dumps({"name": "UploadTestBrand"}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Cookie": f"mktapp_session={_server['session_token']}"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=5)
+        bid = _json.loads(resp.read())["brand_id"]
+        req = urllib.request.Request(
+            f"{url}/api/brands/{bid}/select",
+            data=b"",
+            headers={"Cookie": f"mktapp_session={_server['session_token']}"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+        context.add_cookies([{
+            "name": "mktapp_brand",
+            "value": bid,
+            "url": url,
+        }])
+
+        # Create brand-scoped dirs (no _project_root patches — auth middleware handles context)
+        tmp = _server["tmp"]
+        users_dir = tmp / "users"
+        uid = next(d.name for d in users_dir.iterdir() if d.is_dir())
+        brand_root = users_dir / uid / "brands" / bid
+        (brand_root / "data").mkdir(parents=True, exist_ok=True)
+        (brand_root / "cache").mkdir(parents=True, exist_ok=True)
+        (brand_root / "brand").mkdir(parents=True, exist_ok=True)
+        (brand_root / "output").mkdir(parents=True, exist_ok=True)
+
+        # Copy brand files from tmp/brand to brand-scoped brand dir
+        import shutil as _shutil
+        tmp_brand = tmp / "brand"
+        if tmp_brand.exists():
+            _shutil.copytree(tmp_brand, brand_root / "brand", dirs_exist_ok=True)
+
+        # Navigate to the app
+        page.goto(f"{url}/", wait_until="networkidle", timeout=15000)
         page.wait_for_selector("#flow-wizard-list", timeout=10000)
 
         yield {
@@ -549,6 +605,7 @@ def _browser(_server):
             "brand_marker": _server["brand_marker"],
             "brand_audience_marker": _server["brand_audience_marker"],
             "media_call_log": _server["media_call_log"],
+            "brand_id": bid,
         }
 
         context.close()

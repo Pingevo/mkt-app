@@ -4,6 +4,9 @@ APScheduler ไม่ยอมรับ misfire_grace_time=0 (ต้องเป
 เมื่อ config ตั้งเป็น 0, self._aps.add_job() โยน exception ทุกครั้ง
 exception ถูก catch กลืน ทำให้ job อยู่ในไฟล์ JSON แต่ไม่อยู่ใน APScheduler
 ผล: scheduled job ไม่ยิงเลย แม้เซิร์ฟเวอร์จะรันอยู่
+
+MB-02: scheduler state is brand-scoped.  Tests establish a brand workspace
+context before scheduler operations.
 """
 import json
 from datetime import datetime, timedelta
@@ -14,6 +17,7 @@ import pytest
 
 from src.scheduler import JsonJobStore, Scheduler
 from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
+from src.brand_registry import BrandRegistry
 
 
 TEST_USER_ID = "user_misfire"
@@ -29,9 +33,18 @@ def _register_user(tmp_path, user_id):
     ]), encoding="utf-8")
 
 
-def _save_job_in_user_ws(store, project_root, user_id, job):
-    """Save a job directly into user_id's workspace store."""
-    ws = WorkspaceContext.for_user(user_id, project_root)
+def _make_brand(project_root, user_id, brand_name="TestBrand"):
+    """Create or reuse a brand for user_id.  Returns brand_id."""
+    reg = BrandRegistry(user_id=user_id, project_root=project_root)
+    brands = reg.list()
+    if brands:
+        return brands[0]["brand_id"]
+    return reg.create(brand_name)["brand_id"]
+
+
+def _save_job_in_brand_ws(store, project_root, user_id, brand_id, job):
+    """Save a job directly into user_id+brand_id's workspace store."""
+    ws = WorkspaceContext.for_brand(user_id, brand_id, project_root)
     token = set_workspace(ws)
     try:
         jobs = store.load_jobs()
@@ -62,16 +75,17 @@ def _store(tmp_path):
 
 
 @pytest.fixture
-def _ws(tmp_path):
-    """Set a workspace context with a test user for the duration of the test."""
+def _brand(tmp_path):
+    """Register user + create brand + set a brand workspace context for the test."""
     _register_user(tmp_path, TEST_USER_ID)
-    ws = WorkspaceContext.for_user(TEST_USER_ID, tmp_path)
+    brand_id = _make_brand(tmp_path, TEST_USER_ID)
+    ws = WorkspaceContext.for_brand(TEST_USER_ID, brand_id, tmp_path)
     token = set_workspace(ws)
-    yield ws
+    yield brand_id
     reset_workspace(token)
 
 
-def test_add_job_succeeds_with_misfire_grace_zero(tmp_path, _store, _ws):
+def test_add_job_succeeds_with_misfire_grace_zero(tmp_path, _store, _brand):
     """misfire_grace_time=0 ใน config ต้องไม่ทำให้ add_job ล้ม.
 
     APScheduler ไม่ยอมรับ 0 — ระบบต้องแปลงเป็นค่าที่ valid (1) อัตโนมัติ
@@ -92,7 +106,7 @@ def test_add_job_succeeds_with_misfire_grace_zero(tmp_path, _store, _ws):
     })
 
     # job ต้องอยู่ใน APScheduler's in-memory jobstore
-    assert sched.job_exists(job_id, user_id=TEST_USER_ID), (
+    assert sched.job_exists(job_id, user_id=TEST_USER_ID, brand_id=_brand), (
         "job ไม่อยู่ใน APScheduler — add_job ล้มเหลวเงียบ "
         "(ตรวจสอบ misfire_grace_time ใน config)"
     )
@@ -101,7 +115,7 @@ def test_add_job_succeeds_with_misfire_grace_zero(tmp_path, _store, _ws):
     sched.stop()
 
 
-def test_start_loads_existing_jobs_with_misfire_grace_zero(tmp_path, _store, _ws):
+def test_start_loads_existing_jobs_with_misfire_grace_zero(tmp_path, _store, _brand):
     """start() ต้องโหลด job ที่มีอยู่เข้า APScheduler ได้ แม้ misfire_grace_time=0."""
     _write_config(tmp_path, 0)
 
@@ -115,18 +129,19 @@ def test_start_loads_existing_jobs_with_misfire_grace_zero(tmp_path, _store, _ws
         "flow": {"is_auto": False, "agents": ["content_creator"]},
         "quick_brief": "test",
         "user_id": TEST_USER_ID,
+        "brand_id": _brand,
     }
-    _save_job_in_user_ws(_store, tmp_path, TEST_USER_ID, job)
+    _save_job_in_brand_ws(_store, tmp_path, TEST_USER_ID, _brand, job)
 
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
     sched.start()
 
-    assert sched.job_exists("job_existing", user_id=TEST_USER_ID), "start() ต้องโหลด job ที่มีอยู่เข้า APScheduler ได้"
+    assert sched.job_exists("job_existing", user_id=TEST_USER_ID, brand_id=_brand), "start() ต้องโหลด job ที่มีอยู่เข้า APScheduler ได้"
 
     sched.stop()
 
 
-def test_job_actually_fires_when_time_arrives(tmp_path, _store, _ws):
+def test_job_actually_fires_when_time_arrives(tmp_path, _store, _brand):
     """job ต้องยิงจริงเมื่อถึงเวลา — ไม่ใช่แค่ลงทะเบียน.
 
     spec ผู้ใช้: "ผ่านมาแล้วแต่ยังไม่มี worker ทำงานแม้เซิร์ฟเวอร์จะเปิดอยู่"
@@ -138,8 +153,8 @@ def test_job_actually_fires_when_time_arrives(tmp_path, _store, _ws):
 
     # ตั้งเวลาในอนาคตอันใกล้ (2 วินาที) แล้ว mock _run_job เพื่อดูว่าถูกเรียกไหม
     fired = []
-    def _fake_run_job(user_id, job_id, trigger="auto"):
-        fired.append((user_id, job_id, trigger))
+    def _fake_run_job(user_id, brand_id, job_id, trigger="auto"):
+        fired.append((user_id, brand_id, job_id, trigger))
 
     future = (datetime.now().astimezone() + timedelta(seconds=2)).isoformat()
     with patch.object(sched, "_run_job", _fake_run_job):
@@ -151,7 +166,7 @@ def test_job_actually_fires_when_time_arrives(tmp_path, _store, _ws):
             "flow": {"is_auto": False, "agents": ["content_creator"]},
             "quick_brief": "test",
         })
-        assert sched.job_exists(job_id, user_id=TEST_USER_ID), "job ต้องลงทะเบียนก่อน"
+        assert sched.job_exists(job_id, user_id=TEST_USER_ID, brand_id=_brand), "job ต้องลงทะเบียนก่อน"
 
         # รอให้ถึงเวลา + buffer สำหรับ APScheduler thread
         import time
@@ -161,6 +176,6 @@ def test_job_actually_fires_when_time_arrives(tmp_path, _store, _ws):
         "job ไม่ยิงเมื่อถึงเวลา — นี่คืออาการที่ผู้ใช้รายงาน "
         "(worker ไม่ทำงาน ทั้งที่เซิร์ฟเวอร์เปิดอยู่)"
     )
-    assert fired[0][1] == job_id, "ต้องยิง job ที่ถูกตั้งไว้"
+    assert fired[0][2] == job_id, "ต้องยิง job ที่ถูกตั้งไว้"
 
     sched.stop()

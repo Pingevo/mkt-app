@@ -48,16 +48,22 @@ def _find_free_port() -> int:
 
 
 def _api_get(url: str, server: dict, **kw) -> "urllib.request.urlopen":
-    """GET with the test session cookie."""
-    req = urllib.request.Request(url, headers={"Cookie": f"mktapp_session={server['session_token']}"})
+    """GET with the test session cookie (and brand cookie if available)."""
+    cookie = f"mktapp_session={server['session_token']}"
+    if server.get("brand_id"):
+        cookie += f"; mktapp_brand={server['brand_id']}"
+    req = urllib.request.Request(url, headers={"Cookie": cookie})
     return urllib.request.urlopen(req, **kw)
 
 
 def _api_post(url: str, server: dict, data: bytes = None, **kw) -> "urllib.request.urlopen":
-    """POST with the test session cookie."""
+    """POST with the test session cookie (and brand cookie if available)."""
+    cookie = f"mktapp_session={server['session_token']}"
+    if server.get("brand_id"):
+        cookie += f"; mktapp_brand={server['brand_id']}"
     req = urllib.request.Request(
         url, data=data,
-        headers={"Content-Type": "application/json", "Cookie": f"mktapp_session={server['session_token']}"},
+        headers={"Content-Type": "application/json", "Cookie": cookie},
         method="POST",
     )
     return urllib.request.urlopen(req, **kw)
@@ -80,11 +86,6 @@ def _server(tmp_path_factory):
     (tmp / "cache" / "TestProduct").mkdir(parents=True)
     (tmp / "brand").mkdir(exist_ok=True)
     (tmp / "output").mkdir(exist_ok=True)
-
-    # Save original product_db._project_root for cleanup later.
-    # The actual patch is applied below after the per-user workspace is created.
-    from src import product_db
-    _orig_project_root = product_db._project_root
 
     # Save original web_viewer globals to prevent cross-module leakage
     _orig_wv = {
@@ -155,11 +156,8 @@ def _server(tmp_path_factory):
     _ws = WorkspaceContext.for_user(_user.user_id, tmp)
     _ws_token = _set_ws(_ws)
 
-    # Also patch product_db._project_root to the per-user workspace for setup calls
-    from src import product_db
-    _orig_project_root = product_db._project_root
-    product_db._project_root = lambda: tmp / "users" / _user.user_id
-    product_db.set_status("TestProduct", product_db.STATUS_READY)
+    # Product data (info.txt, cache dir) created above at user level.
+    # product_db.set_status is called in _brand_browser with brand context.
 
     # Mock folder reading
     web_viewer._read_folder = lambda f: (["Test product info text"], [], {})
@@ -180,7 +178,8 @@ def _server(tmp_path_factory):
         def _save_result(agent_key, output_dir=None):
             from pathlib import Path as P
             if output_dir is None:
-                output_dir = P("output") / "latest"
+                # MB-02: use brand-scoped OUTPUT_DIR() so sessions endpoint finds results
+                output_dir = web_viewer.OUTPUT_DIR()
             output_dir = P(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
             fname_map = {
@@ -359,9 +358,6 @@ def _server(tmp_path_factory):
         server.should_exit = True
         thread.join(timeout=5)
 
-        # Restore original product_db._project_root to prevent leak
-        product_db._project_root = _orig_project_root
-
         # Restore original web_viewer globals to prevent cross-module leakage
         for _name, _val in _orig_wv.items():
             setattr(web_viewer, _name, _val)
@@ -383,7 +379,12 @@ def _server(tmp_path_factory):
 
 @pytest.fixture
 def _browser(_server):
-    """Launch a browser, navigate to the app, yield the page."""
+    """Launch a browser, authenticate via API cookie, navigate to the app.
+
+    MB-02: authenticates via API (System81 login page has no username/password
+    form).  Does NOT select a brand — boot tests verify the app shell renders
+    without brand context.
+    """
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1280, "height": 900})
@@ -398,25 +399,151 @@ def _browser(_server):
         failed_requests = []
         page.on("requestfailed", lambda req: failed_requests.append(req))
 
+        # Collect HTTP responses (URL + status) for precise 403 assertions
+        http_responses: list[dict] = []
+        def _record_response(resp):
+            try:
+                http_responses.append({"url": resp.url, "status": resp.status})
+            except Exception:
+                pass
+        page.on("response", _record_response)
+
         url = _server["url"]
-        # Authenticate first — login via API to get the session cookie
-        page.goto(f"{url}/login", wait_until="networkidle", timeout=15000)
-        page.fill("#username", "browser_test")
-        page.fill("#password", "testpass")
-        page.click("#submit-btn")
-        page.wait_for_url(f"{url}/", timeout=10000)
+        # Authenticate via API — set session cookie directly
+        context.add_cookies([{
+            "name": "mktapp_session",
+            "value": _server["session_token"],
+            "url": url,
+        }])
+        # Navigate to the app
+        page.goto(f"{url}/", wait_until="networkidle", timeout=15000)
 
         # Wait for wizard JS to initialize
         page.wait_for_selector("#flow-wizard-list", timeout=10000)
-        # Wait for product folders to load
-        page.wait_for_function("() => document.querySelector('.product-card') !== null", timeout=10000)
 
         yield {
             "page": page,
             "url": url,
             "console_errors": console_errors,
             "failed_requests": failed_requests,
+            "http_responses": http_responses,
             "server": _server,
+        }
+
+        context.close()
+        browser.close()
+
+
+@pytest.fixture
+def _brand_browser(_server):
+    """Launch a browser, authenticate, create+select a brand, navigate to app.
+
+    MB-02: brand-scoped browser tests need an active brand for product/run
+    endpoints to work.  Creates a brand via API and selects it.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(viewport={"width": 1280, "height": 900})
+        page = context.new_page()
+
+        console_errors = []
+        page.on("console", lambda msg: console_errors.append(msg) if msg.type == "error" else None)
+        page.on("pageerror", lambda err: console_errors.append(err))
+
+        failed_requests = []
+        page.on("requestfailed", lambda req: failed_requests.append(req))
+
+        # Collect HTTP responses (URL + status) for precise 403 assertions
+        http_responses: list[dict] = []
+        def _record_response(resp):
+            try:
+                http_responses.append({"url": resp.url, "status": resp.status})
+            except Exception:
+                pass
+        page.on("response", _record_response)
+
+        url = _server["url"]
+        # Authenticate via API
+        context.add_cookies([{
+            "name": "mktapp_session",
+            "value": _server["session_token"],
+            "url": url,
+        }])
+
+        # Create and select a brand via API
+        import urllib.request
+        req = urllib.request.Request(
+            f"{url}/api/brands",
+            data=json.dumps({"name": "BrowserTestBrand"}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Cookie": f"mktapp_session={_server['session_token']}"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=5)
+        bid = json.loads(resp.read())["brand_id"]
+
+        # Select the brand — sets mktapp_brand cookie
+        req = urllib.request.Request(
+            f"{url}/api/brands/{bid}/select",
+            data=b"",
+            headers={"Cookie": f"mktapp_session={_server['session_token']}"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+        # Extract Set-Cookie header for mktapp_brand
+        brand_cookie = resp.headers.get("Set-Cookie", "")
+        # Fallback: set cookie directly from bid
+        context.add_cookies([{
+            "name": "mktapp_brand",
+            "value": bid,
+            "url": url,
+        }])
+
+        # Create brand-scoped product data
+        tmp = _server["tmp"]
+        # Find the user ID from the users directory
+        users_dir = tmp / "users"
+        uid = next(d.name for d in users_dir.iterdir() if d.is_dir())
+        brand_root = users_dir / uid / "brands" / bid
+        (brand_root / "data" / "TestProduct").mkdir(parents=True)
+        (brand_root / "data" / "TestProduct" / "info.txt").write_text(
+            "Test product: Lagenio K2 smartwatch. AMOLED display, SpO2, GPS. Price 2990 THB.",
+            encoding="utf-8",
+        )
+        (brand_root / "cache" / "TestProduct").mkdir(parents=True)
+        (brand_root / "output").mkdir(parents=True)
+        (brand_root / "brand").mkdir(parents=True)
+
+        # Set product status in brand context (WorkspaceContext handles path resolution)
+        from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
+        ws = WorkspaceContext.for_brand(uid, bid, tmp)
+        ws_token = set_workspace(ws)
+        try:
+            from src import product_db
+            product_db.set_status("TestProduct", product_db.STATUS_READY)
+        finally:
+            reset_workspace(ws_token)
+
+        # Navigate to the app
+        page.goto(f"{url}/", wait_until="networkidle", timeout=15000)
+        page.wait_for_selector("#flow-wizard-list", timeout=10000)
+        # Wait for product cards to load (brand-scoped data_folders)
+        page.wait_for_function(
+            "() => document.querySelector('.product-card') !== null",
+            timeout=10000,
+        )
+
+        # Add brand_id to server dict so _api_get/_api_post include the brand cookie
+        _server["brand_id"] = bid
+
+        yield {
+            "page": page,
+            "url": url,
+            "console_errors": console_errors,
+            "failed_requests": failed_requests,
+            "http_responses": http_responses,
+            "server": _server,
+            "brand_id": bid,
         }
 
         context.close()
@@ -513,14 +640,13 @@ class TestApplicationBoot:
     """Verify the application boots in a real browser."""
 
     def test_page_renders(self, _browser):
-        """The page loads and renders the wizard UI."""
+        """The page loads and renders the wizard UI (no brand required for boot)."""
         page = _browser["page"]
         # Wizard container exists
         assert page.query_selector("#flow-wizard") is not None
         # At least one flow box exists
         assert page.query_selector(".flow-box") is not None
-        # Product cards rendered (from sidebar)
-        assert page.query_selector(".product-card") is not None
+        # Product cards are brand-scoped — not required for boot proof
 
     def test_wizard_js_loaded(self, _browser):
         """wizard_ui.js executed — wizard stepper is visible."""
@@ -533,15 +659,84 @@ class TestApplicationBoot:
         assert len(dots) >= 4  # 4 steps
 
     def test_no_fatal_console_errors(self, _browser):
-        """No fatal JavaScript console errors on boot."""
+        """No fatal JavaScript console errors on boot (no brand required).
+
+        MB-02: brand-scoped endpoints return 403 when no brand is selected —
+        the browser logs these as console errors but the JS handles them
+        gracefully.  We explicitly inspect recorded HTTP responses (URL +
+        status) and fail if any 403 response exists other than the expected
+        no-brand endpoints.  We do not rely only on console-message text
+        because fetch/resource errors may omit the endpoint URL.
+
+        Expected no-brand 403 endpoints (called on boot, handled by JS):
+          - /api/data_folders  (product list)
+          - /api/schedule/status  (scheduler status)
+        """
         errors = _browser["console_errors"]
-        # Filter out non-fatal warnings (CSS warnings, deprecation notices)
+        http_responses = _browser["http_responses"]
+
+        # Endpoints the browser calls on boot that are expected to 403
+        # without a selected brand.  The JS handles each gracefully.
+        expected_no_brand_403_endpoints = {
+            "/api/data_folders",
+            "/api/schedule/status",
+        }
+
+        def _is_expected_no_brand_403(resp):
+            if resp["status"] != 403:
+                return False
+            from urllib.parse import urlparse
+            path = urlparse(resp["url"]).path.rstrip("/")
+            return path in expected_no_brand_403_endpoints
+
+        # Prove at least /api/data_folders 403 was seen (the primary boot call).
+        data_folders_403 = [
+            r for r in http_responses
+            if r["url"].rstrip("/").endswith("/api/data_folders")
+            and r["status"] == 403
+        ]
+        assert data_folders_403, (
+            "Expected HTTP 403 from /api/data_folders (no brand selected); "
+            f"got responses: {http_responses}"
+        )
+
+        # Fail if ANY other 403 response exists — inspected at the HTTP
+        # response layer, not the console text layer, so resource/fetch
+        # errors that omit the endpoint URL are still caught.
+        other_403 = [
+            r for r in http_responses
+            if r["status"] == 403
+            and not _is_expected_no_brand_403(r)
+        ]
+        assert not other_403, (
+            f"Unexpected 403 responses (only {expected_no_brand_403_endpoints} "
+            f"are allowed): {other_403}"
+        )
+
         fatal = []
+        # Count expected 403 responses — the browser logs each as a generic
+        # "Failed to load resource: 403" console message without the URL.
+        # Allow exactly that many generic 403 console messages; any extra
+        # 403 console message is fatal (an unexpected endpoint 403'd).
+        expected_403_count = sum(1 for r in http_responses if _is_expected_no_brand_403(r))
+        generic_403_seen = 0
         for e in errors:
             text = str(e)
-            # Ignore CSS/image load warnings, favicon, etc.
+            # Ignore CSS/image load warnings, favicon, 404, deprecation notices
             if any(skip in text for skip in ["favicon", "404", "CSS", "Deprecation"]):
                 continue
+            # Generic 403 console messages (no URL in text) — allow up to the
+            # expected count from the HTTP response layer.
+            if "403" in text and "data_folders" not in text and "schedule/status" not in text:
+                generic_403_seen += 1
+                if generic_403_seen <= expected_403_count:
+                    continue
+                fatal.append(text)
+                continue
+            # 403 console messages that name an expected endpoint — allowed.
+            if "403" in text and any(ep in text for ep in ["data_folders", "schedule/status"]):
+                continue
+            # Any other console message is fatal.
             fatal.append(text)
         assert not fatal, f"Fatal console errors: {fatal}"
 
@@ -560,9 +755,9 @@ class TestApplicationBoot:
 class TestAgent1ProductSpec:
     """E2E: product_spec agent through the real browser UI."""
 
-    def test_product_spec_full_flow(self, _browser):
+    def test_product_spec_full_flow(self, _brand_browser):
         """Select product → select agent → run → result appears in DOM."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # Step 1: select product
         assert _select_product(page, "TestProduct")
@@ -604,9 +799,9 @@ class TestAgent1ProductSpec:
 class TestAgent2CompetitorAnalysis:
     """E2E: competitor_analysis agent through the real browser UI."""
 
-    def test_competitor_analysis_full_flow(self, _browser):
+    def test_competitor_analysis_full_flow(self, _brand_browser):
         """Select product → select agent → run → result renders."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         _select_product(page, "TestProduct")
         _go_to_step(page, 2)
@@ -635,10 +830,10 @@ class TestAgent3CampaignStrategy:
     works — the path that the benchmark harness defect bypassed.
     """
 
-    def test_campaign_strategy_with_settings(self, _browser):
+    def test_campaign_strategy_with_settings(self, _brand_browser):
         """Set budget via settings API → run → verify settings reached backend."""
-        page = _browser["page"]
-        server = _browser["server"]
+        page = _brand_browser["page"]
+        server = _brand_browser["server"]
 
         # First, save campaign_strategy settings via the API
         # (This simulates what the user does through the settings modal)
@@ -680,9 +875,9 @@ class TestAgent3CampaignStrategy:
         result_link = page.query_selector(".flow-step-link")
         assert result_link is not None
 
-    def test_campaign_strategy_settings_modal_opens(self, _browser):
+    def test_campaign_strategy_settings_modal_opens(self, _brand_browser):
         """The agent settings modal opens through the real UI."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # Select product and go to step 2
         _select_product(page, "TestProduct")
@@ -716,9 +911,9 @@ class TestAgent3CampaignStrategy:
 class TestAgent4ContentCreator:
     """E2E: content_creator agent through the real browser UI."""
 
-    def test_content_creator_full_flow(self, _browser):
+    def test_content_creator_full_flow(self, _brand_browser):
         """Select product → select agent → run → text result renders."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         _select_product(page, "TestProduct")
         _go_to_step(page, 2)
@@ -752,9 +947,9 @@ class TestAgent4ContentCreator:
 class TestUploadContext:
     """E2E: file upload through the real UI."""
 
-    def test_file_upload_acknowledged(self, _browser, tmp_path):
+    def test_file_upload_acknowledged(self, _brand_browser, tmp_path):
         """Upload a small fixture file through the real file input."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # Create a small test file
         fixture = tmp_path / "test_context.txt"
@@ -784,9 +979,9 @@ class TestUploadContext:
 class TestRepeatedUse:
     """E2E: second run in the same browser session."""
 
-    def test_second_run_after_first(self, _browser):
+    def test_second_run_after_first(self, _brand_browser):
         """Run a flow, then add a new flow and run again."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # First run
         _select_product(page, "TestProduct")
@@ -855,9 +1050,9 @@ class TestRepeatedUse:
 class TestErrorBehavior:
     """E2E: controlled backend error surfaces in the UI."""
 
-    def test_agent_error_surfaces_in_ui(self, _browser, monkeypatch):
+    def test_agent_error_surfaces_in_ui(self, _brand_browser, monkeypatch):
         """Simulate a backend error and verify the UI shows it."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
         import web_viewer
 
         # Patch Orchestrator to raise on product_spec
@@ -912,9 +1107,9 @@ class TestErrorBehavior:
 class TestNavigationState:
     """E2E: UI remains operable after a completed run."""
 
-    def test_ui_operable_after_run(self, _browser):
+    def test_ui_operable_after_run(self, _brand_browser):
         """After a run completes, the UI is still navigable."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # Complete a run
         _select_product(page, "TestProduct")
@@ -956,9 +1151,9 @@ class TestNavigationState:
         add_btn = page.query_selector(".flow-box.add-new")
         assert add_btn is not None, "Add flow button disappeared after run"
 
-    def test_sidebar_sessions_populated(self, _browser):
+    def test_sidebar_sessions_populated(self, _brand_browser):
         """After a run, the sessions sidebar should show results."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # Complete a run first
         _select_product(page, "TestProduct")
@@ -996,9 +1191,9 @@ class TestImageGenerationBrowserE2E:
     browser DOM rendering of <img>.
     """
 
-    def test_auto_image_generation_flow(self, _browser):
+    def test_auto_image_generation_flow(self, _brand_browser):
         """Run content_creator with auto_image=true → image appears in DOM."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # Select product
         _select_product(page, "TestProduct")
@@ -1050,7 +1245,7 @@ class TestImageGenerationBrowserE2E:
         assert result_link is not None, "No result link after content_creator run"
 
         # Verify image was persisted by checking the session files via API
-        server = _browser["server"]
+        server = _brand_browser["server"]
         import urllib.request
         # Get sessions list
         resp = _api_get(f"{server['url']}/api/sessions", server, timeout=5)
@@ -1069,9 +1264,9 @@ class TestImageGenerationBrowserE2E:
             except Exception as e:
                 pytest.fail(f"Failed to check session files: {e}")
 
-    def test_manual_image_generation_button(self, _browser):
+    def test_manual_image_generation_button(self, _brand_browser):
         """Content creator result → click 'สร้างรูป' button → image appears."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # Run content_creator first (without auto_image)
         _select_product(page, "TestProduct")
@@ -1123,9 +1318,9 @@ class TestImageGenerationBrowserE2E:
         img_el = page.query_selector("#preview-platform-content img")
         assert img_el is not None, "No <img> element in platform preview after image generation"
 
-    def test_image_error_surfaces_in_ui(self, _browser, monkeypatch):
+    def test_image_error_surfaces_in_ui(self, _brand_browser, monkeypatch):
         """Controlled image generation error → UI shows error, no infinite loading."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
         import web_viewer
 
         # Patch media_gen to fail
@@ -1156,6 +1351,23 @@ class TestImageGenerationBrowserE2E:
 
             _go_to_step(page, 4)
             page.wait_for_timeout(300)
+            # Inject a MutationObserver to record all status text changes,
+            # so we don't miss the error message if it's overwritten quickly
+            # by the subsequent agent_done status ('✓').
+            page.evaluate("""
+                window.__statusMessages = [];
+                const observer = new MutationObserver((mutations) => {
+                    for (const m of mutations) {
+                        const el = m.target;
+                        if (el && el.id && el.id.includes('-status')) {
+                            window.__statusMessages.push(el.textContent || '');
+                        }
+                    }
+                });
+                observer.observe(document.body, {
+                    subtree: true, characterData: true, childList: true
+                });
+            """)
             _run_flow(page)
 
             # Wait for flow to complete (content_creator succeeds, image gen fails)
@@ -1163,23 +1375,17 @@ class TestImageGenerationBrowserE2E:
             assert done, "Content creator should complete even if image gen fails"
 
             # The flow should complete — image gen error should not block the agent
-            # Wait for error status to appear in the UI
             page.wait_for_timeout(3000)
 
-            # Verify a visible media error element/message appears (not just absence of .running)
-            # In the auto flow, media errors surface as .flow-step.error, .agent-status.error,
-            # .media-status.error, or as visible error text in the step/agent area
-            flow_error = page.query_selector(".flow-step.error")
-            agent_error = page.query_selector(".agent-status.error")
-            media_error = page.query_selector(".media-status.error")
-            agent_box_error = page.query_selector(".agent-box.error")
-            page_text = page.inner_text("body")
-            has_error_text = "Simulated image generation failure" in page_text or \
-                "error" in page_text.lower() or "ผิดพลาด" in page_text
-            assert flow_error is not None or agent_error is not None or \
-                media_error is not None or agent_box_error is not None or \
-                has_error_text, \
-                "No visible error element or error text after image gen failure"
+            # Verify the media error text was visible at some point during the
+            # flow (captured by the MutationObserver).  Non-fatal media errors
+            # are sent as status events, not error events, so the flow step
+            # reaches .flow-step.done (not .flow-step.error).
+            status_messages = page.evaluate("window.__statusMessages || []")
+            assert any("Simulated image generation failure" in m for m in status_messages), (
+                f"Media error text was not visible during the flow — "
+                f"status messages: {status_messages}"
+            )
 
             # Also verify no infinite loading
             running = page.query_selector(".flow-step.running")
@@ -1200,9 +1406,9 @@ class TestVideoGenerationBrowserE2E:
     artifact persistence → browser DOM rendering of <video>.
     """
 
-    def test_auto_video_generation_flow(self, _browser):
+    def test_auto_video_generation_flow(self, _brand_browser):
         """Run content_creator with auto_video=true → video appears in DOM."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         _select_product(page, "TestProduct")
         _go_to_step(page, 2)
@@ -1243,7 +1449,7 @@ class TestVideoGenerationBrowserE2E:
         assert result_link is not None
 
         # Verify video file was persisted
-        server = _browser["server"]
+        server = _brand_browser["server"]
         import urllib.request
         resp = _api_get(f"{server['url']}/api/sessions", server, timeout=5)
         sessions = json.loads(resp.read())
@@ -1260,9 +1466,9 @@ class TestVideoGenerationBrowserE2E:
             except Exception as e:
                 pytest.fail(f"Failed to check session files: {e}")
 
-    def test_manual_video_generation_button(self, _browser):
+    def test_manual_video_generation_button(self, _brand_browser):
         """Content creator result → click 'สร้างวิดีโอ' button → video file persisted."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # Run content_creator (without auto_video)
         _select_product(page, "TestProduct")
@@ -1311,7 +1517,7 @@ class TestVideoGenerationBrowserE2E:
         page.wait_for_timeout(8000)
 
         # Verify video file was persisted via session files API
-        server = _browser["server"]
+        server = _brand_browser["server"]
         import urllib.request
         # Use the current session if we found it, otherwise fall back to sessions[0]
         if current_session:
@@ -1331,9 +1537,9 @@ class TestVideoGenerationBrowserE2E:
         except Exception as e:
             pytest.fail(f"Failed to check session files: {e}")
 
-    def test_video_error_surfaces_in_ui(self, _browser):
+    def test_video_error_surfaces_in_ui(self, _brand_browser):
         """Controlled video generation error → UI shows error, no infinite loading."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
         import web_viewer
 
         original_gen = web_viewer.media_gen.generate_video_with_retry
@@ -1363,6 +1569,23 @@ class TestVideoGenerationBrowserE2E:
 
             _go_to_step(page, 4)
             page.wait_for_timeout(300)
+            # Inject a MutationObserver to record all status text changes,
+            # so we don't miss the error message if it's overwritten quickly
+            # by the subsequent agent_done status ('✓').
+            page.evaluate("""
+                window.__statusMessages = [];
+                const observer = new MutationObserver((mutations) => {
+                    for (const m of mutations) {
+                        const el = m.target;
+                        if (el && el.id && el.id.includes('-status')) {
+                            window.__statusMessages.push(el.textContent || '');
+                        }
+                    }
+                });
+                observer.observe(document.body, {
+                    subtree: true, characterData: true, childList: true
+                });
+            """)
             _run_flow(page)
 
             done, _ = _wait_for_flow_done(page, timeout_ms=45000)
@@ -1370,18 +1593,15 @@ class TestVideoGenerationBrowserE2E:
 
             page.wait_for_timeout(3000)
 
-            # Verify a visible error element/message appears (not just absence of .running)
-            flow_error = page.query_selector(".flow-step.error")
-            agent_error = page.query_selector(".agent-status.error")
-            media_error = page.query_selector(".media-status.error")
-            agent_box_error = page.query_selector(".agent-box.error")
-            page_text = page.inner_text("body")
-            has_error_text = "Simulated video generation failure" in page_text or \
-                "error" in page_text.lower() or "ผิดพลาด" in page_text
-            assert flow_error is not None or agent_error is not None or \
-                media_error is not None or agent_box_error is not None or \
-                has_error_text, \
-                "No visible error element or error text after video gen failure"
+            # Verify the media error text was visible at some point during the
+            # flow (captured by the MutationObserver).  Non-fatal media errors
+            # are sent as status events, not error events, so the flow step
+            # reaches .flow-step.done (not .flow-step.error).
+            status_messages = page.evaluate("window.__statusMessages || []")
+            assert any("Simulated video generation failure" in m for m in status_messages), (
+                f"Media error text was not visible during the flow — "
+                f"status messages: {status_messages}"
+            )
 
             # Also verify no infinite loading
             running = page.query_selector(".flow-step.running")
@@ -1390,9 +1610,9 @@ class TestVideoGenerationBrowserE2E:
         finally:
             web_viewer.media_gen.generate_video_with_retry = original_gen
 
-    def test_video_polling_progress_status(self, _browser):
+    def test_video_polling_progress_status(self, _brand_browser):
         """Video generation polling progress is visible in the UI."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # The fake provider calls on_status with "submitting", "generating", "downloading"
         # These should appear as status SSE events in the UI
@@ -1450,9 +1670,9 @@ class TestVideoGenerationBrowserE2E:
 class TestMediaPersistenceBrowserE2E:
     """E2E: Generated media survives session reload via the sidebar."""
 
-    def test_media_visible_after_session_reload(self, _browser):
+    def test_media_visible_after_session_reload(self, _brand_browser):
         """Run content_creator with auto_image → open result from sidebar → image still visible."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # Run content_creator with auto_image
         _select_product(page, "TestProduct")
@@ -1523,9 +1743,9 @@ class TestMediaPersistenceBrowserE2E:
 class TestScheduleModalBrowserE2E:
     """E2E: schedule modal opens, saves, and the job appears in the list."""
 
-    def test_schedule_save_and_list(self, _browser):
+    def test_schedule_save_and_list(self, _brand_browser):
         """Select product → agent → step 4 → open schedule → save → job listed."""
-        page = _browser["page"]
+        page = _brand_browser["page"]
 
         # Step 1: select product
         assert _select_product(page, "TestProduct")
@@ -1577,10 +1797,11 @@ class TestScheduleModalBrowserE2E:
 
         # Verify the job was persisted via API
         import httpx
-        port = _browser["server"]["port"]
-        token = _browser["server"]["session_token"]
+        port = _brand_browser["server"]["port"]
+        token = _brand_browser["server"]["session_token"]
         resp = httpx.get(f"http://localhost:{port}/api/schedule/jobs",
-                        cookies={"mktapp_session": token})
+                        cookies={"mktapp_session": token,
+                                 "mktapp_brand": _brand_browser["brand_id"]})
         assert resp.status_code == 200
         jobs = resp.json()
         assert any(j.get("name") == "Browser E2E schedule test" for j in jobs), \

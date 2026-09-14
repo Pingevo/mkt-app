@@ -152,11 +152,6 @@ def _server(tmp_path_factory):
     # Output directory
     (tmp / "output").mkdir(exist_ok=True)
 
-    # Save original product_db._project_root for cleanup.
-    # The actual patch is applied below after the per-user workspace is created.
-    from src import product_db
-    _orig_project_root = product_db._project_root
-
     # Patch filesystem paths — use PROJECT_ROOT so WorkspaceContext.for_user
     # resolves to tmp/users/{user_id}/. Per-request workspace context is set
     # by the auth middleware in the server thread.
@@ -190,21 +185,8 @@ def _server(tmp_path_factory):
     _ws = WorkspaceContext.for_user(_user.user_id, tmp)
     _ws_token = _set_ws(_ws)
 
-    # Patch product_db to the per-user workspace for setup calls
-    product_db._project_root = lambda: _ws_root
-    for name, text in [(ALPHA_NAME, ALPHA_TEXT), (BETA_NAME, BETA_TEXT)]:
-        product_db.set_status(name, product_db.STATUS_READY)
-        rec = product_db.load(name)
-        rec["raw_text"] = text
-        rec["text_extracts"] = [{"file": "info.txt", "text": text}]
-        info_path = _ws_root / "data" / name / "info.txt"
-        rec["files"] = [{
-            "name": "info.txt",
-            "path": str(info_path),
-            "hash": product_db._file_hash(info_path),
-            "status": "ingested",
-        }]
-        product_db.save(name, rec)
+    # Product data (info.txt, cache dirs) created above at user level.
+    # product_db.set_status is called in _browser with brand context.
     _test_token = _sess.create_session(_user.user_id)
 
     # Initialize module globals — save originals
@@ -291,7 +273,6 @@ def _server(tmp_path_factory):
     thread.join(timeout=5)
 
     # Restore all patches
-    product_db._project_root = _orig_project_root
     Orchestrator.make_client = _orig_make_client
     SemanticEvidenceReviewer.review = _orig_review
     CompetitorReportRenderer.validate = _orig_validate
@@ -320,7 +301,12 @@ def _server(tmp_path_factory):
 
 @pytest.fixture
 def _browser(_server):
-    """Launch a browser, navigate to the app, yield the page."""
+    """Launch a browser, authenticate via API cookie, create+select brand, yield page.
+
+    MB-02: authenticates via session cookie (System81 login page has no
+    username/password form).  Creates and selects a brand so brand-scoped
+    endpoints (data_folders, run_agent, etc.) resolve to brand-scoped paths.
+    """
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1280, "height": 900})
@@ -331,14 +317,79 @@ def _browser(_server):
         page.on("pageerror", lambda err: console_errors.append(err))
 
         url = _server["url"]
-        # Authenticate first — login via API to get the session cookie
-        page.goto(f"{url}/login", wait_until="networkidle", timeout=15000)
-        page.fill("#username", "testuser")
-        page.fill("#password", "testpass")
-        page.click("#submit-btn")
-        page.wait_for_url(f"{url}/", timeout=10000)
+        # Authenticate via API — set session cookie directly
+        context.add_cookies([{
+            "name": "mktapp_session",
+            "value": _server["session_token"],
+            "url": url,
+        }])
 
-        # Wait for wizard JS to initialize
+        # Create and select a brand via API
+        import urllib.request, json as _json
+        req = urllib.request.Request(
+            f"{url}/api/brands",
+            data=_json.dumps({"name": "IntegrationTestBrand"}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Cookie": f"mktapp_session={_server['session_token']}"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=5)
+        bid = _json.loads(resp.read())["brand_id"]
+        req = urllib.request.Request(
+            f"{url}/api/brands/{bid}/select",
+            data=b"",
+            headers={"Cookie": f"mktapp_session={_server['session_token']}"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+        context.add_cookies([{
+            "name": "mktapp_brand",
+            "value": bid,
+            "url": url,
+        }])
+
+        # Create brand-scoped product data (copy from user root to brand root)
+        tmp = _server["tmp"]
+        import os as _os
+        users_dir = tmp / "users"
+        uid = next(d.name for d in users_dir.iterdir() if d.is_dir())
+        brand_root = users_dir / uid / "brands" / bid
+        user_root = users_dir / uid
+        for name in [ALPHA_NAME, BETA_NAME]:
+            src = user_root / "data" / name
+            dst = brand_root / "data" / name
+            dst.mkdir(parents=True, exist_ok=True)
+            for f in src.iterdir():
+                if f.is_file():
+                    (dst / f.name).write_bytes(f.read_bytes())
+            (brand_root / "cache" / name).mkdir(parents=True, exist_ok=True)
+        (brand_root / "output").mkdir(parents=True, exist_ok=True)
+        (brand_root / "brand").mkdir(parents=True, exist_ok=True)
+
+        # Set product status in brand context (WorkspaceContext handles path resolution)
+        from src.workspace_context import WorkspaceContext, set_workspace as _set_ws, reset_workspace as _reset_ws
+        from src import product_db as _pdb
+        ws = WorkspaceContext.for_brand(uid, bid, tmp)
+        ws_token = _set_ws(ws)
+        try:
+            for name, text in [(ALPHA_NAME, ALPHA_TEXT), (BETA_NAME, BETA_TEXT)]:
+                _pdb.set_status(name, _pdb.STATUS_READY)
+                rec = _pdb.load(name)
+                rec["raw_text"] = text
+                rec["text_extracts"] = [{"file": "info.txt", "text": text}]
+                info_path = brand_root / "data" / name / "info.txt"
+                rec["files"] = [{
+                    "name": "info.txt",
+                    "path": str(info_path),
+                    "hash": _pdb._file_hash(info_path),
+                    "status": "ingested",
+                }]
+                _pdb.save(name, rec)
+        finally:
+            _reset_ws(ws_token)
+
+        # Navigate to the app
+        page.goto(f"{url}/", wait_until="networkidle", timeout=15000)
         page.wait_for_selector("#flow-wizard-list", timeout=10000)
         page.wait_for_function(
             "() => document.querySelector('.product-card') !== null",
@@ -351,6 +402,7 @@ def _browser(_server):
             "console_errors": console_errors,
             "server": _server,
             "fake_llm": _server["fake_llm"],
+            "brand_id": bid,
         }
 
         context.close()

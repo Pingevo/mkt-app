@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from src.brand_registry import BrandRegistry
 from src.workspace_context import (
     WorkspaceContext,
     set_workspace,
@@ -13,6 +14,17 @@ from src.workspace_context import (
     user_state_root,
     _sanitize_user_id,
 )
+
+
+def _brand_ws(project: Path, user_id: str, brand_id: str) -> WorkspaceContext:
+    """Create a brand-scoped workspace (ownership-verified via BrandRegistry)."""
+    return WorkspaceContext.for_brand(user_id, brand_id, project)
+
+
+def _make_brand(project: Path, user_id: str, name: str) -> str:
+    """Create a brand for ``user_id`` and return its brand_id."""
+    reg = BrandRegistry(user_id=user_id, project_root=project)
+    return reg.create(name)["brand_id"]
 
 
 # --- Sanitization ---
@@ -107,11 +119,13 @@ def test_two_users_different_roots(tmp_path: Path):
 # --- Two-user state isolation: product_db ---
 
 def test_two_user_product_isolation(tmp_path: Path):
-    """User A's product data must not be visible to User B."""
+    """User A's product data must not be visible to User B (now via brand scope)."""
     from src import product_db
 
-    ws_a = WorkspaceContext.for_user("user_aaa", tmp_path)
-    ws_b = WorkspaceContext.for_user("user_bbb", tmp_path)
+    a1 = _make_brand(tmp_path, "user_aaa", "A1")
+    b1 = _make_brand(tmp_path, "user_bbb", "B1")
+    ws_a = _brand_ws(tmp_path, "user_aaa", a1)
+    ws_b = _brand_ws(tmp_path, "user_bbb", b1)
 
     # User A creates a product
     token = set_workspace(ws_a)
@@ -135,17 +149,20 @@ def test_two_user_product_isolation(tmp_path: Path):
 # --- Two-user state isolation: content_history ---
 
 def test_two_user_content_history_isolation(tmp_path: Path):
-    """User A's content history must not be visible to User B."""
+    """User A's content history must not be visible to User B (now via brand scope)."""
     from src import content_history
 
-    ws_a = WorkspaceContext.for_user("user_aaa", tmp_path)
-    ws_b = WorkspaceContext.for_user("user_bbb", tmp_path)
+    a1 = _make_brand(tmp_path, "user_aaa", "A1")
+    b1 = _make_brand(tmp_path, "user_bbb", "B1")
+    ws_a = _brand_ws(tmp_path, "user_aaa", a1)
+    ws_b = _brand_ws(tmp_path, "user_bbb", b1)
 
     token = set_workspace(ws_a)
     try:
         content_history.record_entry(
             tmp_path, "ProductA", "test concept", "facebook", "test caption",
             output_file="output_a.md",
+            config={"dedup_enabled": False},
         )
     finally:
         reset_workspace(token)
@@ -161,11 +178,12 @@ def test_two_user_content_history_isolation(tmp_path: Path):
 # --- New-user clean defaults ---
 
 def test_new_user_starts_clean(tmp_path: Path):
-    """A brand-new user must start with zero products, zero history."""
+    """A brand-new user must start with zero products, zero history (via brand scope)."""
     from src import product_db, content_history
 
     # First, populate User A's state
-    ws_a = WorkspaceContext.for_user("user_aaa", tmp_path)
+    a1 = _make_brand(tmp_path, "user_aaa", "A1")
+    ws_a = _brand_ws(tmp_path, "user_aaa", a1)
     token = set_workspace(ws_a)
     try:
         product_db.set_status("ProductA", product_db.STATUS_READY)
@@ -175,12 +193,14 @@ def test_new_user_starts_clean(tmp_path: Path):
         content_history.record_entry(
             tmp_path, "ProductA", "test concept", "facebook", "test caption",
             output_file="output.md",
+            config={"dedup_enabled": False},
         )
     finally:
         reset_workspace(token)
 
     # New user B must start clean
-    ws_b = WorkspaceContext.for_user("user_new", tmp_path)
+    b1 = _make_brand(tmp_path, "user_new", "B1")
+    ws_b = _brand_ws(tmp_path, "user_new", b1)
     token = set_workspace(ws_b)
     try:
         rec_b = product_db.load("ProductA")
@@ -213,7 +233,8 @@ def test_factory_config_unchanged_after_user_state(tmp_path: Path):
     factory_config.write_text(json.dumps({"_presets": {}, "product_spec": {}}), encoding="utf-8")
     hash_before = factory_config.read_bytes().__hash__()
 
-    ws = WorkspaceContext.for_user("user_aaa", tmp_path)
+    a1 = _make_brand(tmp_path, "user_aaa", "A1")
+    ws = _brand_ws(tmp_path, "user_aaa", a1)
     token = set_workspace(ws)
     try:
         product_db.set_status("ProductA", product_db.STATUS_READY)
@@ -302,8 +323,12 @@ def test_product_db_save_traversal_blocked(tmp_path: Path):
 def test_product_db_delete_folder_traversal_blocked(tmp_path: Path):
     """api_delete_folder with traversal folder must not rmtree outside workspace."""
     from src import product_db
+    from src.brand_registry import BrandRegistry
 
-    ws = WorkspaceContext.for_user("user_aaa", tmp_path)
+    # MB-02: DATA_DIR() is brand-scoped — use a brand context.
+    reg = BrandRegistry(user_id="user_aaa", project_root=tmp_path)
+    brand = reg.create("TestBrand")
+    ws = WorkspaceContext.for_brand("user_aaa", brand["brand_id"], tmp_path)
     token = set_workspace(ws)
     try:
         # Create a target outside the workspace
@@ -345,7 +370,12 @@ def test_product_db_rename_traversal_blocked(tmp_path: Path):
 def test_delete_output_file_existing_containment(tmp_path: Path):
     """api_delete_output_file already has resolved containment at lines 1778-1782.
     This test proves the existing check rejects external files."""
-    ws = WorkspaceContext.for_user("user_aaa", tmp_path)
+    from src.brand_registry import BrandRegistry
+
+    # MB-02: OUTPUT_DIR() is brand-scoped — use a brand context.
+    reg = BrandRegistry(user_id="user_aaa", project_root=tmp_path)
+    brand = reg.create("TestBrand")
+    ws = WorkspaceContext.for_brand("user_aaa", brand["brand_id"], tmp_path)
     token = set_workspace(ws)
     try:
         from web_viewer import OUTPUT_DIR

@@ -9,6 +9,8 @@ Verifies that:
 """
 from __future__ import annotations
 
+import pytest
+
 from src.agents.competitor_evidence import (
     CompetitorEvidence,
     CompetitorReportRenderer,
@@ -16,6 +18,8 @@ from src.agents.competitor_evidence import (
     ResearchResponse,
     StrategicHypothesis,
 )
+
+pytestmark = pytest.mark.usefixtures("brand_ws")
 
 
 def _make_validated_evidence_and_annotations():

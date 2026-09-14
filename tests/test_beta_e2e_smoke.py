@@ -98,6 +98,23 @@ def _client(tmp_path, monkeypatch):
     # Login via API to set the session cookie naturally
     resp = client.post("/api/auth/login", json={"username": "testuser", "password": "testpass"})
     assert resp.status_code == 200, f"login failed: {resp.status_code} {resp.text}"
+
+    # MB-02: create and select a brand so brand-scoped endpoints (data_folders,
+    # run_agent, run_flows, etc.) resolve to a brand-scoped workspace context.
+    resp = client.post("/api/brands", json={"name": "TestBrand"})
+    assert resp.status_code == 200, f"brand create failed: {resp.status_code} {resp.text}"
+    bid = resp.json()["brand_id"]
+    resp = client.post(f"/api/brands/{bid}/select")
+    assert resp.status_code == 200, f"brand select failed: {resp.status_code} {resp.text}"
+
+    # Create brand-scoped data dirs (brand_state_root = users/<uid>/brands/<bid>)
+    brand_root = tmp_path / "users" / user.user_id / "brands" / bid
+    (brand_root / "data" / "TestProduct").mkdir(parents=True)
+    (brand_root / "data" / "TestProduct" / "info.txt").write_text("Test product info", encoding="utf-8")
+    (brand_root / "cache" / "TestProduct").mkdir(parents=True)
+    (brand_root / "output").mkdir(parents=True)
+    (brand_root / "brand").mkdir(parents=True)
+
     return client
 
 

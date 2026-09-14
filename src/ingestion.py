@@ -43,9 +43,13 @@ from .llm_client import LLMClient
 
 
 def _project_root() -> Path:
-    """Resolve user-state root — per-user workspace when active, else project root."""
-    from .workspace_context import user_state_root
-    return user_state_root(Path(__file__).resolve().parent.parent)
+    """Resolve brand-scoped state root — requires an active brand context (MB-02).
+
+    Ingestion cache/data live beneath ``users/<user_id>/brands/<brand_id>/``.
+    Fails closed when no verified brand context is active.
+    """
+    from .workspace_context import brand_state_root
+    return brand_state_root(Path(__file__).resolve().parent.parent)
 
 
 def _factory_root() -> Path:

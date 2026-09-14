@@ -62,6 +62,24 @@ def _restore_gate_make_client(monkeypatch):
     openrouter_gateway.record_ai_usage = original_record
 
 
+@pytest.fixture(autouse=True)
+def _reset_workspace_context():
+    """Clear any leaked WorkspaceContext before AND after each test (MB-02 isolation).
+
+    Tests that set a workspace via ``set_workspace`` should reset it in a
+    finally block, but if they don't, the ContextVar leaks into subsequent
+    tests and causes path-resolution cross-talk.  This fixture guarantees a
+    clean slate both before the test runs and after it finishes — it never
+    restores a leaked context.
+    """
+    from src.workspace_context import set_workspace
+    # Clear before — discard any context leaked by a prior test.
+    set_workspace(None)
+    yield
+    # Clear after — never restore a leaked context; leave a clean slate.
+    set_workspace(None)
+
+
 # ---------------------------------------------------------------------------
 # Auth helper — creates an authenticated TestClient for API tests
 # ---------------------------------------------------------------------------
@@ -103,3 +121,99 @@ def make_authed_client(app, tmp_path, monkeypatch=None):
     resp = client.post("/api/auth/login", json={"username": "testuser", "password": "testpass"})
     assert resp.status_code == 200, f"login failed: {resp.status_code} {resp.text}"
     return client, user.user_id, ws_root
+
+
+def make_brand_client(app, tmp_path, monkeypatch=None, brand_name="TestBrand"):
+    """Create an authenticated TestClient with a brand created and selected.
+
+    Extends ``make_authed_client`` by also creating a brand via the real
+    Brand API and selecting it, so the ``mktapp_brand`` cookie is set and
+    the auth middleware establishes a brand-scoped WorkspaceContext.
+
+    Patches ``web_viewer.PROJECT_ROOT`` to ``tmp_path`` so the BrandRegistry
+    creates and resolves brands under the test workspace, not the real
+    project root.
+
+    Returns (client, user_id, brand_id, brand_root).
+    """
+    import web_viewer
+    client, user_id, ws_root = make_authed_client(app, tmp_path, monkeypatch)
+    # Patch PROJECT_ROOT so BrandRegistry uses the test workspace
+    if monkeypatch:
+        monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
+    else:
+        web_viewer.PROJECT_ROOT = tmp_path
+    resp = client.post("/api/brands", json={"name": brand_name})
+    assert resp.status_code == 200, f"brand create failed: {resp.status_code} {resp.text}"
+    brand_id = resp.json()["brand_id"]
+    resp = client.post(f"/api/brands/{brand_id}/select")
+    assert resp.status_code == 200, f"brand select failed: {resp.status_code} {resp.text}"
+    brand_root = ws_root / "brands" / brand_id
+    for d in ("data", "cache", "output", "brand"):
+        (brand_root / d).mkdir(parents=True, exist_ok=True)
+    return client, user_id, brand_id, brand_root
+
+
+# ---------------------------------------------------------------------------
+# Brand workspace helper — for scheduler/state tests that need brand context
+# ---------------------------------------------------------------------------
+
+def make_brand_workspace(tmp_path, user_id="test_user", brand_name="TestBrand"):
+    """Create a user + brand and return (user_id, brand_id, project_root).
+
+    Registers the user in the UserStore so scheduler restart can enumerate them.
+    Creates a brand via BrandRegistry.  Does NOT set the workspace context —
+    the caller must set it via ``WorkspaceContext.for_brand(...)`` before
+    accessing brand-scoped state.
+    """
+    from src.auth import UserStore
+    from src.brand_registry import BrandRegistry
+
+    users_path = tmp_path / "data" / "auth" / "users.json"
+    users_path.parent.mkdir(parents=True, exist_ok=True)
+    store = UserStore(users_path)
+    user = store.register(user_id, f"pass_{user_id}")
+    uid = user.user_id
+    reg = BrandRegistry(user_id=uid, project_root=tmp_path)
+    brand = reg.create(brand_name)
+    return uid, brand["brand_id"], tmp_path
+
+
+# ---------------------------------------------------------------------------
+# Shared brand workspace fixture — for legacy unit/offline tests that call
+# brand-scoped modules directly (product_db, ingestion, staging, etc.)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def brand_ws(tmp_path):
+    """Create an isolated user + brand and set WorkspaceContext for the test.
+
+    MB-02: product/ingestion/staging/output modules resolve paths through
+    ``brand_state_root()`` which requires an active brand context.  Legacy
+    tests that previously assumed one project root == one implicit brand
+    can use this fixture to get a real brand context without duplicating
+    setup code.
+
+    Yields a dict with: user_id, brand_id, project_root, brand_root.
+
+    Tests that explicitly verify no-brand/fail-closed behavior must NOT
+    use this fixture.
+    """
+    from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
+    uid, bid, project_root = make_brand_workspace(tmp_path)
+    brand_root = project_root / "users" / uid / "brands" / bid
+    # Create brand-scoped dirs
+    for d in ("data", "cache", "output", "brand"):
+        (brand_root / d).mkdir(parents=True, exist_ok=True)
+    # Set workspace context
+    ws = WorkspaceContext.for_brand(uid, bid, project_root)
+    token = set_workspace(ws)
+    try:
+        yield {
+            "user_id": uid,
+            "brand_id": bid,
+            "project_root": project_root,
+            "brand_root": brand_root,
+        }
+    finally:
+        reset_workspace(token)

@@ -188,8 +188,22 @@ def product_brand_dir() -> Path:
 
 
 def local_brand_dir() -> Path:
-    """Return the local brand directory (``workspace/local/brand/`` — user state)."""
-    return local_root() / "brand"
+    """Return the brand directory — brand-scoped, requires an active brand context.
+
+    MB-02: brand files (voice/terms/visual/audience/profile/assets) live beneath
+    ``users/<uid>/brands/<brand_id>/brand/``.  An authenticated user-only context
+    (workspace set, no brand_id) must fail closed — never fall back to user root.
+    Only a true no-workspace CLI context (``get_workspace()`` is None) retains
+    the ``workspace/local/brand/`` fallback for CLI/test backward compat.
+    """
+    from .workspace_context import get_workspace
+    ws = get_workspace()
+    if ws is not None and ws.brand_id is not None:
+        from .workspace_context import brand_state_root
+        return brand_state_root() / "brand"
+    if ws is None:
+        return local_root() / "brand"
+    raise ValueError("local_brand_dir requires an active brand context")
 
 
 # --- Agent Instructions --------------------------------------------------
@@ -284,8 +298,21 @@ def save_agent_overrides(data: dict[str, Any]) -> None:
 # --- Content Pillars ----------------------------------------------------
 
 def content_pillars_local_path() -> Path:
-    """Local file: ``workspace/local/config/content_pillars.yaml``."""
-    return local_config_dir() / "content_pillars.yaml"
+    """Brand-scoped content pillars path (MB-02).
+
+    ``users/<uid>/brands/<brand_id>/config/content_pillars.yaml`` when a brand
+    context is active.  An authenticated user-only context (workspace set, no
+    brand_id) must fail closed.  Only a true no-workspace CLI context
+    (``get_workspace()`` is None) retains the local fallback for CLI compat.
+    """
+    from .workspace_context import get_workspace
+    ws = get_workspace()
+    if ws is not None and ws.brand_id is not None:
+        from .workspace_context import brand_state_root
+        return brand_state_root() / "config" / "content_pillars.yaml"
+    if ws is None:
+        return local_config_dir() / "content_pillars.yaml"
+    raise ValueError("content_pillars_local_path requires an active brand context")
 
 
 def load_content_pillars_local() -> dict[str, Any]:
@@ -364,13 +391,23 @@ _PRODUCT_OWNED_DATA_DIRS = frozenset({
 })
 
 
+def _state_root() -> Path:
+    """Brand-scoped root when a brand context is active, else per-user root (MB-02)."""
+    from .workspace_context import get_workspace, user_state_root
+    ws = get_workspace()
+    if ws is not None and ws.brand_id is not None:
+        from .workspace_context import brand_state_root
+        return brand_state_root()
+    return user_state_root(_project_root())
+
+
 def _clear_product_cache() -> None:
     """Remove all user-derived product cache from ``cache/{product_id}/``.
 
     Preserves product-owned infrastructure directories like ``_media_capabilities``.
+    Brand-scoped (MB-02): clears the active brand's cache.
     """
-    from .workspace_context import user_state_root
-    cache_dir = user_state_root(_project_root()) / "cache"
+    cache_dir = _state_root() / "cache"
     if not cache_dir.exists():
         return
     for item in cache_dir.iterdir():
@@ -387,9 +424,9 @@ def _clear_product_uploads() -> None:
     """Remove all user-uploaded product raw data from ``data/{product_id}/``.
 
     Preserves product-owned fixture directories (e.g. ``m6_uplift``).
+    Brand-scoped (MB-02): clears the active brand's data.
     """
-    from .workspace_context import user_state_root
-    data_dir = user_state_root(_project_root()) / "data"
+    data_dir = _state_root() / "data"
     if not data_dir.exists():
         return
     for item in data_dir.iterdir():
@@ -447,8 +484,7 @@ def reset_local_workspace(*, purge_history: bool = False) -> None:
     """
     archive_root = _archive_root()
 
-    from .workspace_context import user_state_root
-    _ws_root = user_state_root(_project_root())
+    _ws_root = _state_root()
 
     # 1. Local workspace config
     root = local_root()
@@ -499,11 +535,19 @@ def reset_local_workspace(*, purge_history: bool = False) -> None:
                     f"Use purge_history=True for explicit destructive cleanup."
                 ) from e
 
-    # 9. Brand user state — only clear global brand/ when no per-user workspace
-    #    is active (CLI backward compat).  When a workspace is active, user brand
-    #    state lives in workspace/local/brand/ (already cleared in step 1).
+    # 9. Brand user state — brand-scoped when a brand context is active (MB-02),
+    #    else global brand/ (CLI backward compat).
     from .workspace_context import get_workspace
-    if get_workspace() is None:
+    ws = get_workspace()
+    if ws is not None and ws.brand_id is not None:
+        # Brand-scoped: clear brand files + content pillars under brand_state_root()
+        brand_dir = _ws_root / "brand"
+        if brand_dir.exists():
+            shutil.rmtree(brand_dir)
+        pillars = _ws_root / "config" / "content_pillars.yaml"
+        if pillars.exists():
+            pillars.unlink()
+    elif ws is None:
         brand_dir = _project_root() / "brand"
         for fname in ("voice.json", "terms.json", "visual.json", "audience.json",
                       "brand_profile.md", "tone_of_voice.md", "visual_guidelines.md",

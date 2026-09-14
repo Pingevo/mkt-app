@@ -41,28 +41,37 @@ from apscheduler.triggers.cron import CronTrigger
 # Owner-bearing APScheduler identity
 # ============================================================
 
-def _aps_id(user_id: str, job_id: str) -> str:
-    """Internal APScheduler ID encoding (user_id, job_id).
+def _aps_id(user_id: str, brand_id: str, job_id: str) -> str:
+    """Internal APScheduler ID encoding (user_id, brand_id, job_id).
 
-    Deterministic and reversible via ``_decode_aps_id``.  The public API
-    continues to expose the original application ``job_id``; this is only
-    used as the APScheduler in-memory jobstore key so that the same public
-    ``job_id`` belonging to different users cannot collide.
+    MB-02: brand_id is encoded so callbacks can restore the correct brand
+    workspace without loading the job first.  Deterministic and reversible
+    via ``_decode_aps_id``.  The public API continues to expose the original
+    application ``job_id``; this is only used as the APScheduler in-memory
+    jobstore key so that the same public ``job_id`` belonging to different
+    users/brands cannot collide.
+
+    Legacy format (no brand_id): ``{user_id}::{job_id}``.
     """
+    if user_id and brand_id:
+        return f"{user_id}::{brand_id}::{job_id}"
     if user_id:
         return f"{user_id}::{job_id}"
     return job_id
 
 
-def _decode_aps_id(aps_id: str) -> tuple[str, str]:
-    """Reverse ``_aps_id``.  Returns ``(user_id, job_id)``.
+def _decode_aps_id(aps_id: str) -> tuple[str, str, str]:
+    """Reverse ``_aps_id``.  Returns ``(user_id, brand_id, job_id)``.
 
-    For legacy IDs (no ``::`` separator) returns ``("", aps_id)``.
+    For legacy IDs (no ``::`` separator) returns ``("", "", aps_id)``.
+    For old two-part IDs (``{user_id}::{job_id}``) returns ``(user_id, "", job_id)``.
     """
-    if "::" in aps_id:
-        user_id, job_id = aps_id.split("::", 1)
-        return (user_id, job_id)
-    return ("", aps_id)
+    parts = aps_id.split("::")
+    if len(parts) == 3:
+        return (parts[0], parts[1], parts[2])
+    if len(parts) == 2:
+        return (parts[0], "", parts[1])
+    return ("", "", aps_id)
 
 
 # ============================================================
@@ -98,17 +107,26 @@ class JsonJobStore:
         self._lock = threading.Lock()
 
     def _resolve_jobs_path(self) -> Path:
-        """Resolve jobs path — per-user workspace when active."""
-        from .workspace_context import get_workspace
+        """Resolve jobs path — brand-scoped workspace when active (MB-02).
+
+        When a brand context is active: ``brand_state_root()/cache/scheduled_jobs.json``.
+        When only a user context (legacy): ``user_state_root()/cache/scheduled_jobs.json``.
+        When no workspace: the fallback path passed at construction.
+        """
+        from .workspace_context import get_workspace, brand_state_root
         ws = get_workspace()
+        if ws and ws.brand_id:
+            return brand_state_root() / "cache" / "scheduled_jobs.json"
         if ws:
             return ws.cache_dir() / "scheduled_jobs.json"
         return self._jobs_path
 
     def _resolve_runs_path(self) -> Path:
-        """Resolve runs path — per-user workspace when active."""
-        from .workspace_context import get_workspace
+        """Resolve runs path — brand-scoped workspace when active (MB-02)."""
+        from .workspace_context import get_workspace, brand_state_root
         ws = get_workspace()
+        if ws and ws.brand_id:
+            return brand_state_root() / "cache" / "scheduled_runs.json"
         if ws:
             return ws.cache_dir() / "scheduled_runs.json"
         return self._runs_path
@@ -308,16 +326,20 @@ class Scheduler:
         if not aps_id:
             return
         decoded = _decode_aps_id(aps_id)
-        user_id, job_id = decoded
+        user_id, brand_id, job_id = decoded
         if not job_id:
             return
 
         from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
         _project_root = self._project_root
         ws_token = None
-        if user_id:
+        if user_id and brand_id:
+            ws = WorkspaceContext.for_brand(user_id, brand_id, _project_root)
+        elif user_id:
             ws = WorkspaceContext.for_user(user_id, _project_root)
-            ws_token = set_workspace(ws)
+        else:
+            return
+        ws_token = set_workspace(ws)
         try:
             jobs = self._store.load_jobs()
             job = next((j for j in jobs if j["id"] == job_id), None)
@@ -337,8 +359,14 @@ class Scheduler:
         self._reload_legacy_jobs()
 
     def _reload_all_users(self) -> None:
-        """Enumerate registered users and reload each user's jobs + cleanup."""
+        """Enumerate registered users → active brands → reload each brand's jobs.
+
+        MB-02: scheduler state is brand-scoped.  For each user, enumerate their
+        active brands and reload jobs from each brand's store.  Legacy jobs
+        (no brand_id) at the user level are quarantined by _reload_legacy_jobs.
+        """
         from .auth import get_user_store
+        from .brand_registry import BrandRegistry
         from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
         _project_root = self._project_root
 
@@ -351,19 +379,34 @@ class Scheduler:
             user_id = user_record.get("user_id", "")
             if not user_id:
                 continue
+            # Enumerate active brands for this user
+            reg = BrandRegistry(user_id=user_id, project_root=_project_root)
+            brands = reg.list()
+            for brand in brands:
+                brand_id = brand["brand_id"]
+                ws = WorkspaceContext.for_brand(user_id, brand_id, _project_root)
+                ws_token = set_workspace(ws)
+                try:
+                    self._cleanup_stuck_running()
+                    self._cleanup_orphaned_durable_sessions()
+                    self._register_user_jobs(user_id, brand_id)
+                finally:
+                    reset_workspace(ws_token)
+
+            # Also reload legacy user-level jobs (no brand_id) → quarantine
             ws = WorkspaceContext.for_user(user_id, _project_root)
             ws_token = set_workspace(ws)
             try:
-                self._cleanup_stuck_running()
-                self._cleanup_orphaned_durable_sessions()
-                self._register_user_jobs(user_id)
+                self._register_user_jobs(user_id, "")  # brand_id="" → legacy
             finally:
                 reset_workspace(ws_token)
 
-    def _register_user_jobs(self, user_id: str) -> None:
-        """Load and register enabled scheduled jobs for a single user.
+    def _register_user_jobs(self, user_id: str, brand_id: str = "") -> None:
+        """Load and register enabled scheduled jobs for a single user+brand.
 
-        Must be called within that user's workspace context.
+        Must be called within that brand's (or user's for legacy) workspace context.
+        MB-02: jobs without a matching brand_id are skipped (or quarantined if
+        brand_id="" and the job has no brand_id — legacy).
         """
         jobs = self._store.load_jobs()
         now = datetime.now().astimezone()
@@ -373,6 +416,22 @@ class Scheduler:
                 continue
             # Defensive: skip jobs not owned by this user
             if job.get("user_id", "") != user_id:
+                continue
+            # MB-02: skip jobs whose brand_id doesn't match the current context.
+            # When brand_id="" (legacy reload), quarantine brandless jobs —
+            # they are pre-MB-02 and must not execute without brand ownership.
+            job_brand = job.get("brand_id", "")
+            if brand_id and job_brand != brand_id:
+                continue
+            if not brand_id and job_brand:
+                continue  # brand-scoped job — handled by brand reload
+            if not brand_id and not job_brand:
+                # Legacy brandless job — quarantine, do not register.
+                self._record_missed(job)
+                self._cleanup_durable_session(job)
+                job["enabled"] = False
+                job["next_run"] = ""
+                changed = True
                 continue
             try:
                 sched = job.get("schedule", {})
@@ -392,12 +451,12 @@ class Scheduler:
                 ap_job = self._aps.add_job(
                     self._run_job,
                     trigger=trigger,
-                    args=[user_id, job["id"]],
-                    id=_aps_id(user_id, job["id"]),
+                    args=[user_id, brand_id, job["id"]],
+                    id=_aps_id(user_id, brand_id, job["id"]),
                     replace_existing=True,
                 )
                 with self._lock:
-                    self._job_specs[_aps_id(user_id, job["id"])] = job
+                    self._job_specs[_aps_id(user_id, brand_id, job["id"])] = job
                     job["next_run"] = ap_job.next_run_time.isoformat() if ap_job.next_run_time else ""
             except Exception as e:
                 print(f"[Scheduler] โหลด job {job.get('id', '?')} ไม่ได้: {e}", flush=True)
@@ -407,11 +466,12 @@ class Scheduler:
             self._store.save_jobs(jobs)
 
     def _reload_legacy_jobs(self) -> None:
-        """Load and quarantine legacy ownerless jobs from the fallback store.
+        """Load and quarantine legacy ownerless/brandless jobs from the fallback store.
 
-        Pre-Stage-A jobs with no ``user_id`` are preserved for inspection and
-        manual migration, but they are NEVER registered into APScheduler and
-        NEVER executed.  They are disabled in-place so they cannot fire.
+        Pre-Stage-A jobs with no ``user_id`` and pre-MB-02 jobs with no
+        ``brand_id`` are preserved for inspection and manual migration, but
+        they are NEVER registered into APScheduler and NEVER executed.
+        They are disabled in-place so they cannot fire.
         """
         self._cleanup_stuck_running()
         self._cleanup_orphaned_durable_sessions()
@@ -421,8 +481,8 @@ class Scheduler:
             return
         changed = False
         for job in jobs:
-            if job.get("user_id", ""):
-                continue  # skip user-owned jobs — handled by _reload_all_users
+            if job.get("user_id", "") and job.get("brand_id", ""):
+                continue  # skip user+brand-owned jobs — handled by _reload_all_users
             if not job.get("enabled", True):
                 continue
             # Quarantine: disable and record a missed/error reason so the job
@@ -451,6 +511,8 @@ class Scheduler:
             "trigger": "auto",
             "flow": dict(job.get("flow", {})),
             "quick_brief": str(job.get("quick_brief", "")),
+            "user_id": job.get("user_id", ""),
+            "brand_id": job.get("brand_id", ""),
         }
         self._store.append_run(run_record)
 
@@ -556,7 +618,11 @@ class Scheduler:
             referenced.add(run.get("flow", {}).get("upload_session_id", ""))
         referenced.discard("")
 
-        storage_dir = self._resource_store.storage_dir.resolve()
+        storage_dir = None
+        try:
+            storage_dir = self._resource_store.storage_dir.resolve()
+        except (ValueError, Exception):
+            return  # no active brand context — cannot resolve storage dir
         if not storage_dir.exists():
             return
         for session_dir in storage_dir.iterdir():
@@ -637,10 +703,16 @@ class Scheduler:
             flow = self._clone_attachments(flow)
             durable_session_id = flow.get("upload_session_id", "")
 
-        # Capture the owning user_id from the current workspace context.
-        from .workspace_context import get_workspace
+        # MB-02: identity is derived EXCLUSIVELY from the verified workspace
+        # context — job_spec must never supply user_id or brand_id.  An
+        # authenticated user-only context (no brand_id) fails closed; no
+        # user-root scheduler file is created.
+        from .workspace_context import get_workspace, require_brand_context
         ws = get_workspace()
-        user_id = ws.user_id if ws else job_spec.get("user_id", "")
+        if ws is None or ws.brand_id is None:
+            raise ValueError("add_job requires an active brand context")
+        user_id = ws.user_id
+        brand_id = ws.brand_id
 
         job = {
             "id": job_id,
@@ -652,6 +724,7 @@ class Scheduler:
             "quick_brief": job_spec.get("quick_brief", ""),
             "durable_session_id": durable_session_id,
             "user_id": user_id,
+            "brand_id": brand_id,
             "created_at": datetime.now().astimezone().isoformat(),
             "last_run": "",
             "next_run": "",
@@ -669,8 +742,8 @@ class Scheduler:
                     ap_job = self._aps.add_job(
                         self._run_job,
                         trigger=trigger,
-                        args=[user_id, job_id],
-                        id=_aps_id(user_id, job_id),
+                        args=[user_id, brand_id, job_id],
+                        id=_aps_id(user_id, brand_id, job_id),
                         replace_existing=True,
                     )
                     job["next_run"] = ap_job.next_run_time.isoformat() if ap_job.next_run_time else ""
@@ -678,7 +751,7 @@ class Scheduler:
                 print(f"[Scheduler] add_job {job_id} ลง APScheduler ไม่ได้: {e}", flush=True)
 
         with self._lock:
-            self._job_specs[_aps_id(user_id, job_id)] = job
+            self._job_specs[_aps_id(user_id, brand_id, job_id)] = job
 
         return job_id
 
@@ -695,7 +768,8 @@ class Scheduler:
         new_jobs = [j for j in jobs if j["id"] != job_id]
         self._store.save_jobs(new_jobs)
         owner = job.get("user_id", "")
-        aps_id = _aps_id(owner, job_id)
+        brand = job.get("brand_id", "")
+        aps_id = _aps_id(owner, brand, job_id)
         try:
             self._aps.remove_job(aps_id)
         except Exception:
@@ -728,7 +802,8 @@ class Scheduler:
         self._store.save_jobs(jobs)
 
         owner = job.get("user_id", "")
-        aps_id = _aps_id(owner, job_id)
+        brand = job.get("brand_id", "")
+        aps_id = _aps_id(owner, brand, job_id)
 
         if enabled:
             try:
@@ -737,7 +812,7 @@ class Scheduler:
                     ap_job = self._aps.add_job(
                         self._run_job,
                         trigger=trigger,
-                        args=[owner, job_id],
+                        args=[owner, brand, job_id],
                         id=aps_id,
                         replace_existing=True,
                     )
@@ -760,7 +835,8 @@ class Scheduler:
         jobs = self._store.load_jobs()
         for j in jobs:
             owner = j.get("user_id", "")
-            aps_id = _aps_id(owner, j["id"])
+            brand = j.get("brand_id", "")
+            aps_id = _aps_id(owner, brand, j["id"])
             try:
                 ap_job = self._aps.get_job(aps_id)
                 if ap_job and ap_job.next_run_time:
@@ -769,13 +845,13 @@ class Scheduler:
                 pass
         return jobs
 
-    def job_exists(self, job_id: str, user_id: str | None = None) -> bool:
+    def job_exists(self, job_id: str, user_id: str | None = None, brand_id: str | None = None) -> bool:
         """ตรวจว่า job อยู่ใน APScheduler's in-memory jobstore หรือไม่.
 
         คืน True ถ้า job ลงทะเบียนแล้วและพร้อมยิง, False ถ้ายังไม่ได้ลงทะเบียน
         (เช่น add_job ล้มเหลวเงียบ) หรือ scheduler ไม่ได้รัน
         """
-        aps_id = _aps_id(user_id, job_id) if user_id else job_id
+        aps_id = _aps_id(user_id, brand_id or "", job_id) if user_id else job_id
         try:
             return self._aps.get_job(aps_id) is not None
         except Exception:
@@ -786,25 +862,24 @@ class Scheduler:
         owned by that user.  Fail closed: empty/None ``user_id`` returns ``[]``.
         Legacy runs with missing/empty ``user_id`` are never returned to an
         authenticated user.
+
+        MB-02: uses the active brand workspace context (set by AuthMiddleware
+        in the web API, or by the caller in tests).  Run history is brand-scoped.
         """
         if not user_id:
             return []
-        from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
-        _project_root = self._project_root
-        ws = WorkspaceContext.for_user(user_id, _project_root)
-        ws_token = set_workspace(ws)
-        try:
-            runs = self._store.load_runs(job_id=job_id, limit=limit)
-        finally:
-            reset_workspace(ws_token)
+        # Use the active workspace context — the store resolves brand-scoped paths.
+        runs = self._store.load_runs(job_id=job_id, limit=limit)
         return [r for r in runs if r.get("user_id", "") == user_id]
 
-    def get_running_status(self, user_id: str | None = None) -> dict[str, dict]:
+    def get_running_status(self, user_id: str | None = None, brand_id: str | None = None) -> dict[str, dict]:
         """คืนสถานะล่าสุดของ job ที่กำลังรันอยู่ { job_id: { status, message, agent, started_at } }
 
-        Fail closed: a non-empty ``user_id`` is required.  Returns only that
-        user's entries, translating internal APS IDs back to public ``job_id``
-        keys.  ``user_id=None`` or empty returns ``{}``.
+        Fail closed: a non-empty ``user_id`` is required.  When ``brand_id``
+        is provided, only entries matching BOTH user_id and brand_id are
+        returned (MB-02: A1 cannot see A2's live status).  Translates internal
+        APS IDs back to public ``job_id`` keys.  ``user_id=None`` or empty
+        returns ``{}``.
         """
         if not user_id:
             return {}
@@ -812,8 +887,11 @@ class Scheduler:
             result = {}
             for aps_id, status in self._running_status.items():
                 decoded = _decode_aps_id(aps_id)
-                if decoded[0] == user_id:
-                    result[decoded[1]] = status
+                if decoded[0] != user_id:
+                    continue
+                if brand_id is not None and decoded[1] != brand_id:
+                    continue
+                result[decoded[2]] = status
             return result
 
     def run_now(self, job_id: str, user_id: str | None = None) -> bool:
@@ -826,7 +904,9 @@ class Scheduler:
         if user_id is not None and job.get("user_id", "") != user_id:
             return False
 
-        self._executor.submit(self._run_job, job.get("user_id", ""), job_id, "manual")
+        self._executor.submit(
+            self._run_job, job.get("user_id", ""), job.get("brand_id", ""), job_id, "manual"
+        )
         return True
 
     def rerun_run(self, job_id: str, started_at: str, user_id: str | None = None) -> bool:
@@ -837,8 +917,16 @@ class Scheduler:
 
         คืน True ถ้าเจอ run record และยิงสำเร็จ, False ถ้าไม่เจอ
 
-        When ``user_id`` is provided, only allows rerun of runs owned by that user.
+        MB-02: requires the active brand context's brand_id to match the run
+        record's brand_id.  Brandless (legacy) records can never be rerun —
+        they are quarantine/history-only.  When ``user_id`` is provided, only
+        allows rerun of runs owned by that user.
         """
+        from .workspace_context import get_workspace
+        ws = get_workspace()
+        active_brand_id = ws.brand_id if (ws and ws.brand_id) else None
+        if active_brand_id is None:
+            return False  # no active brand — fail closed
         runs = self._store.load_runs(job_id=job_id, limit=200)
         run = next((r for r in runs if r.get("started_at") == started_at), None)
         if not run:
@@ -846,6 +934,9 @@ class Scheduler:
         # Ownership check: a run-history identifier must not be sufficient to
         # rerun another user's execution.
         if user_id is not None and run.get("user_id", "") != user_id:
+            return False
+        # MB-02: brand must match the active context; brandless records never rerun.
+        if run.get("brand_id", "") != active_brand_id:
             return False
         self._executor.submit(self._rerun_from_record, dict(run))
         return True
@@ -862,22 +953,25 @@ class Scheduler:
         # error ที่ไม่มี output = placeholder (พลาดเวลา/ถูกตัด) → update แทน append
         should_update_original = source_status == "error" and not source_run.get("output_files")
 
-        # Set per-user workspace context — use user_id from the run record.
+        # Set brand-scoped workspace context — use user_id + brand_id from the run record.
         from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
         from .auth import get_session_manager
         _project_root = self._project_root
         user_id = source_run.get("user_id", "")
+        brand_id = source_run.get("brand_id", "")
         ws_token = None
         session_token = None
-        if user_id:
-            ws = WorkspaceContext.for_user(user_id, _project_root)
-            ws_token = set_workspace(ws)
-            try:
-                session_token = get_session_manager().create_session(user_id)
-            except Exception:
-                session_token = None
+        # MB-02: brandless (legacy) records never rerun — fail closed.
+        if not user_id or not brand_id:
+            return  # fail closed — no owner or legacy brandless record
+        ws = WorkspaceContext.for_brand(user_id, brand_id, _project_root)
+        ws_token = set_workspace(ws)
+        try:
+            session_token = get_session_manager().create_session(user_id)
+        except Exception:
+            session_token = None
 
-        aps_id = _aps_id(user_id, source_job_id)
+        aps_id = _aps_id(user_id, brand_id, source_job_id)
         started_at = datetime.now().astimezone().isoformat()
         run_record = {
             "job_id": source_job_id,
@@ -892,6 +986,7 @@ class Scheduler:
             "flow": dict(source_run.get("flow", {})),
             "quick_brief": str(source_run.get("quick_brief", "")),
             "user_id": user_id,
+            "brand_id": brand_id,
         }
         with self._lock:
             self._running_status[aps_id] = {
@@ -916,7 +1011,7 @@ class Scheduler:
             flow = dict(source_run.get("flow", {}))
             quick_brief = str(source_run.get("quick_brief", ""))
             output_files, session_ts, error = self._execute_flow(
-                flow, quick_brief, aps_id, session_token=session_token
+                flow, quick_brief, aps_id, session_token=session_token, brand_id=brand_id
             )
 
             run_record["finished_at"] = datetime.now().astimezone().isoformat()
@@ -958,12 +1053,13 @@ class Scheduler:
         if ws_token is not None:
             reset_workspace(ws_token)
 
-    def _execute_flow(self, flow: dict, quick_brief: str, job_id_for_status: str, *, session_token: str | None = None) -> tuple[list[str], str, str]:
+    def _execute_flow(self, flow: dict, quick_brief: str, job_id_for_status: str, *, session_token: str | None = None, brand_id: str = "") -> tuple[list[str], str, str]:
         """ยิง flow ผ่าน HTTP SSE แล้ว parse events — ใช้ร่วมโดย _run_job และ _rerun_from_record.
 
         คืน (output_files, session_ts, error)
         """
         from .auth import SESSION_COOKIE_NAME
+        BRAND_COOKIE = "mktapp_brand"
         is_auto = bool(flow.get("is_auto", False))
         if is_auto:
             url = f"http://localhost:{self._web_port}/api/run_auto"
@@ -989,9 +1085,14 @@ class Scheduler:
         session_ts = ""
         error = ""
 
-        # Pass the per-user session cookie so the web server resolves the
-        # correct WorkspaceContext for this job's owner.
-        cookies = {SESSION_COOKIE_NAME: session_token} if session_token else None
+        # Pass the per-user session cookie + brand cookie so the web server
+        # resolves the correct brand-scoped WorkspaceContext for this job.
+        cookies = {}
+        if session_token:
+            cookies[SESSION_COOKIE_NAME] = session_token
+        if brand_id:
+            cookies[BRAND_COOKIE] = brand_id
+        cookies = cookies or None
 
         with httpx.Client(timeout=httpx.Timeout(self._job_timeout), cookies=cookies) as client:
             with client.stream("POST", url, json=payload, headers={"Accept": "text/event-stream"}) as res:
@@ -1038,12 +1139,16 @@ class Scheduler:
 
         return output_files, session_ts, error
 
-    def _run_job(self, user_id: str, job_id: str, trigger: str = "auto") -> None:
+    def _run_job(self, user_id: str, brand_id: str, job_id: str, trigger: str = "auto") -> None:
         """Execute a scheduled job.
 
-        Owner identity is received explicitly — never discovered by reading
-        a context-dependent store first.  The workspace is established
-        BEFORE any store access so the per-user store is used.
+        Owner identity (user_id + brand_id) is received explicitly — never
+        discovered by reading a context-dependent store first.  The brand
+        workspace is established BEFORE any store access so the brand-scoped
+        store is used.
+
+        MB-02: an empty ``brand_id`` fails closed — no execution, no
+        user-level fallback.  Archived brands also fail closed.
 
         Defense-in-depth: an empty ``user_id`` fails closed — no execution,
         no global fallback store access, no run record.
@@ -1051,22 +1156,32 @@ class Scheduler:
         if not user_id:
             print(f"[Scheduler] job {job_id} ไม่มี owner — ปฏิเสธการรัน", flush=True)
             return
+        if not brand_id:
+            print(f"[Scheduler] job {job_id} ไม่มี brand — ปฏิเสธการรัน (legacy quarantine)", flush=True)
+            return
 
         from .workspace_context import WorkspaceContext, set_workspace, reset_workspace
         from .auth import get_session_manager
+        from .brand_registry import BrandRegistry
         _project_root = self._project_root
         ws_token = None
         session_token = None
-        if user_id:
-            ws = WorkspaceContext.for_user(user_id, _project_root)
-            ws_token = set_workspace(ws)
-            # Create a short-lived session token for the HTTP call to the web server.
-            # This avoids persisting a reusable credential — the token is revoked
-            # after the job completes.
-            try:
-                session_token = get_session_manager().create_session(user_id)
-            except Exception:
-                session_token = None
+
+        # Verify brand still exists and is active (not archived)
+        reg = BrandRegistry(user_id=user_id, project_root=_project_root)
+        if reg.get(brand_id) is None:
+            print(f"[Scheduler] job {job_id} brand {brand_id} archived/missing — ปฏิเสธการรัน", flush=True)
+            return
+
+        ws = WorkspaceContext.for_brand(user_id, brand_id, _project_root)
+        ws_token = set_workspace(ws)
+        # Create a short-lived session token for the HTTP call to the web server.
+        # This avoids persisting a reusable credential — the token is revoked
+        # after the job completes.
+        try:
+            session_token = get_session_manager().create_session(user_id)
+        except Exception:
+            session_token = None
 
         # NOW load jobs from the per-user store (workspace is set)
         jobs = self._store.load_jobs()
@@ -1094,7 +1209,7 @@ class Scheduler:
                 reset_workspace(ws_token)
             return
 
-        aps_id = _aps_id(user_id, job_id)
+        aps_id = _aps_id(user_id, brand_id, job_id)
         started_at = datetime.now().astimezone().isoformat()
         run_record = {
             "job_id": job_id,
@@ -1109,6 +1224,7 @@ class Scheduler:
             "flow": dict(job.get("flow", {})),
             "quick_brief": str(job.get("quick_brief", "")),
             "user_id": user_id,
+            "brand_id": brand_id,
         }
         # mark as running in live status
         with self._lock:
@@ -1123,7 +1239,7 @@ class Scheduler:
             flow = dict(job.get("flow", {}))
             quick_brief = str(job.get("quick_brief", ""))
             output_files, session_ts, error = self._execute_flow(
-                flow, quick_brief, aps_id, session_token=session_token
+                flow, quick_brief, aps_id, session_token=session_token, brand_id=brand_id
             )
 
             run_record["finished_at"] = datetime.now().astimezone().isoformat()

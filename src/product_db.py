@@ -46,9 +46,14 @@ ALL_STATUSES = [STATUS_EMPTY, STATUS_PENDING, STATUS_NO_USABLE, STATUS_PROCESSIN
 
 
 def _project_root() -> Path:
-    """Resolve user-state root — per-user workspace when active, else project root."""
-    from .workspace_context import user_state_root
-    return user_state_root(Path(__file__).resolve().parent.parent)
+    """Resolve brand-scoped state root — requires an active brand context.
+
+    Products are brand-specific (MB-02): cache/{product_id}/ and data/{product_id}/
+    live beneath ``users/<user_id>/brands/<brand_id>/``.  Fails closed when no
+    verified brand context is active — never falls back to user root or project root.
+    """
+    from .workspace_context import brand_state_root
+    return brand_state_root(Path(__file__).resolve().parent.parent)
 
 
 def _product_dir(product_id: str) -> Path:

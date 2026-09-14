@@ -2,7 +2,10 @@
 
 Proves that timed APScheduler fire, missed-job callback, run-now, and
 restart/re-registration all preserve owner identity and write state
-only to the owning user's workspace.
+only to the owning user's brand workspace.
+
+MB-02: scheduler state is brand-scoped.  Tests establish a brand workspace
+context before scheduler operations.
 
 No real model/web/provider calls — _execute_flow is mocked.
 """
@@ -17,6 +20,7 @@ import pytest
 
 from src.scheduler import JsonJobStore, Scheduler
 from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
+from src.brand_registry import BrandRegistry
 
 
 # ---------------------------------------------------------------------------
@@ -43,10 +47,24 @@ def _register_users(tmp_path, user_ids, monkeypatch):
     users_path.write_text(json.dumps(records), encoding="utf-8")
 
 
-def _save_job_in_user_ws(store, tmp_path, user_id, job_id, enabled=True,
-                         schedule_value="2099-01-01T09:00:00"):
-    """Save a job directly into user_id's workspace store."""
-    ws = WorkspaceContext.for_user(user_id, tmp_path)
+def _make_brand(project_root, user_id, brand_name="TestBrand"):
+    """Create (or reuse) a brand for user_id and return its brand_id.
+
+    Does NOT set a workspace context — callers that need one must set it
+    explicitly (e.g. via ``_brand_ctx`` or ``WorkspaceContext.for_brand``).
+    """
+    reg = BrandRegistry(user_id=user_id, project_root=Path(project_root))
+    brands = reg.list()
+    if brands:
+        return brands[0]["brand_id"]
+    brand = reg.create(brand_name)
+    return brand["brand_id"]
+
+
+def _save_job_in_brand_ws(store, project_root, user_id, brand_id, job_id,
+                          enabled=True, schedule_value="2099-01-01T09:00:00"):
+    """Save a job directly into user_id/brand_id's brand workspace store."""
+    ws = WorkspaceContext.for_brand(user_id, brand_id, Path(project_root))
     token = set_workspace(ws)
     try:
         jobs = store.load_jobs()
@@ -59,6 +77,7 @@ def _save_job_in_user_ws(store, tmp_path, user_id, job_id, enabled=True,
             "flow": {"is_auto": False, "agents": ["content_creator"]},
             "quick_brief": "test",
             "user_id": user_id,
+            "brand_id": brand_id,
             "created_at": datetime.now().astimezone().isoformat(),
             "last_run": "", "next_run": "", "run_count": 0,
         })
@@ -79,7 +98,8 @@ def _scheduler(_store, tmp_path):
     return Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
 
 
-def _fake_execute_ok(self, flow, quick_brief, job_id_for_status, *, session_token=None):
+def _fake_execute_ok(self, flow, quick_brief, job_id_for_status, *, session_token=None,
+                     brand_id=""):
     return (["/tmp/out.md"], "ts1", "")
 
 
@@ -90,18 +110,20 @@ def _fake_execute_ok(self, flow, quick_brief, job_id_for_status, *, session_toke
 def test_identical_job_id_no_aps_collision(tmp_path, _store, monkeypatch):
     """User A and User B can use identical public job_id without APScheduler collision."""
     _register_users(tmp_path, ["user_aaa", "user_bbb"], monkeypatch)
+    bid_a = _make_brand(tmp_path, "user_aaa")
+    bid_b = _make_brand(tmp_path, "user_bbb")
 
     shared_jid = "job_collide1"
-    _save_job_in_user_ws(_store, tmp_path, "user_aaa", shared_jid)
-    _save_job_in_user_ws(_store, tmp_path, "user_bbb", shared_jid)
+    _save_job_in_brand_ws(_store, tmp_path, "user_aaa", bid_a, shared_jid)
+    _save_job_in_brand_ws(_store, tmp_path, "user_bbb", bid_b, shared_jid)
 
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
     sched.start()
 
     from src.scheduler import _aps_id
-    assert sched._aps.get_job(_aps_id("user_aaa", shared_jid)) is not None, \
+    assert sched._aps.get_job(_aps_id("user_aaa", bid_a, shared_jid)) is not None, \
         "User A's job must be in APScheduler"
-    assert sched._aps.get_job(_aps_id("user_bbb", shared_jid)) is not None, \
+    assert sched._aps.get_job(_aps_id("user_bbb", bid_b, shared_jid)) is not None, \
         "User B's job must be in APScheduler"
 
     sched.stop()
@@ -114,14 +136,16 @@ def test_identical_job_id_no_aps_collision(tmp_path, _store, monkeypatch):
 def test_timed_fire_finds_user_job(tmp_path, _store, monkeypatch):
     """Timed APScheduler fire can find and execute User A's job from a background thread."""
     _register_users(tmp_path, ["user_aaa"], monkeypatch)
+    bid_a = _make_brand(tmp_path, "user_aaa")
 
     future = (datetime.now().astimezone() + timedelta(seconds=2)).isoformat()
-    _save_job_in_user_ws(_store, tmp_path, "user_aaa", "job_fire1", schedule_value=future)
+    _save_job_in_brand_ws(_store, tmp_path, "user_aaa", bid_a, "job_fire1",
+                          schedule_value=future)
 
     fired = []
 
-    def _capture_run(user_id, job_id, trigger="auto"):
-        fired.append((user_id, job_id, trigger))
+    def _capture_run(user_id, brand_id, job_id, trigger="auto"):
+        fired.append((user_id, brand_id, job_id, trigger))
 
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
     with patch.object(sched, "_run_job", _capture_run):
@@ -131,7 +155,8 @@ def test_timed_fire_finds_user_job(tmp_path, _store, monkeypatch):
 
     assert len(fired) == 1, f"expected 1 fire, got {fired}"
     assert fired[0][0] == "user_aaa", "timed fire must carry owner identity"
-    assert fired[0][1] == "job_fire1"
+    assert fired[0][1] == bid_a, "timed fire must carry brand identity"
+    assert fired[0][2] == "job_fire1"
 
     sched.stop()
 
@@ -141,32 +166,35 @@ def test_timed_fire_finds_user_job(tmp_path, _store, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_timed_fire_writes_to_user_workspace(tmp_path, _store, monkeypatch):
-    """Timed fire writes run history/status only in User A workspace, not User B's."""
+    """Timed fire writes run history/status only in User A's brand workspace, not User B's."""
     _register_users(tmp_path, ["user_aaa", "user_bbb"], monkeypatch)
+    bid_a = _make_brand(tmp_path, "user_aaa")
+    bid_b = _make_brand(tmp_path, "user_bbb")
 
-    _save_job_in_user_ws(_store, tmp_path, "user_aaa", "job_hist1",
-                         schedule_value="2099-01-01T09:00:00")
+    _save_job_in_brand_ws(_store, tmp_path, "user_aaa", bid_a, "job_hist1",
+                          schedule_value="2099-01-01T09:00:00")
 
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
     sched.start()
 
     # Fire manually via _run_job (workspace is set inside _run_job)
     with patch.object(Scheduler, "_execute_flow", _fake_execute_ok):
-        sched._run_job("user_aaa", "job_hist1", trigger="auto")
+        sched._run_job("user_aaa", bid_a, "job_hist1", trigger="auto")
 
-    # User A's workspace has the run record
-    ws_a = WorkspaceContext.for_user("user_aaa", tmp_path)
+    # User A's brand workspace has the run record
+    ws_a = WorkspaceContext.for_brand("user_aaa", bid_a, tmp_path)
     token_a = set_workspace(ws_a)
     try:
         runs_a = _store.load_runs()
         assert len(runs_a) == 1, "User A must have 1 run record"
         assert runs_a[0]["job_id"] == "job_hist1"
         assert runs_a[0]["user_id"] == "user_aaa"
+        assert runs_a[0]["brand_id"] == bid_a
     finally:
         reset_workspace(token_a)
 
-    # User B's workspace has no run records
-    ws_b = WorkspaceContext.for_user("user_bbb", tmp_path)
+    # User B's brand workspace has no run records
+    ws_b = WorkspaceContext.for_brand("user_bbb", bid_b, tmp_path)
     token_b = set_workspace(ws_b)
     try:
         runs_b = _store.load_runs()
@@ -182,23 +210,25 @@ def test_timed_fire_writes_to_user_workspace(tmp_path, _store, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_on_job_missed_preserves_owner(tmp_path, _store, monkeypatch):
-    """_on_job_missed recovers owner from APS ID and records in that user's workspace."""
+    """_on_job_missed recovers owner from APS ID and records in that user's brand workspace."""
     _register_users(tmp_path, ["user_aaa", "user_bbb"], monkeypatch)
+    bid_a = _make_brand(tmp_path, "user_aaa")
+    bid_b = _make_brand(tmp_path, "user_bbb")
 
-    _save_job_in_user_ws(_store, tmp_path, "user_aaa", "job_miss1",
-                         schedule_value="2099-01-01T09:00:00")
+    _save_job_in_brand_ws(_store, tmp_path, "user_aaa", bid_a, "job_miss1",
+                          schedule_value="2099-01-01T09:00:00")
 
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
     sched.start()
 
     from src.scheduler import _aps_id
     event = MagicMock()
-    event.job_id = _aps_id("user_aaa", "job_miss1")
+    event.job_id = _aps_id("user_aaa", bid_a, "job_miss1")
 
     sched._on_job_missed(event)
 
-    # User A's workspace has the missed run record
-    ws_a = WorkspaceContext.for_user("user_aaa", tmp_path)
+    # User A's brand workspace has the missed run record
+    ws_a = WorkspaceContext.for_brand("user_aaa", bid_a, tmp_path)
     token_a = set_workspace(ws_a)
     try:
         runs_a = _store.load_runs()
@@ -208,8 +238,8 @@ def test_on_job_missed_preserves_owner(tmp_path, _store, monkeypatch):
     finally:
         reset_workspace(token_a)
 
-    # User B's workspace has nothing
-    ws_b = WorkspaceContext.for_user("user_bbb", tmp_path)
+    # User B's brand workspace has nothing
+    ws_b = WorkspaceContext.for_brand("user_bbb", bid_b, tmp_path)
     token_b = set_workspace(ws_b)
     try:
         runs_b = _store.load_runs()
@@ -241,20 +271,23 @@ def test_on_job_missed_malformed_aps_id_fails_closed(tmp_path, _store, monkeypat
 # ---------------------------------------------------------------------------
 
 def test_restart_reloads_multiple_users(tmp_path, _store, monkeypatch):
-    """Restart reloads enabled jobs for multiple registered users."""
+    """Restart reloads enabled jobs for multiple registered users' brands."""
     _register_users(tmp_path, ["user_aaa", "user_bbb"], monkeypatch)
-    _save_job_in_user_ws(_store, tmp_path, "user_aaa", "job_r1",
-                         schedule_value="2099-01-01T09:00:00")
-    _save_job_in_user_ws(_store, tmp_path, "user_bbb", "job_r2",
-                         schedule_value="2099-01-01T10:00:00")
+    bid_a = _make_brand(tmp_path, "user_aaa")
+    bid_b = _make_brand(tmp_path, "user_bbb")
+
+    _save_job_in_brand_ws(_store, tmp_path, "user_aaa", bid_a, "job_r1",
+                          schedule_value="2099-01-01T09:00:00")
+    _save_job_in_brand_ws(_store, tmp_path, "user_bbb", bid_b, "job_r2",
+                          schedule_value="2099-01-01T10:00:00")
 
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
     sched.start()
 
     from src.scheduler import _aps_id
-    assert sched._aps.get_job(_aps_id("user_aaa", "job_r1")) is not None, \
+    assert sched._aps.get_job(_aps_id("user_aaa", bid_a, "job_r1")) is not None, \
         "User A's job must be reloaded"
-    assert sched._aps.get_job(_aps_id("user_bbb", "job_r2")) is not None, \
+    assert sched._aps.get_job(_aps_id("user_bbb", bid_b, "job_r2")) is not None, \
         "User B's job must be reloaded"
 
     sched.stop()
@@ -265,35 +298,41 @@ def test_restart_reloads_multiple_users(tmp_path, _store, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_restart_ignores_unregistered_user_dir(tmp_path, _store, monkeypatch):
-    """Restart must not load jobs from an arbitrary unregistered users/<name> directory."""
+    """Restart must not load jobs from an arbitrary unregistered user's brand directory."""
     _register_users(tmp_path, ["user_aaa"], monkeypatch)
 
-    # Create an unregistered user's workspace with a job
-    _save_job_in_user_ws(_store, tmp_path, "user_hacker", "job_hack1",
-                         schedule_value="2099-01-01T09:00:00")
+    # Create an unregistered user's brand + job (BrandRegistry does not require
+    # the user to be in UserStore, but the scheduler enumerates only registered
+    # users, so this brand is never touched).
+    bid_hacker = _make_brand(tmp_path, "user_hacker")
+    _save_job_in_brand_ws(_store, tmp_path, "user_hacker", bid_hacker, "job_hack1",
+                          schedule_value="2099-01-01T09:00:00")
 
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
     sched.start()
 
     from src.scheduler import _aps_id
     # The hacker's job must NOT be in APScheduler
-    assert sched._aps.get_job(_aps_id("user_hacker", "job_hack1")) is None, \
+    assert sched._aps.get_job(_aps_id("user_hacker", bid_hacker, "job_hack1")) is None, \
         "Unregistered user's job must not be loaded"
 
     sched.stop()
 
 
 # ---------------------------------------------------------------------------
-# 7. Restart cleanup executes separately per user
+# 7. Restart cleanup executes separately per user/brand
 # ---------------------------------------------------------------------------
 
 def test_restart_cleanup_per_user(tmp_path, _store, monkeypatch):
-    """Restart cleanup (stuck running) executes separately per user workspace."""
+    """Restart cleanup (stuck running) executes separately per brand workspace."""
     _register_users(tmp_path, ["user_aaa", "user_bbb"], monkeypatch)
+    bid_a = _make_brand(tmp_path, "user_aaa")
+    bid_b = _make_brand(tmp_path, "user_bbb")
 
-    # Save stuck runs for both users
-    for uid, jid in [("user_aaa", "job_stuck_a"), ("user_bbb", "job_stuck_b")]:
-        ws = WorkspaceContext.for_user(uid, tmp_path)
+    # Save stuck runs for both users in their brand workspaces
+    for uid, bid, jid in [("user_aaa", bid_a, "job_stuck_a"),
+                          ("user_bbb", bid_b, "job_stuck_b")]:
+        ws = WorkspaceContext.for_brand(uid, bid, tmp_path)
         token = set_workspace(ws)
         try:
             _store.append_run({
@@ -302,6 +341,7 @@ def test_restart_cleanup_per_user(tmp_path, _store, monkeypatch):
                 "finished_at": "", "status": "running",
                 "flow": {}, "quick_brief": "", "output_files": [],
                 "error": "", "trigger": "auto", "user_id": uid,
+                "brand_id": bid,
             })
         finally:
             reset_workspace(token)
@@ -310,8 +350,8 @@ def test_restart_cleanup_per_user(tmp_path, _store, monkeypatch):
     sched.start()
 
     # Both users' stuck runs should be marked as error
-    for uid in ["user_aaa", "user_bbb"]:
-        ws = WorkspaceContext.for_user(uid, tmp_path)
+    for uid, bid in [("user_aaa", bid_a), ("user_bbb", bid_b)]:
+        ws = WorkspaceContext.for_brand(uid, bid, tmp_path)
         token = set_workspace(ws)
         try:
             runs = _store.load_runs()
@@ -328,21 +368,22 @@ def test_restart_cleanup_per_user(tmp_path, _store, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_run_now_preserves_owner(tmp_path, _store, monkeypatch):
-    """run_now passes owner identity to _run_job."""
+    """run_now passes owner + brand identity to _run_job."""
     _register_users(tmp_path, ["user_aaa"], monkeypatch)
+    bid_a = _make_brand(tmp_path, "user_aaa")
 
-    _save_job_in_user_ws(_store, tmp_path, "user_aaa", "job_run1",
-                         schedule_value="2099-01-01T09:00:00")
+    _save_job_in_brand_ws(_store, tmp_path, "user_aaa", bid_a, "job_run1",
+                          schedule_value="2099-01-01T09:00:00")
 
     fired = []
 
-    def _capture_run(user_id, job_id, trigger="auto"):
-        fired.append((user_id, job_id, trigger))
+    def _capture_run(user_id, brand_id, job_id, trigger="auto"):
+        fired.append((user_id, brand_id, job_id, trigger))
 
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
     sched.start()
 
-    ws = WorkspaceContext.for_user("user_aaa", tmp_path)
+    ws = WorkspaceContext.for_brand("user_aaa", bid_a, tmp_path)
     token = set_workspace(ws)
     try:
         with patch.object(sched, "_run_job", _capture_run):
@@ -353,7 +394,8 @@ def test_run_now_preserves_owner(tmp_path, _store, monkeypatch):
     sched._executor.shutdown(wait=True)
     assert len(fired) == 1
     assert fired[0][0] == "user_aaa", "run_now must pass owner to _run_job"
-    assert fired[0][1] == "job_run1"
+    assert fired[0][1] == bid_a, "run_now must pass brand_id to _run_job"
+    assert fired[0][2] == "job_run1"
 
     sched.stop()
 
@@ -363,14 +405,16 @@ def test_run_now_preserves_owner(tmp_path, _store, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_rerun_preserves_owner_workspace(tmp_path, _store, monkeypatch):
-    """Rerun executes inside the original owning user's workspace."""
+    """Rerun executes inside the original owning user's brand workspace."""
     _register_users(tmp_path, ["user_aaa", "user_bbb"], monkeypatch)
+    bid_a = _make_brand(tmp_path, "user_aaa")
+    bid_b = _make_brand(tmp_path, "user_bbb")
 
     sched = Scheduler(project_root=tmp_path, web_port=9999, job_store=_store)
     sched.start()
 
-    # User A has a run record
-    ws = WorkspaceContext.for_user("user_aaa", tmp_path)
+    # User A has a run record in A's brand store
+    ws = WorkspaceContext.for_brand("user_aaa", bid_a, tmp_path)
     token = set_workspace(ws)
     try:
         _store.append_run({
@@ -381,21 +425,21 @@ def test_rerun_preserves_owner_workspace(tmp_path, _store, monkeypatch):
             "flow": {"is_auto": True, "agents": ["content_creator"], "content_count": 1},
             "quick_brief": "A brief",
             "output_files": [], "error": "", "trigger": "auto",
-            "user_id": "user_aaa",
+            "user_id": "user_aaa", "brand_id": bid_a,
         })
     finally:
         reset_workspace(token)
 
-    # User B cannot rerun (B's workspace has no such run)
-    ws = WorkspaceContext.for_user("user_bbb", tmp_path)
+    # User B cannot rerun (B's brand store has no such run)
+    ws = WorkspaceContext.for_brand("user_bbb", bid_b, tmp_path)
     token = set_workspace(ws)
     try:
         assert sched.rerun_run("job_re1", "2026-09-11T10:00:00+07:00", user_id="user_bbb") is False
     finally:
         reset_workspace(token)
 
-    # User A can rerun — executes in A's workspace
-    ws = WorkspaceContext.for_user("user_aaa", tmp_path)
+    # User A can rerun — executes in A's brand workspace
+    ws = WorkspaceContext.for_brand("user_aaa", bid_a, tmp_path)
     token = set_workspace(ws)
     try:
         with patch.object(Scheduler, "_execute_flow", _fake_execute_ok):
@@ -404,8 +448,8 @@ def test_rerun_preserves_owner_workspace(tmp_path, _store, monkeypatch):
     finally:
         reset_workspace(token)
 
-    # New run record in User A's workspace
-    ws = WorkspaceContext.for_user("user_aaa", tmp_path)
+    # New run record in User A's brand workspace
+    ws = WorkspaceContext.for_brand("user_aaa", bid_a, tmp_path)
     token = set_workspace(ws)
     try:
         runs = _store.load_runs()
@@ -413,11 +457,12 @@ def test_rerun_preserves_owner_workspace(tmp_path, _store, monkeypatch):
         rerun = [r for r in runs if r.get("trigger") == "rerun"]
         assert len(rerun) == 1
         assert rerun[0]["user_id"] == "user_aaa"
+        assert rerun[0]["brand_id"] == bid_a
     finally:
         reset_workspace(token)
 
-    # User B's workspace still empty
-    ws = WorkspaceContext.for_user("user_bbb", tmp_path)
+    # User B's brand workspace still empty
+    ws = WorkspaceContext.for_brand("user_bbb", bid_b, tmp_path)
     token = set_workspace(ws)
     try:
         assert len(_store.load_runs()) == 0
@@ -441,7 +486,7 @@ def test_ownerless_legacy_job_registered_after_restart(tmp_path, _store, monkeyp
         "schedule_type": "one_time",
         "schedule": {"type": "date", "value": "2099-01-01T09:00:00"},
         "flow": {"is_auto": False, "agents": ["content_creator"]},
-        "quick_brief": "legacy", "user_id": "",
+        "quick_brief": "legacy", "user_id": "", "brand_id": "",
         "created_at": "2026-09-11T00:00:00", "last_run": "", "next_run": "", "run_count": 0,
     }])
 
@@ -465,7 +510,7 @@ def test_run_job_empty_user_id_fails_closed(tmp_path, _store, monkeypatch):
         "schedule_type": "one_time",
         "schedule": {"type": "date", "value": "2099-01-01T09:00:00"},
         "flow": {"is_auto": False, "agents": ["content_creator"]},
-        "quick_brief": "legacy", "user_id": "",
+        "quick_brief": "legacy", "user_id": "", "brand_id": "",
         "created_at": "2026-09-11T00:00:00", "last_run": "", "next_run": "", "run_count": 0,
     }])
 
@@ -477,7 +522,7 @@ def test_run_job_empty_user_id_fails_closed(tmp_path, _store, monkeypatch):
         return ([], "ts", "")
 
     with patch.object(Scheduler, "_execute_flow", _capture_execute):
-        sched._run_job("", "job_legacy_2", trigger="auto")
+        sched._run_job("", "", "job_legacy_2", trigger="auto")
 
     assert len(execute_called) == 0, "_run_job with empty user_id must NOT call _execute_flow"
     # No run record should be created by _run_job (quarantine is separate)
@@ -495,7 +540,7 @@ def test_ownerless_legacy_job_quarantined_after_restart(tmp_path, _store, monkey
         "schedule_type": "recurring",
         "schedule": {"type": "interval", "value": "1h"},
         "flow": {"is_auto": False, "agents": ["content_creator"]},
-        "quick_brief": "legacy", "user_id": "",
+        "quick_brief": "legacy", "user_id": "", "brand_id": "",
         "created_at": "2026-09-11T00:00:00", "last_run": "", "next_run": "", "run_count": 0,
     }])
 
@@ -514,12 +559,15 @@ def test_ownerless_legacy_job_quarantined_after_restart(tmp_path, _store, monkey
 
 
 def test_owned_jobs_still_reload_after_legacy_quarantine(tmp_path, _store, monkeypatch):
-    """Owned User A/B jobs still reload normally after legacy quarantine."""
+    """Owned User A/B brand jobs still reload normally after legacy quarantine."""
     _register_users(tmp_path, ["user_aaa", "user_bbb"], monkeypatch)
-    _save_job_in_user_ws(_store, tmp_path, "user_aaa", "job_a1",
-                         schedule_value="2099-01-01T09:00:00")
-    _save_job_in_user_ws(_store, tmp_path, "user_bbb", "job_b1",
-                         schedule_value="2099-01-01T10:00:00")
+    bid_a = _make_brand(tmp_path, "user_aaa")
+    bid_b = _make_brand(tmp_path, "user_bbb")
+
+    _save_job_in_brand_ws(_store, tmp_path, "user_aaa", bid_a, "job_a1",
+                          schedule_value="2099-01-01T09:00:00")
+    _save_job_in_brand_ws(_store, tmp_path, "user_bbb", bid_b, "job_b1",
+                          schedule_value="2099-01-01T10:00:00")
 
     # Also add an ownerless legacy job in fallback
     _store.save_jobs([{
@@ -527,7 +575,7 @@ def test_owned_jobs_still_reload_after_legacy_quarantine(tmp_path, _store, monke
         "schedule_type": "one_time",
         "schedule": {"type": "date", "value": "2099-01-01T09:00:00"},
         "flow": {"is_auto": False, "agents": ["content_creator"]},
-        "quick_brief": "legacy", "user_id": "",
+        "quick_brief": "legacy", "user_id": "", "brand_id": "",
         "created_at": "2026-09-11T00:00:00", "last_run": "", "next_run": "", "run_count": 0,
     }])
 
@@ -535,8 +583,8 @@ def test_owned_jobs_still_reload_after_legacy_quarantine(tmp_path, _store, monke
     sched.start()
 
     from src.scheduler import _aps_id
-    assert sched._aps.get_job(_aps_id("user_aaa", "job_a1")) is not None, "A's job must reload"
-    assert sched._aps.get_job(_aps_id("user_bbb", "job_b1")) is not None, "B's job must reload"
+    assert sched._aps.get_job(_aps_id("user_aaa", bid_a, "job_a1")) is not None, "A's job must reload"
+    assert sched._aps.get_job(_aps_id("user_bbb", bid_b, "job_b1")) is not None, "B's job must reload"
     assert sched._aps.get_job("job_legacy_4") is None, "legacy job must NOT reload"
 
     sched.stop()
@@ -547,7 +595,7 @@ def test_owned_jobs_still_reload_after_legacy_quarantine(tmp_path, _store, monke
 # ===========================================================================
 
 def test_scheduler_enumerates_users_from_its_own_project_root(tmp_path):
-    """Scheduler(root_A) enumerates only root_A's registered users, not root_B's."""
+    """Scheduler(root_A) enumerates only root_A's registered users' brands, not root_B's."""
     import src.auth as auth_mod
 
     # Reset global singleton to ensure clean state
@@ -569,16 +617,19 @@ def test_scheduler_enumerates_users_from_its_own_project_root(tmp_path):
         {"user_id": "user_b1", "username": "b1", "password_hash": "x", "created_at": "2026"},
     ]), encoding="utf-8")
 
-    # Save a job for each user in their respective workspaces
+    # Create brands + save a job for each user in their respective brand workspaces
     store_a = JsonJobStore(root_a / "fb_jobs.json", root_a / "fb_runs.json")
-    _save_job_in_user_ws(store_a, root_a, "user_a1", "job_a1x",
-                         schedule_value="2099-01-01T09:00:00")
-    _save_job_in_user_ws(store_a, root_a, "user_a2", "job_a2x",
-                         schedule_value="2099-01-01T09:00:00")
+    bid_a1 = _make_brand(root_a, "user_a1")
+    bid_a2 = _make_brand(root_a, "user_a2")
+    _save_job_in_brand_ws(store_a, root_a, "user_a1", bid_a1, "job_a1x",
+                          schedule_value="2099-01-01T09:00:00")
+    _save_job_in_brand_ws(store_a, root_a, "user_a2", bid_a2, "job_a2x",
+                          schedule_value="2099-01-01T09:00:00")
 
     store_b = JsonJobStore(root_b / "fb_jobs.json", root_b / "fb_runs.json")
-    _save_job_in_user_ws(store_b, root_b, "user_b1", "job_b1x",
-                         schedule_value="2099-01-01T09:00:00")
+    bid_b1 = _make_brand(root_b, "user_b1")
+    _save_job_in_brand_ws(store_b, root_b, "user_b1", bid_b1, "job_b1x",
+                          schedule_value="2099-01-01T09:00:00")
 
     # Create a fake filesystem user dir in root_a (not registered)
     (root_a / "users" / "user_fake").mkdir(parents=True, exist_ok=True)
@@ -588,10 +639,10 @@ def test_scheduler_enumerates_users_from_its_own_project_root(tmp_path):
     sched_a.start()
 
     from src.scheduler import _aps_id
-    assert sched_a._aps.get_job(_aps_id("user_a1", "job_a1x")) is not None, "A1's job must reload"
-    assert sched_a._aps.get_job(_aps_id("user_a2", "job_a2x")) is not None, "A2's job must reload"
-    assert sched_a._aps.get_job(_aps_id("user_b1", "job_b1x")) is None, "B1's job must NOT be in root_a scheduler"
-    assert sched_a._aps.get_job(_aps_id("user_fake", "any")) is None, "fake user must NOT be loaded"
+    assert sched_a._aps.get_job(_aps_id("user_a1", bid_a1, "job_a1x")) is not None, "A1's job must reload"
+    assert sched_a._aps.get_job(_aps_id("user_a2", bid_a2, "job_a2x")) is not None, "A2's job must reload"
+    assert sched_a._aps.get_job(_aps_id("user_b1", bid_b1, "job_b1x")) is None, "B1's job must NOT be in root_a scheduler"
+    assert sched_a._aps.get_job(_aps_id("user_fake", "brand_fake", "any")) is None, "fake user must NOT be loaded"
 
     sched_a.stop()
 
@@ -599,8 +650,8 @@ def test_scheduler_enumerates_users_from_its_own_project_root(tmp_path):
     sched_b = Scheduler(project_root=root_b, web_port=9999, job_store=store_b)
     sched_b.start()
 
-    assert sched_b._aps.get_job(_aps_id("user_b1", "job_b1x")) is not None, "B1's job must reload"
-    assert sched_b._aps.get_job(_aps_id("user_a1", "job_a1x")) is None, "A1's job must NOT be in root_b scheduler"
+    assert sched_b._aps.get_job(_aps_id("user_b1", bid_b1, "job_b1x")) is not None, "B1's job must reload"
+    assert sched_b._aps.get_job(_aps_id("user_a1", bid_a1, "job_a1x")) is None, "A1's job must NOT be in root_b scheduler"
 
     sched_b.stop()
 
@@ -613,7 +664,7 @@ def test_get_running_status_none_returns_empty(_scheduler):
     """get_running_status(user_id=None) must return {} — fail closed."""
     from src.scheduler import _aps_id
     with _scheduler._lock:
-        _scheduler._running_status[_aps_id("user_aaa", "job_x")] = {
+        _scheduler._running_status[_aps_id("user_aaa", "brand_x", "job_x")] = {
             "status": "running", "message": "x", "agent": "", "started_at": "ts",
         }
     assert _scheduler.get_running_status(user_id=None) == {}, "None user_id must return empty"
@@ -624,10 +675,10 @@ def test_get_running_status_per_user_isolated(_scheduler):
     """User A sees only A's status; User B sees only B's; same job_id independent."""
     from src.scheduler import _aps_id
     with _scheduler._lock:
-        _scheduler._running_status[_aps_id("user_aaa", "job_shared")] = {
+        _scheduler._running_status[_aps_id("user_aaa", "brand_a", "job_shared")] = {
             "status": "running", "message": "A running", "agent": "a", "started_at": "ts1",
         }
-        _scheduler._running_status[_aps_id("user_bbb", "job_shared")] = {
+        _scheduler._running_status[_aps_id("user_bbb", "brand_b", "job_shared")] = {
             "status": "running", "message": "B running", "agent": "b", "started_at": "ts2",
         }
 
@@ -647,64 +698,95 @@ def test_get_running_status_per_user_isolated(_scheduler):
 # ===========================================================================
 
 def test_get_run_log_user_filtered(_scheduler, _store, tmp_path):
-    """get_run_log returns only the requesting user's run records."""
-    from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
-    _project_root = Path(_scheduler._project_root)
+    """get_run_log returns only the requesting user's run records (brand-scoped)."""
+    bid_a = _make_brand(tmp_path, "user_aaa")
+    bid_b = _make_brand(tmp_path, "user_bbb")
 
-    # User A has a run
-    ws = WorkspaceContext.for_user("user_aaa", _project_root)
+    # User A has a run in A's brand store
+    ws = WorkspaceContext.for_brand("user_aaa", bid_a, tmp_path)
     token = set_workspace(ws)
     try:
         _store.append_run({
             "job_id": "job_log_a", "job_name": "A", "started_at": "2026-09-11T10:00:00+07:00",
             "finished_at": "2026-09-11T10:01:00+07:00", "status": "success",
             "flow": {}, "quick_brief": "", "output_files": [], "error": "",
-            "trigger": "auto", "user_id": "user_aaa",
+            "trigger": "auto", "user_id": "user_aaa", "brand_id": bid_a,
         })
     finally:
         reset_workspace(token)
 
-    # User B has a run
-    ws = WorkspaceContext.for_user("user_bbb", _project_root)
+    # User B has a run in B's brand store
+    ws = WorkspaceContext.for_brand("user_bbb", bid_b, tmp_path)
     token = set_workspace(ws)
     try:
         _store.append_run({
             "job_id": "job_log_b", "job_name": "B", "started_at": "2026-09-11T11:00:00+07:00",
             "finished_at": "2026-09-11T11:01:00+07:00", "status": "success",
             "flow": {}, "quick_brief": "", "output_files": [], "error": "",
-            "trigger": "auto", "user_id": "user_bbb",
+            "trigger": "auto", "user_id": "user_bbb", "brand_id": bid_b,
         })
     finally:
         reset_workspace(token)
 
-    # User A sees only A's runs
-    runs_a = _scheduler.get_run_log(user_id="user_aaa")
-    assert len(runs_a) == 1
-    assert runs_a[0]["user_id"] == "user_aaa"
-    assert runs_a[0]["job_id"] == "job_log_a"
+    # User A sees only A's runs (within A's brand context)
+    ws = WorkspaceContext.for_brand("user_aaa", bid_a, tmp_path)
+    token = set_workspace(ws)
+    try:
+        runs_a = _scheduler.get_run_log(user_id="user_aaa")
+        assert len(runs_a) == 1
+        assert runs_a[0]["user_id"] == "user_aaa"
+        assert runs_a[0]["job_id"] == "job_log_a"
+    finally:
+        reset_workspace(token)
 
-    # User B sees only B's runs
-    runs_b = _scheduler.get_run_log(user_id="user_bbb")
-    assert len(runs_b) == 1
-    assert runs_b[0]["user_id"] == "user_bbb"
-    assert runs_b[0]["job_id"] == "job_log_b"
+    # User B sees only B's runs (within B's brand context)
+    ws = WorkspaceContext.for_brand("user_bbb", bid_b, tmp_path)
+    token = set_workspace(ws)
+    try:
+        runs_b = _scheduler.get_run_log(user_id="user_bbb")
+        assert len(runs_b) == 1
+        assert runs_b[0]["user_id"] == "user_bbb"
+        assert runs_b[0]["job_id"] == "job_log_b"
+    finally:
+        reset_workspace(token)
 
     # No user identity → fail closed
     assert _scheduler.get_run_log(user_id=None) == []
     assert _scheduler.get_run_log(user_id="") == []
 
 
-def test_get_run_log_legacy_missing_owner_not_visible(_scheduler, _store):
+def test_get_run_log_legacy_missing_owner_not_visible(_scheduler, _store, tmp_path):
     """Legacy run record with missing user_id must not be returned to any authenticated user."""
-    _store.append_run({
-        "job_id": "job_legacy_log", "job_name": "legacy",
-        "started_at": "2026-09-11T10:00:00+07:00",
-        "finished_at": "2026-09-11T10:01:00+07:00", "status": "success",
-        "flow": {}, "quick_brief": "", "output_files": [], "error": "",
-        "trigger": "auto", "user_id": "",
-    })
+    bid_a = _make_brand(tmp_path, "user_aaa")
+    bid_b = _make_brand(tmp_path, "user_bbb")
 
-    runs_a = _scheduler.get_run_log(user_id="user_aaa")
-    runs_b = _scheduler.get_run_log(user_id="user_bbb")
+    # An ownerless legacy run lands in A's brand store with no user_id — it must
+    # be filtered out by the user_id ownership check.
+    ws = WorkspaceContext.for_brand("user_aaa", bid_a, tmp_path)
+    token = set_workspace(ws)
+    try:
+        _store.append_run({
+            "job_id": "job_legacy_log", "job_name": "legacy",
+            "started_at": "2026-09-11T10:00:00+07:00",
+            "finished_at": "2026-09-11T10:01:00+07:00", "status": "success",
+            "flow": {}, "quick_brief": "", "output_files": [], "error": "",
+            "trigger": "auto", "user_id": "", "brand_id": "",
+        })
+    finally:
+        reset_workspace(token)
+
+    ws = WorkspaceContext.for_brand("user_aaa", bid_a, tmp_path)
+    token = set_workspace(ws)
+    try:
+        runs_a = _scheduler.get_run_log(user_id="user_aaa")
+    finally:
+        reset_workspace(token)
     assert len(runs_a) == 0, "legacy ownerless run must not be visible to A"
+
+    ws = WorkspaceContext.for_brand("user_bbb", bid_b, tmp_path)
+    token = set_workspace(ws)
+    try:
+        runs_b = _scheduler.get_run_log(user_id="user_bbb")
+    finally:
+        reset_workspace(token)
     assert len(runs_b) == 0, "legacy ownerless run must not be visible to B"

@@ -23,6 +23,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("brand_ws")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 os.environ.setdefault("OPENROUTER_API_KEY", "dummy")

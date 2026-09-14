@@ -57,22 +57,40 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 from src.workspace_context import user_state_root as _user_state_root
+from src.workspace_context import get_workspace as _get_ws
+
+def _state_root() -> Path:
+    """Brand-scoped root — requires an active verified brand context.
+
+    MB-02: products/output/cache/data/brand-files are brand-scoped beneath
+    ``users/<uid>/brands/<brand_id>/``.  An authenticated user-only context
+    (workspace set, no brand_id) must NEVER reach user-root business state —
+    fail closed.  Only a true no-workspace CLI context (``get_workspace()``
+    is None) retains the project-root fallback for CLI/test backward compat.
+    """
+    ws = _get_ws()
+    if ws is not None and ws.brand_id is not None:
+        from src.workspace_context import brand_state_root
+        return brand_state_root()
+    if ws is None:
+        return _user_state_root(PROJECT_ROOT)
+    raise ValueError("brand-scoped state requires an active brand context")
 
 def DATA_DIR() -> Path:
-    """Per-user data dir — resolves via workspace context."""
-    return _user_state_root(PROJECT_ROOT) / "data"
+    """Brand-scoped data dir — resolves via workspace context."""
+    return _state_root() / "data"
 
 def OUTPUT_DIR() -> Path:
-    """Per-user output dir — resolves via workspace context."""
-    return _user_state_root(PROJECT_ROOT) / "output"
+    """Brand-scoped output dir — resolves via workspace context."""
+    return _state_root() / "output"
 
 def BRAND_DIR() -> Path:
-    """Per-user brand dir — resolves via workspace context."""
-    return _user_state_root(PROJECT_ROOT) / "brand"
+    """Brand-scoped brand dir — resolves via workspace context."""
+    return _state_root() / "brand"
 
 def CACHE_DIR() -> Path:
-    """Per-user cache dir — resolves via workspace context."""
-    return _user_state_root(PROJECT_ROOT) / "cache"
+    """Brand-scoped cache dir — resolves via workspace context."""
+    return _state_root() / "cache"
 
 app = FastAPI(title="MKTApp Viewer")
 
@@ -258,6 +276,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(AuthMiddleware)
+
 
 # Central conflict cache — ตรวจครั้งเดียวตอน brand/agent settings เปลี่ยน
 # ทุก UI ดึงจาก GET /api/conflicts แทนการตรวจใหม่ทุกครั้ง
@@ -516,11 +535,30 @@ AGENT_DEPENDENCIES = {
 AGENT_ORDER = ["product_spec", "competitor_analysis", "campaign_strategy", "content_creator"]
 
 
-def _get_orchestrator(brand_dir: str | Path | None = None) -> Orchestrator:
-    """Factory for a fresh Orchestrator bound to a specific brand_dir.
+def _require_brand_context() -> JSONResponse | None:
+    """Ensure an active brand context exists for brand-scoped run endpoints.
 
-    A single-agent run should not share mutable product/result state with
-    other runs, so we create a new instance per request.
+    MB-02 security: run endpoints must not execute without a verified active
+    brand.  Returns a 4xx JSONResponse if no brand is active, else None.
+    The browser selects brand_id (revalidated by AuthMiddleware); it must
+    never choose a filesystem path.
+    """
+    ws = _get_ws()
+    if ws is None or ws.brand_id is None:
+        return JSONResponse(
+            {"error": "active brand required — select a brand before running"},
+            status_code=403,
+        )
+    return None
+
+
+def _get_orchestrator(brand_dir: str | Path | None = None) -> Orchestrator:
+    """Factory for a fresh Orchestrator.
+
+    MB-02: brand state is server-derived from the active brand context via
+    ``_resolve_brand_dir``.  The ``brand_dir`` parameter is accepted for CLI
+    backward compat only — when a brand context is active it is ignored so
+    the browser can never choose a filesystem path.
     """
     return Orchestrator(brand_dir=brand_dir or "brand")
 
@@ -789,15 +827,30 @@ async def api_parse_media_prompts(request: Request) -> JSONResponse:
     รองรับทั้ง .json (structured output ใหม่) และ .md (เดิม)
     ถ้า filepath เป็น .md → ลองหา .json ที่ชื่อเดียวกันก่อน (มีข้อมูล structure ครบ)
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     body = await request.json()
     content = body.get("content", "")
     if not content:
         # อ่านจากไฟล์แทน
         filepath = body.get("file", "")
         if filepath:
+            from src.workspace_context import contain_path
             p = Path(filepath)
             if not p.exists():
-                p = PROJECT_ROOT / filepath
+                # Resolve relative to OUTPUT_DIR() and contain it.
+                try:
+                    p = contain_path(filepath, OUTPUT_DIR())
+                except ValueError:
+                    return JSONResponse({"error": "file path ไม่ถูกต้อง"}, status_code=400)
+            else:
+                # Existing-file path supplied by client — accept ONLY when
+                # contained beneath the verified active brand's output root.
+                try:
+                    p.resolve().relative_to(OUTPUT_DIR().resolve())
+                except ValueError:
+                    return JSONResponse({"error": "file path ไม่ถูกต้อง"}, status_code=400)
             # ถ้าเป็น .md → ลองหา .json ที่ชื่อเดียวกันก่อน (structured output)
             if p.suffix == ".md":
                 json_p = p.with_suffix(".json")
@@ -895,6 +948,11 @@ async def api_generate_media(request: Request) -> StreamingResponse:
         return JSONResponse({"error": "missing prompt, output_dir, or filename"})
     if media_type not in ("image", "video"):
         return JSONResponse({"error": "type must be image or video"})
+
+    # MB-02: media generation writes to brand-scoped OUTPUT_DIR — require brand.
+    brand_err = _require_brand_context()
+    if brand_err is not None:
+        return brand_err
 
     from src.workspace_context import contain_path
     try:
@@ -1073,17 +1131,40 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
 
     if not filepath:
         return JSONResponse({"error": "missing file"})
+
+    # MB-02: media generation reads/writes brand-scoped output — require brand
+    # first and resolve the candidate safely.  Never accept an arbitrary
+    # absolute or project-local existing path supplied by the client.
+    brand_err = _require_brand_context()
+    if brand_err is not None:
+        return brand_err
+    from src.workspace_context import contain_path
+    output_root = OUTPUT_DIR()
+    output_root.mkdir(parents=True, exist_ok=True)
     p = Path(filepath)
     if not p.exists():
         # filepath may be "output/session/file.json" — resolve via workspace OUTPUT_DIR()
         if filepath.startswith("output/"):
-            from src.workspace_context import contain_path
             try:
-                p = contain_path(filepath[len("output/"):], OUTPUT_DIR())
+                p = contain_path(filepath[len("output/"):], output_root)
             except ValueError:
                 return JSONResponse({"error": "file path ไม่ถูกต้อง"}, status_code=400)
         else:
-            p = PROJECT_ROOT / filepath
+            # Treat any other path as relative to OUTPUT_DIR() and contain it.
+            try:
+                p = contain_path(filepath, output_root)
+            except ValueError:
+                return JSONResponse({"error": "file path ไม่ถูกต้อง"}, status_code=400)
+    else:
+        # Existing-file path supplied by client — accept ONLY when contained
+        # beneath the verified active brand's output root.
+        try:
+            p.resolve().relative_to(output_root.resolve())
+        except ValueError:
+            return JSONResponse(
+                {"error": "file path ไม่ถูกต้อง — must be within active brand output"},
+                status_code=400,
+            )
     if not p.exists():
         return JSONResponse({"error": f"file not found: {filepath}"})
 
@@ -1377,6 +1458,9 @@ async def api_generate_all_media(request: Request) -> StreamingResponse:
 @app.get("/api/media_status/{session}")
 def api_media_status(session: str) -> JSONResponse:
     """ดึงสถานะ media generation ของ session — ใช้ตอนเปิดหน้า output ใหม่."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.workspace_context import contain_path
     try:
         status_file = contain_path(session, OUTPUT_DIR()) / "_media_status.json"
@@ -1393,6 +1477,9 @@ def api_media_status(session: str) -> JSONResponse:
 @app.get("/api/media_retry_log/{session}")
 def api_media_retry_log(session: str) -> JSONResponse:
     """ดึงประวัติการ retry ของ session — ดูได้ผ่านหน้าเว็บ."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.workspace_context import contain_path
     try:
         session_dir = contain_path(session, OUTPUT_DIR())
@@ -1414,6 +1501,9 @@ def api_cost_summary(session: str, file: str = "") -> JSONResponse:
 
     คืน: cost summary dict หรือ {"status": "none"} ถ้าไม่มี
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.workspace_context import contain_path
     try:
         session_dir = contain_path(session, OUTPUT_DIR())
@@ -1445,6 +1535,9 @@ def api_cost_summary(session: str, file: str = "") -> JSONResponse:
 @app.post("/api/media_retry/{session}")
 async def api_media_retry(session: str, request: Request) -> JSONResponse:
     """ล้างสถานะ media gen เดิม เพื่อให้กดสร้างใหม่ได้."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.workspace_context import contain_path
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     auto_image = body.get("auto_image", True)
@@ -1472,6 +1565,10 @@ async def api_media_retry(session: str, request: Request) -> JSONResponse:
 
 @app.get("/api/data_folders")
 def api_data_folders() -> JSONResponse:
+    # MB-02: data folders are brand-scoped (product data lives under brand root)
+    err = _require_brand_context()
+    if err is not None:
+        return err
     return JSONResponse(_scan_data_folders())
 
 
@@ -1481,6 +1578,9 @@ async def api_upload(
     files: list[UploadFile] = File(...),
 ) -> JSONResponse:
     """Upload files and create a product folder."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     if not product_name.strip():
         return JSONResponse({"error": "กรุณาตั้งชื่อสินค้า"}, status_code=400)
 
@@ -1537,6 +1637,9 @@ async def api_upload_stage(files: list[UploadFile] = File(...)) -> JSONResponse:
 
     ไม่สร้างสินค้าจริง — user ต้องกด commit ผ่าน /api/stage/{batch_id}/commit
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import staging
     from src.ingestion import _make_llm
 
@@ -1571,6 +1674,9 @@ async def api_upload_stage(files: list[UploadFile] = File(...)) -> JSONResponse:
 @app.get("/api/stage/{batch_id}")
 def api_get_stage(batch_id: str) -> JSONResponse:
     """ดึง batch info (segments + matches) เพื่อ refresh preview."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import staging
     batch = staging._load_batch(batch_id)
     if not batch:
@@ -1584,6 +1690,9 @@ def api_commit_stage(batch_id: str, body: dict = None) -> JSONResponse:
 
     body: {choices: [{segment_index, action, target?, name?}]}
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import staging
     choices = (body or {}).get("choices", [])
     if not choices:
@@ -1600,6 +1709,9 @@ def api_commit_stage(batch_id: str, body: dict = None) -> JSONResponse:
 @app.delete("/api/stage/{batch_id}")
 def api_delete_stage(batch_id: str) -> JSONResponse:
     """ยกเลิก batch — ลบ staging (ปิดหน้าต่าง หรือ user ยกเลิก)."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import staging
     staging.discard_batch(batch_id)
     return JSONResponse({"ok": True})
@@ -1623,6 +1735,9 @@ async def api_ingest(folder: str, request: Request) -> JSONResponse:
     รันเป็น background thread เพื่อไม่ block web server
     ส่งสถานะ progress ผ่าน product DB (UI ดึงไปโชว์)
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     import threading
     from src import product_db
     from src.ingestion import ingest_product
@@ -1667,6 +1782,9 @@ async def api_ingest(folder: str, request: Request) -> JSONResponse:
 @app.get("/api/ingest_status/{folder}")
 def api_ingest_status(folder: str) -> JSONResponse:
     """ดึงสถานะ ingestion ปัจจุบัน — UI ดึงทุก 2 วินาที ตอนกำลัง ingestion."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import product_db
     record = product_db.load(folder)
     return JSONResponse({
@@ -1685,6 +1803,9 @@ def api_folder_files(folder: str) -> JSONResponse:
     สถานะไฟล์: ingested (✅), unsupported (⚠️), error (❌), pending (รอ)
     แยกจาก deliverables ใน cache/ (เอกสารสเปคจาก product_spec agent)
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import product_db
     from src.ingestion import _classify_file, _load_config
     from src.workspace_context import contain_path
@@ -1732,6 +1853,9 @@ def api_folder_files(folder: str) -> JSONResponse:
 @app.get("/api/product_image/{folder}")
 def api_product_image(folder: str):
     """Serve the first image file found in a product folder as a thumbnail."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.workspace_context import contain_path
     try:
         product_dir = contain_path(folder, DATA_DIR())
@@ -1758,6 +1882,9 @@ async def api_delete_file(request: Request) -> JSONResponse:
       - ตั้งสถานะ stale (ข้อมูลเก่า รอ re-ingest)
     ถ้าลบ deliverable ใน cache/ → แค่ลบไฟล์ ไม่กระทบ DB
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import product_db
     from src.workspace_context import contain_path
 
@@ -1835,6 +1962,9 @@ async def api_delete_file(request: Request) -> JSONResponse:
 @app.delete("/api/folder")
 async def api_delete_folder(request: Request) -> JSONResponse:
     """Delete an entire product folder — data/, cache/, and Content History entries."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     import shutil
     from src.workspace_context import contain_path
     body = await request.json()
@@ -1874,6 +2004,9 @@ async def api_delete_output_file(request: Request) -> JSONResponse:
 
     body: { file: "path/to/04_content_creator_*.md" }
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     import shutil
     body = await request.json()
     filepath = body.get("file", "")
@@ -1946,6 +2079,9 @@ async def api_delete_output_file(request: Request) -> JSONResponse:
 @app.post("/api/rename_folder")
 async def api_rename_folder(request: Request) -> JSONResponse:
     """Rename a product folder."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.workspace_context import contain_path
     body = await request.json()
     old_name = body.get("old_name", "").strip()
@@ -1994,6 +2130,9 @@ async def api_rename_folder(request: Request) -> JSONResponse:
 @app.get("/api/brand_files")
 def api_brand_files() -> JSONResponse:
     """List brand files — local user state + product examples."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.local_workspace import local_brand_dir, product_brand_dir
     files = []
     seen = set()
@@ -2016,6 +2155,9 @@ def api_brand_files() -> JSONResponse:
 @app.get("/api/brand_file/{filename}")
 def api_brand_file_get(filename: str) -> JSONResponse:
     """Get brand file content — local first, then product example."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.local_workspace import local_brand_dir, product_brand_dir
     from src.workspace_context import contain_path
     for d in [local_brand_dir(), product_brand_dir()]:
@@ -2031,6 +2173,9 @@ def api_brand_file_get(filename: str) -> JSONResponse:
 @app.post("/api/brand_save")
 async def api_brand_save(request: Request) -> JSONResponse:
     """Save brand file content to local workspace (never mutates product brand/)."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.local_workspace import local_brand_dir
     body = await request.json()
     filename = body.get("filename", "")
@@ -2053,6 +2198,9 @@ async def api_brand_save(request: Request) -> JSONResponse:
 @app.get("/api/brand_json")
 def api_brand_json_get() -> JSONResponse:
     """อ่าน brand config ทั้งหมด — local first, then product examples."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.local_workspace import local_brand_dir, product_brand_dir
     import json as _json
     result: dict = {}
@@ -2083,6 +2231,9 @@ def api_brand_json_get() -> JSONResponse:
 @app.post("/api/brand_json_save")
 async def api_brand_json_save(request: Request) -> JSONResponse:
     """บันทึก brand config ลง local workspace — รับ dict {voice, terms, visual, audience, profile}."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.local_workspace import local_brand_dir
     import json as _json
     body = await request.json()
@@ -2113,6 +2264,9 @@ async def api_brand_json_save(request: Request) -> JSONResponse:
 @app.post("/api/brand_migrate")
 async def api_brand_migrate(request: Request) -> JSONResponse:
     """Migrate brand .md → .json (one-time conversion) — operates on local workspace."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.local_workspace import local_brand_dir
     from src.brand_migrate import migrate_brand
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
@@ -2133,12 +2287,18 @@ async def api_brand_migrate(request: Request) -> JSONResponse:
 @app.get("/api/product_profile/{folder}")
 def api_product_profile_get(folder: str) -> JSONResponse:
     """อ่าน product_profile.json จาก cache/ โดยใช้ brand_loader (fallback ไป data/ เดิมอัตโนมัติ)."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     return JSONResponse(load_product_profile(folder))
 
 
 @app.post("/api/product_profile_save/{folder}")
 async def api_product_profile_save(folder: str, request: Request) -> JSONResponse:
     """บันทึก product_profile.json ลง cache/ — รับ dict จาก body."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     import json as _json
     from src.workspace_context import contain_path
     body = await request.json()
@@ -2172,6 +2332,9 @@ async def api_product_profile_suggest(folder: str) -> JSONResponse:
 
     ใช้ product_db.get_agent_context_text() ดึงสเปค → analyze_product_positioning() → คืน suggested dict.
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.product_db import get_agent_context_text, is_ready
     from src.voice_learner import analyze_product_positioning
 
@@ -2207,6 +2370,9 @@ async def api_voice_learn(request: Request) -> JSONResponse:
     Body: {pasted_texts: [str], file_paths: [str], urls: [str]}
     คืน: {ok: true, brand: {voice, terms, audience}, example_count} หรือ {ok: false, error}
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.voice_learner import collect_examples, analyze_brand, fetch_url_content, extract_file_text
     body = await request.json()
     pasted = body.get("pasted_texts", [])
@@ -2257,6 +2423,9 @@ async def api_voice_learn(request: Request) -> JSONResponse:
 @app.post("/api/voice_learn_upload")
 async def api_voice_learn_upload(request: Request) -> JSONResponse:
     """รับไฟล์ upload (multipart) → เซฟ temp → คืน path สำหรับส่งให้ /api/voice_learn."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from fastapi import UploadFile, File, Form
     # ใช้ Request โดยตรงเพราะเราใช้ JSONResponse ไม่ใช่ fastapi Form
     form = await request.form()
@@ -2289,6 +2458,9 @@ async def api_voice_learn_upload(request: Request) -> JSONResponse:
 @app.get("/api/assets")
 def api_assets_list() -> JSONResponse:
     """list_all() — สำหรับ UI แสดง asset ทั้งหมด."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import asset_library
     return JSONResponse({"assets": asset_library.list_all()})
 
@@ -2296,6 +2468,9 @@ def api_assets_list() -> JSONResponse:
 @app.get("/api/assets/{asset_id}")
 def api_assets_get(asset_id: str) -> JSONResponse:
     """record เต็มของ asset หนึ่ง."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import asset_library
     rec = asset_library.get_asset(asset_id)
     if not rec:
@@ -2312,6 +2487,9 @@ async def api_assets_upload(
 
     เหมือน /api/upload ของ product — เซฟไฟล์ก่อน แล้ว trigger ingestion ใน background thread.
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import asset_library
     from src.local_workspace import local_brand_dir
     from src.workspace_context import contain_path
@@ -2363,6 +2541,9 @@ async def api_assets_upload(
 @app.post("/api/assets/{asset_id}/update")
 async def api_assets_update(asset_id: str, request: Request) -> JSONResponse:
     """HITL — user แก้ metadata (tags/description/subject/style/user_note)."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import asset_library
     body = await request.json()
     result = asset_library.update_asset(
@@ -2381,6 +2562,9 @@ async def api_assets_update(asset_id: str, request: Request) -> JSONResponse:
 @app.post("/api/assets/{asset_id}/delete")
 async def api_assets_delete(asset_id: str, request: Request) -> JSONResponse:
     """ลบ asset + ลบไฟล์จริง."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import asset_library
     body = {}
     try:
@@ -2397,6 +2581,9 @@ async def api_assets_delete(asset_id: str, request: Request) -> JSONResponse:
 @app.get("/api/assets/file/{asset_id}")
 def api_assets_file(asset_id: str):
     """serve ไฟล์จริง — สำหรับ thumbnail ใน UI (pattern เดียวกับ /api/product_image)."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import asset_library
     from fastapi import Response
     rec = asset_library.get_asset(asset_id)
@@ -2413,6 +2600,9 @@ def api_assets_file(asset_id: str):
 @app.post("/api/assets/reingest")
 async def api_assets_reingest(request: Request) -> JSONResponse:
     """สแกนไฟล์ asset หนึ่ง หรือทั้งหมดใหม่อีกครั้ง."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import asset_library
     body = {}
     try:
@@ -2475,6 +2665,9 @@ async def api_video_style_analyze(request: Request) -> JSONResponse:
     Body: {video_url: str} หรือ {video_path: str}
     คืน: {ok: true, video_style: {...}} หรือ {ok: false, error}
     """
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.voice_learner import analyze_video_style
     body = await request.json()
     video_url = body.get("video_url")
@@ -2504,6 +2697,9 @@ async def api_video_style_analyze(request: Request) -> JSONResponse:
 @app.post("/api/video_style_upload")
 async def api_video_style_upload(request: Request) -> JSONResponse:
     """รับไฟล์วิดีโอ upload (multipart) → เซฟ temp → คืน path."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     form = await request.form()
     files = form.getlist("files")
     if not files:
@@ -2530,6 +2726,9 @@ async def api_video_style_upload(request: Request) -> JSONResponse:
 @app.get("/api/pillars")
 def api_pillars_get() -> JSONResponse:
     """อ่าน pillars + pillar_keywords จาก local workspace."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.local_workspace import load_content_pillars_local
     data = load_content_pillars_local()
     pillars = data.get("pillars", [])
@@ -2544,6 +2743,9 @@ def api_pillars_get() -> JSONResponse:
 @app.post("/api/pillars_save")
 async def api_pillars_save(request: Request) -> JSONResponse:
     """บันทึก pillars + pillar_keywords ลง local workspace (never mutates product config)."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.local_workspace import save_content_pillars_local
     body = await request.json()
     pillars = body.get("pillars", [])
@@ -2653,6 +2855,9 @@ def _suggest_pillars(prompt: str, chips: list[str], llm: Any) -> dict[str, Any]:
 @app.post("/api/pillars_suggest")
 async def api_pillars_suggest(request: Request) -> JSONResponse:
     """รับ prompt หรือ chips จาก user → ใช้ AI สร้าง pillars + keywords."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     body = await request.json()
     prompt = (body.get("prompt") or "").strip()
     chips = [str(c).strip() for c in body.get("chips", []) if str(c).strip()]
@@ -2829,12 +3034,18 @@ async def api_conflicts_check_live(request: Request) -> JSONResponse:
 
 @app.get("/api/sessions")
 def api_sessions() -> JSONResponse:
+    err = _require_brand_context()
+    if err is not None:
+        return err
     return JSONResponse(_scan_sessions())
 
 
 @app.get("/api/session_files/{session}")
 def api_session_files(session: str) -> JSONResponse:
     """List files in a single session — ใช้หาภาพประกอบที่เกี่ยวข้องกับ content_creator."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src.workspace_context import contain_path
     try:
         session_dir = contain_path(session, OUTPUT_DIR())
@@ -2852,12 +3063,18 @@ def api_session_files(session: str) -> JSONResponse:
 @app.get("/api/content_history/{folder}")
 def api_content_history_for_product(folder: str, limit: int = 20) -> JSONResponse:
     """Return content history for a specific product — ดูว่าสินค้านี้เคยทำอะไรไปแล้ว."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     entries = content_history.get_entries_for_product(PROJECT_ROOT, folder, limit=limit)
     return JSONResponse({"entries": entries})
 
 
 @app.get("/api/file/{session}/{filename:path}")
 def api_file(session: str, filename: str, download: int = 0):
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from fastapi.responses import Response
     from src.workspace_context import contain_path
     try:
@@ -2920,7 +3137,12 @@ async def api_run_agent(request: Request) -> StreamingResponse:
     media_type = body.get("media_type", "")
     upload_session_id = body.get("upload_session_id", "")
     resource_refs = body.get("resource_refs", [])
-    brand_dir = body.get("brand_dir", "") or "brand"
+
+    # MB-02: brand-scoped run requires an active brand context — fail closed.
+    # Client-supplied brand_dir is NOT read; the server derives brand state.
+    brand_err = _require_brand_context()
+    if brand_err is not None:
+        return brand_err
 
     # --- Quick Brief input validation (guardrail) ---
     guard_err = _validate_quick_brief(quick_brief)
@@ -2936,7 +3158,7 @@ async def api_run_agent(request: Request) -> StreamingResponse:
 
     async def event_stream():
         global _current_llm
-        orch = _get_orchestrator(brand_dir)
+        orch = _get_orchestrator()
         q: _queue.Queue[str | None] = _queue.Queue()
 
         def worker():
@@ -2972,7 +3194,6 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                         product_refs=product_refs,
                         resource_refs=resource_refs,
                         upload_session_id=upload_session_id,
-                        brand_dir=brand_dir,
                     )
                     if step_context.warnings:
                         raise ValueError("; ".join(step_context.warnings))
@@ -3560,9 +3781,11 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                         )
                         if not r.get("ok"):
                             msg = f"รูปที่ {j+1}: {r.get('error', 'unknown')}"
-                            _ecb = error_callback or status_callback
-                            if _ecb:
-                                _ecb(msg)
+                            # Non-fatal media error: the agent still completes.
+                            # Send as status (not error) so the JS doesn't mark
+                            # the flow step as .flow-step.error prematurely.
+                            if status_callback:
+                                status_callback(msg)
                             print(f"[MediaGen] {msg}", flush=True)
                         elif r.get("retry_count"):
                             if status_callback:
@@ -3613,9 +3836,11 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                         )
                         if not r.get("ok"):
                             msg = f"วิดีโอที่ {j+1}: {r.get('error', 'unknown')}"
-                            _ecb = error_callback or status_callback
-                            if _ecb:
-                                _ecb(msg)
+                            # Non-fatal media error: the agent still completes.
+                            # Send as status (not error) so the JS doesn't mark
+                            # the flow step as .flow-step.error prematurely.
+                            if status_callback:
+                                status_callback(msg)
                             print(f"[MediaGen] {msg}", flush=True)
                         elif r.get("retry_count"):
                             if status_callback:
@@ -3654,6 +3879,11 @@ async def api_run_agents(request: Request) -> StreamingResponse:
     mode = body.get("mode", "separate")
     quick_brief = body.get("quick_brief", "")
 
+    # MB-02: brand-scoped run requires an active brand context — fail closed.
+    brand_err = _require_brand_context()
+    if brand_err is not None:
+        return brand_err
+
     # --- Quick Brief input validation (guardrail) ---
     guard_err = _validate_quick_brief(quick_brief)
     if guard_err:
@@ -3677,7 +3907,6 @@ async def api_run_agents(request: Request) -> StreamingResponse:
     # media settings — สร้างอะไร + เมื่อไหร่
     media_type = body.get("media_type", "image")
     media_when = body.get("media_when", "ask")
-    brand_dir = body.get("brand_dir", "") or "brand"
     upload_session_id = body.get("upload_session_id", "")
     resource_refs = body.get("resource_refs", [])
 
@@ -3692,7 +3921,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
     async def event_stream():
         # Fresh orchestrator per call — do NOT share across parallel runs
         # (product_id/results/product_images are mutable state)
-        orch = Orchestrator(brand_dir=brand_dir)
+        orch = Orchestrator()
         q: _queue.Queue[str | None] = _queue.Queue()
 
         def worker():
@@ -3752,7 +3981,6 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                                 product_refs=_combined_product_refs,
                                 resource_refs=resource_refs,
                                 upload_session_id=upload_session_id,
-                                brand_dir=brand_dir,
                             )
                             if _combined_step_ctx.warnings:
                                 raise ValueError("; ".join(_combined_step_ctx.warnings))
@@ -3802,7 +4030,6 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                                     product_refs=[f"product:{folder}"],
                                     resource_refs=resource_refs,
                                     upload_session_id=upload_session_id,
-                                    brand_dir=brand_dir,
                                 )
                                 if _sep_step_ctx.warnings:
                                     raise ValueError("; ".join(_sep_step_ctx.warnings))
@@ -3891,7 +4118,11 @@ async def api_run_flows(request: Request) -> StreamingResponse:
     body = await request.json()
     flows = body.get("flows", [])
     global_quick_brief = body.get("quick_brief", "")
-    global_brand_dir = body.get("brand_dir", "") or "brand"
+
+    # MB-02: brand-scoped run requires an active brand context — fail closed.
+    brand_err = _require_brand_context()
+    if brand_err is not None:
+        return brand_err
 
     if not flows:
         return JSONResponse({"error": "missing flows"})
@@ -3918,7 +4149,6 @@ async def api_run_flows(request: Request) -> StreamingResponse:
             from src.flow_runner import run_flow_steps, build_context_for_agent
             plan_idx = flow.get("index", flow_idx)
             flow_quick_brief = flow.get("quick_brief", global_quick_brief)
-            flow_brand_dir = flow.get("brand_dir", global_brand_dir) or global_brand_dir
 
             # ผูก LLM call ทั้งหมดใน thread นี้เข้ากับ flow_id
             flow_id = f"flow_{uuid.uuid4().hex[:8]}"
@@ -3929,7 +4159,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
 
             llm = None
             try:
-                orch = Orchestrator(brand_dir=flow_brand_dir)
+                orch = Orchestrator()
                 llm = orch.make_client()
                 try:
                     _active_llms.append(llm)
@@ -3984,7 +4214,6 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                     product_refs=product_refs,
                     resource_refs=resource_refs,
                     upload_session_id=upload_session_id,
-                    brand_dir=flow_brand_dir,
                 )
                 if step_context.warnings:
                     raise ValueError("; ".join(step_context.warnings))
@@ -4138,6 +4367,9 @@ async def api_run_resources_upload(
     upload_session_id: str = Form(""),
 ) -> JSONResponse:
     """Upload run-scoped attachments. Returns upload_session_id + resource list."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     if not _resource_store.config.get("enabled", True):
         return JSONResponse({"error": "run resources disabled"}, status_code=503)
 
@@ -4163,19 +4395,69 @@ async def api_run_resources_delete(
     upload_session_id: str = Query(...),
 ) -> JSONResponse:
     """Delete a run-scoped resource."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     ok = _resource_store.delete_resource(resource_id, upload_session_id)
     if not ok:
         return JSONResponse({"error": "resource not found or access denied"}, status_code=404)
     return JSONResponse({"deleted": True, "resource_id": resource_id})
 
 
+def _cleanup_run_resources_all_brands(project_root: Path | None = None) -> list[dict]:
+    """Synchronously enumerate every registered user → active brand and clean
+    expired run-scoped resources once per brand.
+
+    MB-02: run resources are brand-scoped.  At startup no request-scoped brand
+    context is active, so we enumerate all brands explicitly.  Never creates
+    a global/user-root resource directory.  Returns a per-brand result list so
+    callers/tests can assert which brands were cleaned and surface failures
+    instead of silently discarding them.
+    """
+    from src.auth import get_user_store
+    from src.brand_registry import BrandRegistry
+    from src.workspace_context import (
+        WorkspaceContext, set_workspace, reset_workspace,
+    )
+    root = project_root or PROJECT_ROOT
+    results: list[dict] = []
+    try:
+        users = get_user_store(root).list_users()
+    except Exception as e:
+        print(f"[run_resources] cleanup: cannot enumerate users: {e}", flush=True)
+        return [{"error": f"cannot enumerate users: {e}"}]
+    for user_record in users:
+        user_id = user_record.get("user_id", "")
+        if not user_id:
+            continue
+        reg = BrandRegistry(user_id=user_id, project_root=root)
+        for brand in reg.list():
+            brand_id = brand["brand_id"]
+            ws = WorkspaceContext.for_brand(user_id, brand_id, root)
+            token = set_workspace(ws)
+            entry = {"user_id": user_id, "brand_id": brand_id, "removed": 0, "error": ""}
+            try:
+                entry["removed"] = _resource_store.cleanup_expired()
+            except Exception as e:
+                entry["error"] = str(e)
+                print(f"[run_resources] cleanup failed for {user_id}/{brand_id}: {e}", flush=True)
+            finally:
+                reset_workspace(token)
+            results.append(entry)
+    return results
+
+
 @app.on_event("startup")
 async def _run_resource_cleanup() -> None:
-    """Remove expired run-scoped resources at server startup."""
-    try:
-        _resource_store.cleanup_expired()
-    except Exception as e:
-        print(f"[run_resources] cleanup ไม่สำเร็จ: {e}", flush=True)
+    """Remove expired run-scoped resources at server startup (MB-02 per-brand).
+
+    Awaits the synchronous, testable ``_cleanup_run_resources_all_brands``
+    helper via ``asyncio.to_thread`` so startup completes only after cleanup
+    finishes.  Per-brand failures are logged and returned by the helper rather
+    than silently discarded.
+    """
+    import asyncio
+    await asyncio.to_thread(_cleanup_run_resources_all_brands)
 
 
 # ============================================================
@@ -4206,15 +4488,24 @@ def _get_scheduler():
 def _attach_schedule_endpoints(app, scheduler):
     @app.get("/api/schedule/jobs")
     def schedule_list_jobs() -> JSONResponse:
+        err = _require_brand_context()
+        if err is not None:
+            return err
         jobs = scheduler.list_jobs()
         return JSONResponse(jobs)
 
     @app.get("/api/schedule/status")
     def schedule_running_status() -> JSONResponse:
+        err = _require_brand_context()
+        if err is not None:
+            return err
         return JSONResponse(scheduler.get_running_status())
 
     @app.post("/api/schedule/save")
     async def schedule_save(request: Request) -> JSONResponse:
+        err = _require_brand_context()
+        if err is not None:
+            return err
         body = await request.json()
         job_spec = {
             "name": body.get("name", "unnamed"),
@@ -4229,30 +4520,45 @@ def _attach_schedule_endpoints(app, scheduler):
 
     @app.post("/api/schedule/delete")
     async def schedule_delete(request: Request) -> JSONResponse:
+        err = _require_brand_context()
+        if err is not None:
+            return err
         body = await request.json()
         removed = scheduler.remove_job(body.get("job_id", ""))
         return JSONResponse({"ok": removed})
 
     @app.post("/api/schedule/toggle")
     async def schedule_toggle(request: Request) -> JSONResponse:
+        err = _require_brand_context()
+        if err is not None:
+            return err
         body = await request.json()
         ok = scheduler.toggle_job(body.get("job_id", ""), body.get("enabled", True))
         return JSONResponse({"ok": ok})
 
     @app.post("/api/schedule/run_now")
     async def schedule_run_now(request: Request) -> JSONResponse:
+        err = _require_brand_context()
+        if err is not None:
+            return err
         body = await request.json()
         ok = scheduler.run_now(body.get("job_id", ""))
         return JSONResponse({"ok": ok})
 
     @app.post("/api/schedule/rerun")
     async def schedule_rerun(request: Request) -> JSONResponse:
+        err = _require_brand_context()
+        if err is not None:
+            return err
         body = await request.json()
         ok = scheduler.rerun_run(body.get("job_id", ""), body.get("started_at", ""))
         return JSONResponse({"ok": ok})
 
     @app.get("/api/schedule/runs")
     def schedule_runs(job_id: str = "", limit: int = 50) -> JSONResponse:
+        err = _require_brand_context()
+        if err is not None:
+            return err
         runs = scheduler.get_run_log(job_id=job_id or None, limit=limit)
         return JSONResponse(runs)
 
@@ -4264,6 +4570,12 @@ class _SchedulerProxy:
         from src.workspace_context import get_workspace
         ws = get_workspace()
         return ws.user_id if ws else None
+
+    def _current_brand_id(self):
+        """Resolve the current request's brand_id from the workspace context."""
+        from src.workspace_context import get_workspace
+        ws = get_workspace()
+        return ws.brand_id if ws else None
 
     def list_jobs(self):
         s = _get_scheduler()
@@ -4295,7 +4607,9 @@ class _SchedulerProxy:
 
     def get_running_status(self):
         s = _get_scheduler()
-        return s.get_running_status(user_id=self._current_user_id()) if s else {}
+        return s.get_running_status(
+            user_id=self._current_user_id(), brand_id=self._current_brand_id()
+        ) if s else {}
 
 
 _attach_schedule_endpoints(app, _SchedulerProxy())
@@ -4441,7 +4755,11 @@ async def api_run_auto(request: Request) -> StreamingResponse:
     agents = [a for a in AGENT_ORDER if a in agents]
     # TEMP LOCK: auto flow รัน agent เดียวก่อน จนกว่าจะแก้ให้ agent ทำงานร่วมกันได้
     agents = agents[:1]
-    brand_dir = body.get("brand_dir", "") or "brand"
+
+    # MB-02: brand-scoped run requires an active brand context — fail closed.
+    brand_err = _require_brand_context()
+    if brand_err is not None:
+        return brand_err
 
     # --- Quick Brief input validation (guardrail) ---
     guard_err = _validate_quick_brief(quick_brief)
@@ -4454,7 +4772,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
     session_ts = _session_ts_label([]).replace(' - ', ' - AUTO - ')
 
     async def event_stream():
-        orch = Orchestrator(brand_dir=brand_dir)
+        orch = Orchestrator()
         q: _queue.Queue[str | None] = _queue.Queue()
 
         def worker():
@@ -4489,7 +4807,6 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     product_refs=[],
                     resource_refs=resource_refs,
                     upload_session_id=upload_session_id,
-                    brand_dir=brand_dir,
                 )
                 if step_context.warnings:
                     raise ValueError("; ".join(step_context.warnings))
@@ -4845,6 +5162,9 @@ async def api_run_auto(request: Request) -> StreamingResponse:
 @app.get("/api/content_history")
 def api_content_history(limit: int = 20) -> JSONResponse:
     """ดึงประวัติคอนเทนต์ที่สร้างไปแล้ว (สำหรับ auto mode — ดูว่าทำอะไรไปแล้ว)."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
     from src import content_history
     entries = content_history.get_recent_entries(PROJECT_ROOT, limit=limit)
     return JSONResponse({"entries": entries})
@@ -5585,7 +5905,11 @@ let _sidebarPollTimer = null;
 function startSidebarPolling() {
   if (_sidebarPollTimer) return;
   _sidebarPollTimer = setInterval(() => {
-    fetch('/api/data_folders').then(r => r.json()).then(folders => {
+    fetch('/api/data_folders').then(r => {
+      if (!r.ok) return [];
+      return r.json();
+    }).then(folders => {
+      if (!Array.isArray(folders)) folders = [];
       const anyProcessing = folders.some(f => f.status === 'processing');
       if (currentSidebarTab === 'folders') loadFolderList();
       if (!anyProcessing) {
@@ -5621,7 +5945,11 @@ function switchSidebarTab(tab, ev) {
 }
 
 function loadFolderList() {
-  return fetch('/api/data_folders').then(r => r.json()).then(folders => {
+  return fetch('/api/data_folders').then(r => {
+    if (!r.ok) return [];
+    return r.json();
+  }).then(folders => {
+    if (!Array.isArray(folders)) folders = [];
     const el = document.getElementById('sidebar-content');
     // นับสินค้า ready สำหรับ max ใน Auto count input
     readyProductCount = folders.filter(f => f.status === 'ready').length;

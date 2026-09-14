@@ -235,12 +235,19 @@ def load_brand_context(brand_dir: str | Path | None = None, *, product_id: str |
 
 
 def _resolve_brand_dir(brand_dir: str | Path | None) -> Path | None:
-    """Resolve brand_dir — local workspace first, then product brand/.
+    """Resolve brand_dir — brand-scoped workspace first, then product brand/.
 
-    When ``brand_dir`` is None or the default ``"brand"``, returns the local
-    workspace brand dir if it exists, otherwise the product ``brand/`` directory.
-    When an explicit path is passed, uses that path directly (backward compat).
+    MB-02 security: when a verified brand context is active, brand state is
+    server-derived from ``brand_state_root()`` and a client-supplied
+    ``brand_dir`` is IGNORED — the browser never chooses a filesystem path.
+    An explicit ``brand_dir`` is honored only when no brand context is active
+    (CLI / test backward compat).
     """
+    from .workspace_context import get_workspace
+    ws = get_workspace()
+    if ws is not None and ws.brand_id is not None:
+        # Normal multi-brand execution — ignore any client-supplied path.
+        brand_dir = None
     if brand_dir is None or brand_dir == "brand":
         from .local_workspace import local_brand_dir, product_brand_dir
         local = local_brand_dir()
@@ -250,6 +257,7 @@ def _resolve_brand_dir(brand_dir: str | Path | None) -> Path | None:
         if prod.exists() and prod.is_dir():
             return prod
         return None
+    # CLI / test backward compat (no brand context): explicit path honored.
     brand_dir = Path(brand_dir)
     if not brand_dir.exists() or not brand_dir.is_dir():
         return None
@@ -294,9 +302,19 @@ def load_product_profile(product_id: str) -> dict[str, Any]:
     """
     if not product_id:
         return {}
-    # Resolve through per-user workspace when active, else project root
-    from .workspace_context import user_state_root, contain_path
-    _ws_root = user_state_root(Path(__file__).resolve().parent.parent)
+    # MB-02: product profiles are brand-specific.  Resolve through the brand
+    # root when a brand context is active.  An authenticated user-only context
+    # (workspace set, no brand_id) must fail closed — never fall back to user
+    # root.  Only a true no-workspace CLI context (get_workspace() is None)
+    # retains the user/project-root fallback for CLI/test backward compat.
+    from .workspace_context import get_workspace, brand_state_root, user_state_root, contain_path
+    ws = get_workspace()
+    if ws is not None and ws.brand_id is not None:
+        _ws_root = brand_state_root(Path(__file__).resolve().parent.parent)
+    elif ws is None:
+        _ws_root = user_state_root(Path(__file__).resolve().parent.parent)
+    else:
+        raise ValueError("load_product_profile requires an active brand context")
     candidates = [
         contain_path(product_id, _ws_root / "cache") / "product_profile.json",
         contain_path(product_id, _ws_root / "data") / "product_profile.json",

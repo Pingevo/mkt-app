@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.brand_registry import BrandRegistry
 from src.scheduler import JsonJobStore, Scheduler
 from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
 
@@ -36,10 +37,22 @@ def _scheduler(_store, tmp_path):
 
 @pytest.fixture
 def _ws(_scheduler, tmp_path):
-    """Set a workspace context with a test user for the duration of the test."""
-    ws = WorkspaceContext.for_user(TEST_USER_ID, tmp_path)
+    """Set a brand workspace context for the test user; yield the brand_id.
+
+    MB-02: scheduler state is brand-scoped, so a brand context must be active
+    for store operations and ``_run_job`` to execute.
+    """
+    _project_root = Path(_scheduler._project_root)
+    reg = BrandRegistry(user_id=TEST_USER_ID, project_root=_project_root)
+    brands = reg.list()
+    if brands:
+        brand_id = brands[0]["brand_id"]
+    else:
+        brand = reg.create("TestBrand")
+        brand_id = brand["brand_id"]
+    ws = WorkspaceContext.for_brand(TEST_USER_ID, brand_id, _project_root)
     token = set_workspace(ws)
-    yield ws
+    yield brand_id
     reset_workspace(token)
 
 
@@ -71,6 +84,7 @@ def _sse_lines():
 
 def test_run_record_stores_flow_and_quick_brief(_scheduler, _store, _ws):
     """run record ทุกครั้งต้องเก็บ flow + quick_brief เพื่อให้ rerun ได้."""
+    brand_id = _ws
     flow = {"is_auto": True, "agents": ["content_creator"], "content_count": 1}
     quick_brief = "ทดสอบ rerun"
 
@@ -85,7 +99,7 @@ def test_run_record_stores_flow_and_quick_brief(_scheduler, _store, _ws):
     job_id = _scheduler.add_job(job_spec)
 
     with patch("src.scheduler.httpx.Client", return_value=_fake_httpx_stream(_sse_lines())):
-        _scheduler._run_job(TEST_USER_ID, job_id, trigger="auto")
+        _scheduler._run_job(TEST_USER_ID, brand_id, job_id, trigger="auto")
 
     runs = _store.load_runs()
     assert len(runs) == 1
@@ -98,6 +112,7 @@ def test_rerun_run_loads_flow_from_run_record(_scheduler, _store, _ws):
     """rerun_run(run_id) ต้องโหลด flow จาก run record แล้วยิงใหม่ได้
     แม้ job ต้นทางจะถูกลบไปแล้ว (one_time job ถูกลบหลังรัน)
     """
+    brand_id = _ws
     flow = {"is_auto": True, "agents": ["content_creator"], "content_count": 1}
     quick_brief = "rerun me"
 
@@ -114,6 +129,7 @@ def test_rerun_run_loads_flow_from_run_record(_scheduler, _store, _ws):
         "error": "",
         "trigger": "auto",
         "user_id": TEST_USER_ID,
+        "brand_id": brand_id,
     }
     _store.append_run(run_record)
 
@@ -157,6 +173,7 @@ def test_rerun_run_returns_false_when_run_not_found(_scheduler, _store, _ws):
 
 def test_rerun_run_appends_new_run_record(_scheduler, _store, _ws):
     """rerun จาก success — ต้องสร้าง run record ใหม่ (เก็บเดิมไว้เปรียบเทียบ)."""
+    brand_id = _ws
     flow = {"is_auto": True, "agents": ["content_creator"], "content_count": 1}
     run_record = {
         "job_id": "job_x",
@@ -170,6 +187,7 @@ def test_rerun_run_appends_new_run_record(_scheduler, _store, _ws):
         "error": "",
         "trigger": "auto",
         "user_id": TEST_USER_ID,
+        "brand_id": brand_id,
     }
     _store.append_run(run_record)
 
@@ -192,6 +210,7 @@ def test_rerun_from_error_without_output_updates_original(_scheduler, _store, _w
     """rerun จาก error ที่ไม่มี output (พลาดเวลา/ถูกตัด) — update original record
     เพราะเป็น placeholder ไม่มีค่าใช้งาน ไม่ต้องเก็บประวัติ
     """
+    brand_id = _ws
     flow = {"is_auto": True, "agents": ["content_creator"], "content_count": 1}
     error_record = {
         "job_id": "job_err",
@@ -205,6 +224,7 @@ def test_rerun_from_error_without_output_updates_original(_scheduler, _store, _w
         "error": "พลาดเวลา",
         "trigger": "auto",
         "user_id": TEST_USER_ID,
+        "brand_id": brand_id,
     }
     _store.append_run(error_record)
 
@@ -221,8 +241,9 @@ def test_rerun_from_error_without_output_updates_original(_scheduler, _store, _w
     assert run["flow"] == flow
 
 
-def test_rerun_from_error_appends_new_record(_scheduler, _store):
+def test_rerun_from_error_appends_new_record(_scheduler, _store, _ws):
     """rerun จาก error ที่มี output — ต้องสร้าง record ใหม่ (เก็บ error เดิมไว้ audit)."""
+    brand_id = _ws
     flow = {"is_auto": True, "agents": ["content_creator"], "content_count": 1}
     error_record = {
         "job_id": "job_err",
@@ -235,11 +256,13 @@ def test_rerun_from_error_appends_new_record(_scheduler, _store):
         "output_files": ["/tmp/partial.md"],  # มี output บางส่วน → เก็บไว้ audit
         "error": "some error",
         "trigger": "auto",
+        "user_id": TEST_USER_ID,
+        "brand_id": brand_id,
     }
     _store.append_run(error_record)
 
     with patch("src.scheduler.httpx.Client", return_value=_fake_httpx_stream(_sse_lines())):
-        _scheduler.rerun_run("job_err", "2026-08-19T09:00:00+07:00")
+        _scheduler.rerun_run("job_err", "2026-08-19T09:00:00+07:00", user_id=TEST_USER_ID)
         _scheduler._executor.shutdown(wait=True)
 
     runs = _store.load_runs()

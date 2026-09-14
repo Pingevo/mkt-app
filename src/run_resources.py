@@ -86,15 +86,26 @@ class RunResourceStore:
         self.config = {**DEFAULT_CONFIG, **(config or {})}
         self._explicit_storage_dir = Path(storage_dir) if storage_dir else None
         self._storage_subdir = self.config["storage_dir"]
-        # Create initial directory (global fallback when no workspace active)
-        self._resolve_storage_dir().mkdir(parents=True, exist_ok=True)
+        # Create initial directory when resolvable.  When no brand context is
+        # active yet (module-level singleton init), defer creation to first
+        # request-time use — ``storage_dir`` resolves dynamically per call.
+        try:
+            self._resolve_storage_dir().mkdir(parents=True, exist_ok=True)
+        except ValueError:
+            pass  # no brand context yet; created on first request-time use
 
     def _resolve_storage_dir(self) -> Path:
-        """Resolve storage_dir — per-user workspace when active, else project_root."""
+        """Resolve storage_dir — brand-scoped workspace when active, else explicit/project_root.
+
+        MB-02: run resources are brand-scoped beneath
+        ``users/<uid>/brands/<brand_id>/cache/run_resources/``.  An explicit
+        ``storage_dir`` (tests) bypasses the workspace context.  Fails closed
+        when no brand context is active and no explicit dir is set.
+        """
         if self._explicit_storage_dir:
             return self._explicit_storage_dir
-        from .workspace_context import user_state_root
-        return user_state_root(self.project_root) / self._storage_subdir
+        from .workspace_context import brand_state_root
+        return brand_state_root(self.project_root) / self._storage_subdir
 
     @property
     def storage_dir(self) -> Path:

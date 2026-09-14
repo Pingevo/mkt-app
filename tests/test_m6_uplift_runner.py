@@ -29,6 +29,8 @@ from dataclasses import dataclass
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("brand_ws")
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = PROJECT_ROOT / "scripts"
 
