@@ -96,9 +96,12 @@ def _server(tmp_path_factory):
         "BRAND_DIR": web_viewer.BRAND_DIR,
         "Orchestrator": web_viewer.Orchestrator,
         "_read_folder": getattr(web_viewer, "_read_folder", None),
-        "_current_llm": getattr(web_viewer, "_current_llm", None),
-        "_session_ts": getattr(web_viewer, "_session_ts", ""),
-        "_cancel_requested": getattr(web_viewer, "_cancel_requested", False),
+        "_current_llm": getattr(web_viewer, "_current_llm", {}),
+        "_session_ts": getattr(web_viewer, "_session_ts", {}),
+        "_cancel_requested": getattr(web_viewer, "_cancel_requested", {}),
+        "_active_llms": getattr(web_viewer, "_active_llms", {}),
+        "_BRAND_VISUAL_CACHE": getattr(web_viewer, "_BRAND_VISUAL_CACHE", {}),
+        "_conflict_cache": getattr(web_viewer, "_conflict_cache", {}),
     }
     import src.auth as _auth_mod
     _orig_auth = {
@@ -162,10 +165,13 @@ def _server(tmp_path_factory):
     # Mock folder reading
     web_viewer._read_folder = lambda f: (["Test product info text"], [], {})
 
-    # Initialize module globals
-    web_viewer._current_llm = None
-    web_viewer._session_ts = ""
-    web_viewer._cancel_requested = False
+    # Initialize module globals (Stage C: per-user dicts)
+    web_viewer._current_llm = {}
+    web_viewer._session_ts = {}
+    web_viewer._cancel_requested = {}
+    web_viewer._active_llms = {}
+    web_viewer._BRAND_VISUAL_CACHE = {}
+    web_viewer._conflict_cache = {}
 
     # Mock Orchestrator
     def _make_fake_orch(**kw):

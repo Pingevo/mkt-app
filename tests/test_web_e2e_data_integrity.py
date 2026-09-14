@@ -158,9 +158,9 @@ def _client(tmp_path, monkeypatch):
     (tmp_path / "output").mkdir(exist_ok=True)
 
     # Initialize module globals
-    monkeypatch.setattr(web_viewer, "_current_llm", None, raising=False)
-    monkeypatch.setattr(web_viewer, "_session_ts", "", raising=False)
-    monkeypatch.setattr(web_viewer, "_cancel_requested", False, raising=False)
+    monkeypatch.setattr(web_viewer, "_current_llm", {}, raising=False)
+    monkeypatch.setattr(web_viewer, "_session_ts", {}, raising=False)
+    monkeypatch.setattr(web_viewer, "_cancel_requested", {}, raising=False)
 
     # Mock content history
     monkeypatch.setattr(web_viewer.content_history, "record_entry", lambda *a, **k: True)
@@ -236,8 +236,8 @@ def _capture_llm(_client, monkeypatch):
     # is used but the LLM boundary is a FakeLLM
     monkeypatch.setattr(Orchestrator, "make_client", lambda self: fake_llm)
 
-    # Also patch _current_llm so the route handler uses our FakeLLM
-    monkeypatch.setattr(web_viewer, "_current_llm", fake_llm, raising=False)
+    # _current_llm is a per-user dict (Stage C) — the route handler creates
+    # the client via make_client() (patched above) and stores it per-user.
 
     return fake_llm
 
@@ -375,7 +375,7 @@ class TestAgent1ProductSpecDataIntegrity:
             return fake1 if call_count[0] == 1 else fake2
 
         monkeypatch.setattr(Orchestrator, "make_client", lambda self: _make_client(self))
-        monkeypatch.setattr(web_viewer, "_current_llm", None, raising=False)
+        monkeypatch.setattr(web_viewer, "_current_llm", {}, raising=False)
 
         # Run Alpha
         _client.post("/api/run_agent", json={
@@ -387,7 +387,7 @@ class TestAgent1ProductSpecDataIntegrity:
         assert ALPHA_NAME in alpha_user
 
         # Reset _current_llm so a new FakeLLM is used
-        monkeypatch.setattr(web_viewer, "_current_llm", None, raising=False)
+        monkeypatch.setattr(web_viewer, "_current_llm", {}, raising=False)
 
         # Run Beta
         _client.post("/api/run_agent", json={

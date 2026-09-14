@@ -440,8 +440,8 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 
 | Field | Current value |
 |---|---|
-| Current phase | **MB-02 (Brand-Scoped Business-State Isolation)** — final acceptance correction complete; pending Codex final acceptance review. AUTH-ISO-01 (Stages A/B + MB-01 + System81) accepted/frozen. Stage C next, not started. |
-| Current objective | Close MB-02 final acceptance: deterministic startup cleanup, complete browser 403 contract, existing-file escape closed, cumulative staging reclassified. Then proceed to Stage C. |
+| Current phase | **Stage C (Runtime/Recovery Isolation)** — implementation complete; pending Codex acceptance review. MB-02 `d625ecd` accepted/closed. AUTH-ISO-01 (Stages A/B + MB-01 + System81) accepted/frozen. |
+| Current objective | Close Stage C final acceptance: per-user runtime state isolation + per-user recovery archive. Then proceed to Media (image + video real UI/provider completion). |
 | Checkpoint A — Final grounding boundary | `ACCEPTED / FROZEN` at `65ed8c7`. Generic final-output truth boundary wired into the smallest common pre-persistence seam for Agents 1–4; model reasoning for semantic entailment; no keyword/regex lists. Implemented safeguard — not yet re-qualified against current model. |
 | Gemini 3.8 migration | `ACCEPTED / FROZEN` at `c39f596`. Production text/reasoning workloads migrated to `google/gemini-3.8-flash` (read from `config/agents.yaml`). |
 | Checkpoint C1 — Media Core (mechanical transport) | `ACCEPTED / FROZEN` at `5cc4724` + `06157af`. Per-item product+asset reference selection via `extract_reference_ordinals`/`filter_catalog_by_ordinals`/`selected_reference_ordinals` in `compose_media_input`; `preflight_reference_mentions` rejects unknown/out-of-range ordinals and empty-catalog mentions. Reviewed and accepted by Codex. Do not reopen speculative media plumbing. |
@@ -479,7 +479,7 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 |---|---|
 | Phase ID | AUTH-ISO-01 |
 | Agent ID | SHARED-RUNTIME |
-| Gate status | Stage A COMPLETE (commit `71c1e62`). Stage B COMPLETE (commit `7a3c293`). MB-01 COMPLETE (commit `f15cdbd`). System81 integration COMPLETE (uncommitted, pending Codex acceptance). Stage C pending. |
+| Gate status | Stage A COMPLETE (commit `71c1e62`). Stage B COMPLETE (commit `7a3c293`). MB-01 COMPLETE (commit `f15cdbd`). System81 integration COMPLETE (commit `1a0ef78`). MB-02 ACCEPTED/CLOSED (commit `d625ecd`). Stage C implemented, pending Codex acceptance. |
 | Blocking | Yes — supersedes all other work (including the deferred Wan 2.7 review) until closed |
 | Baseline HEAD | `3e0588f` (auth + workspace isolation initial implementation) |
 | Stage A commit | `71c1e62 fix(auth): enforce per-user workspace isolation` |
@@ -945,7 +945,7 @@ No other hard stops. APScheduler uses in-memory `MemoryJobStore` (default, no `j
 || Files changed (docs) | `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md` (this ledger) |
 || Scheduler | Business behavior untouched. No brand semantics added. Stage B APS IDs unchanged. |
 || System81 | Pending after multi-brand foundation. Not started. |
-|| Stage C | Pending. Not started. |
+|| Stage C | Implemented. Pending Codex acceptance review. |
 || Paid calls | $0. No LLM, web, image, video, provider, or network calls. |
 || Test results | BrandRegistry: 28 passed. BrandContext: 19 passed. Brand API: 17 passed. Stage A workspace/auth: 47 passed. Stage B scheduler (exec ownership + ownership + schedule API): 34 passed. Stage B scheduler (rerun/restart/missed/cleanup/misfire/attachments): 30 passed. Total: 175 passed, 0 failed. |
 || `git diff --check` | passed (no whitespace errors) |
@@ -957,7 +957,7 @@ No other hard stops. APScheduler uses in-memory `MemoryJobStore` (default, no `j
 ||---|---|
 || Phase ID | MB-02 |
 || Agent ID | SHARED-RUNTIME |
-|| Gate status | Final acceptance correction complete; pending Codex final acceptance review. |
+||| Gate status | **ACCEPTED / CLOSED** at commit `d625ecd` on dev branch. Browser closure + ledger accuracy corrections applied. |
 || Baseline HEAD | `1a0ef78` (System81 authentication integration — frozen) |
 || Accepted checkpoints | Stage A `71c1e62` (per-user workspace isolation). Stage B `7a3c293` (per-user Scheduler ownership). MB-01 `f15cdbd` (multi-brand foundation). System81 `1a0ef78` (authentication integration). |
 || System81 live functional qualification | PASS. Canonical System81 ID stability remains a release note, not an MB-02 blocker. |
@@ -986,10 +986,39 @@ No other hard stops. APScheduler uses in-memory `MemoryJobStore` (default, no `j
 || Unrelated pre-existing failures (not part of MB-02 gate) | `tests/test_recommendation_contract.py` (4 tests) — `CompetitorReportRenderer` rendering issues; pre-existing at HEAD `1a0ef78` (verified via `git stash` + rerun). Not part of the MB-02 regression subset. |
 || Paid/provider calls | $0. No LLM, embedding, web, image, video, provider, or network calls. |
 || `git diff --check` | passed (no whitespace errors) |
-|| Stage C | Not started. |
+|| Stage C | Implemented. Pending Codex acceptance review. |
 || System81/authentication production code | Unchanged. |
 || Next exact action | Codex MB-02 final acceptance review. |
 
+
+## Progress Ledger — Stage C (Runtime/Recovery Isolation)
+
+||| Field | Value |
+|||---|---|
+||| Phase ID | Stage C |
+||| Agent ID | SHARED-RUNTIME |
+||| Gate status | Implemented; pending Codex acceptance review. |
+||| Baseline HEAD | `d625ecd` (MB-02 accepted/closed — frozen) |
+||| Accepted checkpoints | Stage A `71c1e62`, Stage B `7a3c293`, MB-01 `f15cdbd`, System81 `1a0ef78`, MB-02 `d625ecd` |
+||| Security motivation | A user or brand must not cancel, observe, reuse, overwrite, recover, or inherit another user/brand's runtime state. |
+||| Enforcement model | Per-user dicts keyed by verified `user_id` from `get_workspace()` (set by AuthMiddleware). Identity comes from server-side workspace context, never client-supplied values. Recovery archive resolves to `users/{user_id}/.recovery_archive` when a workspace is active. |
+||| Proposed staging (production) | `web_viewer.py`, `src/local_workspace.py` |
+||| Proposed staging (tests — modified) | `tests/test_browser_e2e.py`, `tests/test_browser_integration_real_orch.py`, `tests/test_browser_upload_real_source.py`, `tests/test_schedule_api.py`, `tests/test_endpoint_security_media.py`, `tests/test_g3_cross_domain_integration.py`, `tests/test_web_e2e_data_integrity.py`, `tests/test_no_brand_sentinel.py`, `tests/test_data_folders_brand_scoped.py`, `tests/test_beta_e2e_smoke.py`, `tests/test_media_gen_provider_flow.py` |
+||| Proposed staging (tests — new) | `tests/test_concurrent_run_state.py` |
+||| Proposed staging (docs) | `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md` (this ledger) |
+||| Runtime state isolation | **User-scoped** (per `user_id`): `_cancel_requested`, `_current_llm`, `_active_llms`, `_session_ts` — cancel/LLM/session state for a user's active runs, not brand-derived. **Brand-scoped** (per `(user_id, brand_id)`): `_BRAND_VISUAL_CACHE`, `_conflict_cache` — brand-derived data (visual.json, brand priority rules, brand-scoped instructions); switching U1 from A1 to A2 gets a different cache key, so A1's cached data is never consumed by A2. `/api/cancel` sets only the calling user's flag and aborts only their LLM clients. `_register_llm`/`_unregister_llm` manage per-user LLM lists under `_runtime_lock`. `_is_cancelled()` checks the current user's flag. `_current_llm` check-then-set is under `_runtime_lock`. `_BRAND_VISUAL_CACHE` miss path uses `setdefault` under lock (load outside lock). |
+||| Archive isolation | `_archive_root()` resolves to `user_state_root() / ".recovery_archive"` when a workspace is active — `users/{user_id}/.recovery_archive`. Falls back to project-level path only in true no-workspace CLI/test mode. |
+||| Test commands — focused Stage C | `python3 -m pytest tests/test_concurrent_run_state.py` → `16 passed` |
+||| Test commands — affected existing | `python3 -m pytest tests/test_local_workspace.py tests/test_no_brand_sentinel.py tests/test_data_folders_brand_scoped.py tests/test_endpoint_security_media.py tests/test_beta_e2e_smoke.py` → `129 passed, 1 failed` (only accepted baseline failure) |
+||| Test commands — browser group | `python3 -m pytest tests/test_browser_e2e.py tests/test_browser_integration_real_orch.py tests/test_browser_upload_real_source.py` → `29 passed, 33 skipped, 0 failed` |
+||| Test commands — MB-02 regression subset | `python3 -m pytest` (same 27-file subset as MB-02) → `1 failed, 410 passed` (only accepted baseline failure) |
+||| Accepted baseline failure | `tests/test_local_workspace.py::test_product_agent_instructions_no_per_agent_sections` — pre-existing, unrelated to Stage C. |
+||| Paid/provider calls | $0. No LLM, embedding, web, image, video, provider, or network calls. |
+||| `git diff --check` | passed (no whitespace errors) |
+||| Stage C stop point | All Stage C tests green; stop for Codex acceptance review. |
+||| System81/authentication production code | Unchanged. |
+||| Media phase | Not started. |
+||| Next exact action | Codex Stage C acceptance review. |
 ## Post-Beta Backlog
 
 - multi-Agent team flow และ artifact chaining

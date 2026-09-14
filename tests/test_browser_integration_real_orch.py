@@ -189,13 +189,14 @@ def _server(tmp_path_factory):
     # product_db.set_status is called in _browser with brand context.
     _test_token = _sess.create_session(_user.user_id)
 
-    # Initialize module globals — save originals
-    _orig_current_llm = getattr(web_viewer, "_current_llm", None)
-    _orig_session_ts = getattr(web_viewer, "_session_ts", "")
-    _orig_cancel = getattr(web_viewer, "_cancel_requested", False)
-    web_viewer._current_llm = None
-    web_viewer._session_ts = ""
-    web_viewer._cancel_requested = False
+    # Initialize module globals — save originals (Stage C: per-user dicts)
+    _orig_current_llm = getattr(web_viewer, "_current_llm", {})
+    _orig_session_ts = getattr(web_viewer, "_session_ts", {})
+    _orig_cancel = getattr(web_viewer, "_cancel_requested", {})
+    web_viewer._current_llm = {}
+    web_viewer._session_ts = {}
+    web_viewer._cancel_requested = {}
+    web_viewer._active_llms = {}
 
     # Set dummy API key — save original for cleanup
     _orig_api_key = os.environ.get("OPENROUTER_API_KEY", None)
@@ -226,7 +227,8 @@ def _server(tmp_path_factory):
     Orchestrator.make_client = lambda self: fake_llm
 
     # Also set _current_llm so the route handler uses our FakeLLM
-    web_viewer._current_llm = fake_llm
+    # (Stage C: per-user dict — route handler sets _current_llm[uid] itself
+    #  via orch.make_client(), which is patched above to return fake_llm)
 
     # Patch downstream reviewer/renderer boundaries for Agent 2 (evidence mode)
     from src.agents.competitor_evidence import SemanticEvidenceReviewer

@@ -344,7 +344,7 @@ def test_single_agent_http_route(monkeypatch, tmp_path):
     importlib.reload(web_viewer)
     # _current_llm is a module-level global used by the route; ensure it
     # exists after reload so the worker can read/write it.
-    monkeypatch.setattr(web_viewer, "_current_llm", None, raising=False)
+    monkeypatch.setattr(web_viewer, "_current_llm", {}, raising=False)
 
     data_dir, cache_dir, client, ws_root = _setup_route_isolation(monkeypatch, tmp_path)
     _write_data_product(data_dir, "G3-Route-A", "Restaurant data: menu, price 120-180 baht")
@@ -412,7 +412,7 @@ def test_multi_product_http_route(monkeypatch, tmp_path):
     import importlib
     import web_viewer
     importlib.reload(web_viewer)
-    monkeypatch.setattr(web_viewer, "_current_llm", None, raising=False)
+    monkeypatch.setattr(web_viewer, "_current_llm", {}, raising=False)
 
     data_dir, cache_dir, client, ws_root = _setup_route_isolation(monkeypatch, tmp_path)
     _write_data_product(data_dir, "G3-Multi-A", "Restaurant: ramen, price 120 baht")

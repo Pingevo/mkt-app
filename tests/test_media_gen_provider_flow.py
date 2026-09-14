@@ -1069,7 +1069,7 @@ def test_get_brand_visual_passes_product_id_for_override(monkeypatch):
         return {"colors": ["blue"], "keywords": ["general"]}
 
     monkeypatch.setattr(web_viewer, "load_brand_visual", _fake_load_brand_visual)
-    monkeypatch.setattr(web_viewer, "_BRAND_VISUAL_CACHE", None)
+    monkeypatch.setattr(web_viewer, "_BRAND_VISUAL_CACHE", {})
 
     # Without product_id → base visual
     v1 = web_viewer._get_brand_visual()

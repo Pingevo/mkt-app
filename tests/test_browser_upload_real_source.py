@@ -317,9 +317,10 @@ def _server(tmp_path_factory):
     _orig["mg_img"] = web_viewer.media_gen.generate_image_with_retry
     _orig["mg_vid"] = web_viewer.media_gen.generate_video_with_retry
     _orig["mg_save"] = web_viewer.media_gen.save_retry_history
-    _orig["current_llm"] = getattr(web_viewer, "_current_llm", None)
-    _orig["session_ts"] = getattr(web_viewer, "_session_ts", "")
-    _orig["cancel"] = getattr(web_viewer, "_cancel_requested", False)
+    _orig["current_llm"] = getattr(web_viewer, "_current_llm", {})
+    _orig["session_ts"] = getattr(web_viewer, "_session_ts", {})
+    _orig["cancel"] = getattr(web_viewer, "_cancel_requested", {})
+    _orig["active_llms"] = getattr(web_viewer, "_active_llms", {})
 
     # Patch ALL _project_root() functions generically — every module that
     # has its own _project_root() must return the temp directory so that
@@ -411,10 +412,11 @@ def _server(tmp_path_factory):
     # Set dummy API key
     os.environ["OPENROUTER_API_KEY"] = "dummy-key-for-testing"
 
-    # Initialize module globals
-    web_viewer._current_llm = None
-    web_viewer._session_ts = ""
-    web_viewer._cancel_requested = False
+    # Initialize module globals (Stage C: per-user dicts)
+    web_viewer._current_llm = {}
+    web_viewer._session_ts = {}
+    web_viewer._cancel_requested = {}
+    web_viewer._active_llms = {}
 
     # Create the shared ScriptedFakeLLM
     fake_llm = ScriptedFakeLLM()
@@ -510,6 +512,7 @@ def _server(tmp_path_factory):
     web_viewer._current_llm = _orig["current_llm"]
     web_viewer._session_ts = _orig["session_ts"]
     web_viewer._cancel_requested = _orig["cancel"]
+    web_viewer._active_llms = _orig["active_llms"]
     web_viewer.content_history.record_entry = _orig["ch_record"]
     web_viewer.content_history.format_product_history_for_prompt = _orig["ch_format"]
     web_viewer.content_history.update_last_entry_output_file = _orig["ch_update"]

@@ -280,11 +280,11 @@ app.add_middleware(AuthMiddleware)
 
 # Central conflict cache — ตรวจครั้งเดียวตอน brand/agent settings เปลี่ยน
 # ทุก UI ดึงจาก GET /api/conflicts แทนการตรวจใหม่ทุกครั้ง
-_conflict_cache: dict[str, list] = {}  # { agent_key: [conflict_dict, ...] }
+# (per-user dict declared above with other Stage C runtime state)
 
 
 def _refresh_conflict_cache() -> None:
-    """ตรวจ conflict ทุก agent → เก็บใน _conflict_cache.
+    """ตรวจ conflict ทุก agent → เก็บใน _conflict_cache (per-user).
 
     เรียกหลัง: brand save, agent settings save, server start
     ไม่ตรวจ Quick Brief (per-run, ไม่ได้ save)
@@ -305,32 +305,36 @@ def _refresh_conflict_cache() -> None:
             }
             for c in conflicts
         ]
-    global _conflict_cache
-    _conflict_cache = cache
+    key = _cache_key()
+    if key:
+        _conflict_cache[key] = cache
 
 
 def _get_brand_visual(product_id: str | None = None) -> dict:
-    """โหลด brand/visual.json — cached ที่ module level.
+    """โหลด brand/visual.json — cached ที่ module level (per-user+brand).
 
     ถ้ามี product_id → merge product-specific visual_override ด้วย
     (cache เฉพาะ brand-level; product override อ่านใหม่ทุกครั้งเพราะ product profile เปลี่ยนได้)
     """
-    global _BRAND_VISUAL_CACHE
-    if _BRAND_VISUAL_CACHE is None:
+    key = _cache_key()
+    cached = _BRAND_VISUAL_CACHE.get(key) if key else None
+    if cached is None:
         try:
-            _BRAND_VISUAL_CACHE = load_brand_visual(None)
+            loaded = load_brand_visual(None)
         except Exception:
-            _BRAND_VISUAL_CACHE = {}
+            loaded = {}
+        if key:
+            with _runtime_lock:
+                cached = _BRAND_VISUAL_CACHE.setdefault(key, loaded)
+        else:
+            cached = loaded
     if not product_id:
-        return _BRAND_VISUAL_CACHE
+        return cached
     # Product-specific override — อ่านใหม่ไม่ cache (product profile เปลี่ยนได้)
     try:
         return load_brand_visual(None, product_id=product_id)
     except Exception:
-        return _BRAND_VISUAL_CACHE
-
-
-_BRAND_VISUAL_CACHE: dict | None = None
+        return cached
 
 
 def _resolve_product_image_paths(product_id: str | None) -> list[str]:
@@ -487,8 +491,64 @@ def compose_media_input(
 
 
 _orch: Orchestrator | None = None  # only used by single-agent endpoint
-_cancel_requested: bool = False
-_active_llms: list[Any] = []  # track all active LLM clients for cancel
+
+# --- Stage C: per-user runtime state (keyed by verified user_id) ----------
+# Each former process-global is now dict[user_id, value] so one user's
+# cancel/LLM/session/visual/conflict state cannot cross workspace boundaries.
+# Identity comes from get_workspace().user_id (set by AuthMiddleware), never
+# from client-supplied values.
+_runtime_lock = threading.Lock()
+_cancel_requested: dict[str, bool] = {}
+_active_llms: dict[str, list[Any]] = {}
+_current_llm: dict[str, Any] = {}
+_session_ts: dict[str, str] = {}
+_BRAND_VISUAL_CACHE: dict[str, dict | None] = {}
+_conflict_cache: dict[str, dict[str, list]] = {}
+
+
+def _runtime_user_id() -> str | None:
+    """Return the verified user_id from the active workspace context."""
+    from src.workspace_context import get_workspace
+    ws = get_workspace()
+    return ws.user_id if ws else None
+
+
+def _cache_key() -> tuple[str, str | None] | None:
+    """Return (user_id, brand_id) for brand-derived caches, or None.
+
+    brand_id is None for user-only contexts (no brand selected).
+    Two brands of the same user get different keys — A1's cached
+    brand data is never consumed by A2.
+    """
+    from src.workspace_context import get_workspace
+    ws = get_workspace()
+    if ws is None:
+        return None
+    return (ws.user_id, ws.brand_id)
+
+
+def _is_cancelled() -> bool:
+    """Check if the current user's cancel flag is set."""
+    uid = _runtime_user_id()
+    return _cancel_requested.get(uid, False) if uid else False
+
+
+def _register_llm(llm: Any) -> None:
+    """Register an LLM client for the current user (for cancel)."""
+    uid = _runtime_user_id()
+    if uid:
+        with _runtime_lock:
+            _active_llms.setdefault(uid, []).append(llm)
+
+
+def _unregister_llm(llm: Any) -> None:
+    """Unregister an LLM client for the current user."""
+    uid = _runtime_user_id()
+    if uid:
+        with _runtime_lock:
+            user_llms = _active_llms.get(uid, [])
+            if llm in user_llms:
+                user_llms.remove(llm)
 
 # Lock สำหรับ serialize content_creator เมื่อหลาย flow รันขนานกัน
 # ป้องกันการสร้างคอนเทนต์ซ้ำกัน — flow ที่มาทีหลังจะเห็น history ของ flow ก่อนหน้า
@@ -2254,8 +2314,9 @@ async def api_brand_json_save(request: Request) -> JSONResponse:
         (bdir / "brand_profile.md").write_text(profile, encoding="utf-8")
         saved.append("brand_profile.md")
     # Clear visual cache เพื่อโหลดใหม่ในครั้งต่อไป
-    global _BRAND_VISUAL_CACHE
-    _BRAND_VISUAL_CACHE = None
+    key = _cache_key()
+    if key:
+        _BRAND_VISUAL_CACHE.pop(key, None)
     # Refresh conflict cache — brand rules เปลี่ยน ต้องตรวจ agent ทุกตัวใหม่
     _refresh_conflict_cache()
     return JSONResponse({"ok": True, "saved": saved})
@@ -2275,8 +2336,9 @@ async def api_brand_migrate(request: Request) -> JSONResponse:
     bdir.mkdir(parents=True, exist_ok=True)
     status = migrate_brand(bdir, force=force)
     # Clear visual cache
-    global _BRAND_VISUAL_CACHE
-    _BRAND_VISUAL_CACHE = None
+    key = _cache_key()
+    if key:
+        _BRAND_VISUAL_CACHE.pop(key, None)
     return JSONResponse({"ok": True, **status})
 
 
@@ -2998,9 +3060,11 @@ def api_conflicts_all() -> JSONResponse:
     ตรวจครั้งเดียวตอน brand/agent settings เปลี่ยน (ดู _refresh_conflict_cache)
     ไม่ตรวจใหม่ทุกครั้ง — ลด cost + ทุกหน้าเห็นผลเดียวกัน
     """
+    key = _cache_key()
+    cache = _conflict_cache.get(key, {}) if key else {}
     return JSONResponse({
         agent_key: {"conflicts": conflicts, "has_conflict": len(conflicts) > 0}
-        for agent_key, conflicts in _conflict_cache.items()
+        for agent_key, conflicts in cache.items()
     })
 
 
@@ -3106,15 +3170,19 @@ def api_file(session: str, filename: str, download: int = 0):
 
 @app.post("/api/cancel")
 async def api_cancel() -> JSONResponse:
-    global _cancel_requested, _active_llms
-    _cancel_requested = True
-    # Abort all active LLM clients across parallel runs
-    for llm in _active_llms:
-        try:
-            llm.abort()
-        except Exception:
-            pass
-    _active_llms.clear()
+    uid = _runtime_user_id()
+    if not uid:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    _cancel_requested[uid] = True
+    # Abort only the calling user's active LLM clients
+    with _runtime_lock:
+        user_llms = _active_llms.get(uid, [])
+        for llm in user_llms:
+            try:
+                llm.abort()
+            except Exception:
+                pass
+        user_llms.clear()
     return JSONResponse({"ok": True})
 
 
@@ -3152,26 +3220,25 @@ async def api_run_agent(request: Request) -> StreamingResponse:
     if not agent_key or not folder:
         return JSONResponse({"error": "missing agent or folder"})
 
-    global _cancel_requested, _session_ts
-    _cancel_requested = False
-    _session_ts = _session_ts_label([folder])
+    uid = _runtime_user_id()
+    _cancel_requested[uid] = False
+    _session_ts[uid] = _session_ts_label([folder])
 
     async def event_stream():
-        global _current_llm
         orch = _get_orchestrator()
         q: _queue.Queue[str | None] = _queue.Queue()
 
         def worker():
-            global _current_llm
             try:
-                output_dir = OUTPUT_DIR() / _session_ts
+                output_dir = OUTPUT_DIR() / _session_ts.get(uid, "")
                 output_dir.mkdir(parents=True, exist_ok=True)
 
-                if _current_llm is None:
-                    _current_llm = orch.make_client()
-                llm = _current_llm
+                with _runtime_lock:
+                    if _current_llm.get(uid) is None:
+                        _current_llm[uid] = orch.make_client()
+                    llm = _current_llm[uid]
 
-                if _cancel_requested:
+                if _cancel_requested.get(uid, False):
                     q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
                 else:
                     agent_name = AGENT_INFO.get(agent_key, {}).get("name", agent_key)
@@ -3229,19 +3296,19 @@ async def api_run_agent(request: Request) -> StreamingResponse:
                             _disp_len = int(_sys_cfg().get("display_preview_length", 500))
                             q.put_nowait(_sse("agent_done", result[:_disp_len], agent=agent_key, file=filepath, set_num=set_num, total_sets=len(results)))
                     except Exception as e:
-                        if _cancel_requested:
+                        if _cancel_requested.get(uid, False):
                             q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
                         else:
                             q.put_nowait(_sse("error", str(e), agent=agent_key))
 
-                if _current_llm:
-                    _current_llm.close()
-                    _current_llm = None
+                _llm = _current_llm.pop(uid, None)
+                if _llm:
+                    _llm.close()
                 q.put_nowait(_sse("done", ""))
                 q.put_nowait(None)
 
             except Exception as e:
-                if _cancel_requested:
+                if _cancel_requested.get(uid, False):
                     q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
                     q.put_nowait(_sse("done", ""))
                     q.put_nowait(None)
@@ -3609,7 +3676,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
         for platform in target_platforms:
             platform_label = platform_names.get(platform, platform) if platform else ""
             for post_idx in range(count_per_platform):
-                if _cancel_requested:
+                if _is_cancelled():
                     break
 
                 # สร้าง brief พิเศษสำหรับหลายโพสต์
@@ -3913,8 +3980,8 @@ async def api_run_agents(request: Request) -> StreamingResponse:
     # Sort agents by order (no auto-add — user เลือกเองว่าจะรันอะไร)
     sorted_agents = [a for a in AGENT_ORDER if a in agents]
 
-    global _cancel_requested
-    _cancel_requested = False
+    uid = _runtime_user_id()
+    _cancel_requested[uid] = False
     # Use readable folder name: Thai date + product names (local, not global — parallel-safe)
     session_ts = _session_ts_label(folders)
 
@@ -3926,7 +3993,6 @@ async def api_run_agents(request: Request) -> StreamingResponse:
 
         def worker():
             # Local LLM client — register in _active_llms for cancel
-            global _active_llms
             llm = None
             try:
                 output_dir = OUTPUT_DIR() / session_ts
@@ -3944,7 +4010,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                     pass
 
                 llm = orch.make_client()
-                _active_llms.append(llm)
+                _register_llm(llm)
 
                 if mode == "combined" and len(folders) >= 2:
                     folder_label = " + ".join(folders)
@@ -3959,7 +4025,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                             all_ready[f"{folder}/{fname}"] = content
 
                     for agent_key in sorted_agents:
-                        if _cancel_requested:
+                        if _is_cancelled():
                             q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
                             break
 
@@ -4000,14 +4066,14 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                                 _dl = int(_sys_cfg().get("display_preview_length", 500))
                                 q.put_nowait(_sse("agent_done", result[:_dl], agent=agent_key, file=filepath, set_num=set_num, total_sets=len(results)))
                         except Exception as e:
-                            if _cancel_requested:
+                            if _is_cancelled():
                                 q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
                                 break
                             q.put_nowait(_sse("error", str(e), agent=agent_key))
                 else:
                     for folder in folders:
                         for agent_key in sorted_agents:
-                            if _cancel_requested:
+                            if _is_cancelled():
                                 q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
                                 break
 
@@ -4049,7 +4115,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                                     _dl = int(_sys_cfg().get("display_preview_length", 500))
                                     q.put_nowait(_sse("agent_done", result[:_dl], agent=agent_key, file=filepath, set_num=set_num, total_sets=len(results)))
                             except Exception as e:
-                                if _cancel_requested:
+                                if _is_cancelled():
                                     q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
                                     break
                                 q.put_nowait(_sse("error", str(e), agent=agent_key))
@@ -4057,7 +4123,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                 if llm:
                     llm.close()
                     try:
-                        _active_llms.remove(llm)
+                        _unregister_llm(llm)
                     except ValueError:
                         pass
                 q.put_nowait(_sse("done", ""))
@@ -4070,7 +4136,7 @@ async def api_run_agents(request: Request) -> StreamingResponse:
                     except Exception:
                         pass
                     try:
-                        _active_llms.remove(llm)
+                        _unregister_llm(llm)
                     except ValueError:
                         pass
                 q.put_nowait(_sse("error", str(e)))
@@ -4136,8 +4202,8 @@ async def api_run_flows(request: Request) -> StreamingResponse:
         if guard_err:
             return guard_err
 
-    global _cancel_requested
-    _cancel_requested = False
+    uid = _runtime_user_id()
+    _cancel_requested[uid] = False
 
     # Session folder (shared across all flows, like run_agents)
     session_ts = _session_ts_label([])
@@ -4162,7 +4228,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                 orch = Orchestrator()
                 llm = orch.make_client()
                 try:
-                    _active_llms.append(llm)
+                    _register_llm(llm)
                 except NameError:
                     pass
 
@@ -4234,7 +4300,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
 
                 def run_one_agent(agent_key: str, product: str, context: dict) -> str:
                     nonlocal orch, llm, output_dir, all_phase_traces
-                    if _cancel_requested:
+                    if _is_cancelled():
                         return ""
 
                     agent_name = AGENT_INFO.get(agent_key, {}).get("name", agent_key)
@@ -4273,7 +4339,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
 
                         return result_text
                     except Exception as e:
-                        if _cancel_requested:
+                        if _is_cancelled():
                             q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
                             return ""
                         q.put_nowait(_sse("error", str(e), agent=agent_key, plan=plan_idx))
@@ -4284,7 +4350,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                 if llm:
                     try:
                         llm.close()
-                        _active_llms.remove(llm)
+                        _unregister_llm(llm)
                     except (ValueError, Exception):
                         pass
 
@@ -4293,7 +4359,7 @@ async def api_run_flows(request: Request) -> StreamingResponse:
                 if llm:
                     try:
                         llm.close()
-                        _active_llms.remove(llm)
+                        _unregister_llm(llm)
                     except (ValueError, Exception):
                         pass
             finally:
@@ -4766,8 +4832,8 @@ async def api_run_auto(request: Request) -> StreamingResponse:
     if guard_err:
         return guard_err
 
-    global _cancel_requested
-    _cancel_requested = False
+    uid = _runtime_user_id()
+    _cancel_requested[uid] = False
 
     session_ts = _session_ts_label([]).replace(' - ', ' - AUTO - ')
 
@@ -4776,7 +4842,6 @@ async def api_run_auto(request: Request) -> StreamingResponse:
         q: _queue.Queue[str | None] = _queue.Queue()
 
         def worker():
-            global _active_llms
             # ผูก LLM call ทั้งหมดใน thread นี้เข้ากับ flow_id
             flow_id = f"auto_{uuid.uuid4().hex[:8]}"
             set_flow_id(flow_id)
@@ -4787,7 +4852,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                 output_dir.mkdir(parents=True, exist_ok=True)
 
                 llm = orch.make_client()
-                _active_llms.append(llm)
+                _register_llm(llm)
 
                 # Resolve run-scoped resources for auto flow
                 workflow_id = flow_id
@@ -4879,7 +4944,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     all_phase_traces: list[dict[str, Any]] = [t.as_dict() for t in step_context.phase_traces]
                     flow_results: dict[str, str] = {}
                     for agent_key in agents:
-                        if _cancel_requested:
+                        if _is_cancelled():
                             break
 
                         agent_name = AGENT_INFO.get(agent_key, {}).get("name", agent_key)
@@ -4913,14 +4978,14 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                             q.put_nowait(_sse("agent_done", result_text[:_dl],
                                               agent=agent_key, file=file_path))
                         except Exception as e:
-                            if _cancel_requested:
+                            if _is_cancelled():
                                 break
                             q.put_nowait(_sse("error", str(e), agent=agent_key))
 
                     if llm:
                         llm.close()
                         try:
-                            _active_llms.remove(llm)
+                            _unregister_llm(llm)
                         except ValueError:
                             pass
                     q.put_nowait(_sse("done", ""))
@@ -4931,7 +4996,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                 # Single-agent auto mode (backward compat): content_creator only
                 # ============================================================
                 for i in range(content_count):
-                    if _cancel_requested:
+                    if _is_cancelled():
                         q.put_nowait(_sse("status", "หยุดการทำงานแล้ว"))
                         break
 
@@ -5099,7 +5164,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                 if llm:
                     llm.close()
                     try:
-                        _active_llms.remove(llm)
+                        _unregister_llm(llm)
                     except ValueError:
                         pass
                 q.put_nowait(_sse("done", ""))
@@ -5112,7 +5177,7 @@ async def api_run_auto(request: Request) -> StreamingResponse:
                     except Exception:
                         pass
                     try:
-                        _active_llms.remove(llm)
+                        _unregister_llm(llm)
                     except ValueError:
                         pass
                 q.put_nowait(_sse("error", str(e)))

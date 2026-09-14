@@ -71,9 +71,9 @@ def _client(tmp_path, monkeypatch):
     monkeypatch.setattr(web_viewer, "_read_folder", lambda f: (["info text"], [], {}))
 
     # Initialize module globals that are only set inside route handlers
-    monkeypatch.setattr(web_viewer, "_current_llm", None, raising=False)
-    monkeypatch.setattr(web_viewer, "_session_ts", "", raising=False)
-    monkeypatch.setattr(web_viewer, "_cancel_requested", False, raising=False)
+    monkeypatch.setattr(web_viewer, "_current_llm", {}, raising=False)
+    monkeypatch.setattr(web_viewer, "_session_ts", {}, raising=False)
+    monkeypatch.setattr(web_viewer, "_cancel_requested", {}, raising=False)
 
     # Register a test user and create an authenticated client
     from src.auth import UserStore, SessionManager, SESSION_COOKIE_NAME
@@ -206,7 +206,7 @@ def _mock_orch(monkeypatch):
     fake = _make_fake_orch()
     monkeypatch.setattr(web_viewer, "Orchestrator", lambda **kw: fake)
     # Ensure _current_llm is None so the route creates a (mocked) client
-    monkeypatch.setattr(web_viewer, "_current_llm", None, raising=False)
+    monkeypatch.setattr(web_viewer, "_current_llm", {}, raising=False)
 
     # Mock media generation (not part of Beta core text flows)
     monkeypatch.setattr(web_viewer.media_gen, "generate_image_with_retry",

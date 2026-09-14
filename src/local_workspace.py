@@ -34,7 +34,17 @@ def _project_root() -> Path:
 # --- Archive directory for historical artifacts --------------------------
 
 def _archive_root() -> Path:
-    """Non-runtime archive directory for historical artifacts."""
+    """Per-user archive directory for historical artifacts (Stage C).
+
+    Resolves to ``users/{user_id}/.recovery_archive/`` when a workspace is
+    active, so one user cannot read or restore another user's archive.
+    Falls back to the project-level path only when no workspace is active
+    (true no-workspace CLI/test compatibility).
+    """
+    from .workspace_context import get_workspace, user_state_root
+    ws = get_workspace()
+    if ws is not None:
+        return user_state_root(_project_root()) / ".recovery_archive"
     return _project_root() / ".recovery_archive"
 
 

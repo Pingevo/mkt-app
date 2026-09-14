@@ -31,9 +31,9 @@ def _app(tmp_path, monkeypatch):
 
     importlib.reload(web_viewer)
     monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(web_viewer, "_current_llm", None, raising=False)
-    monkeypatch.setattr(web_viewer, "_session_ts", "", raising=False)
-    monkeypatch.setattr(web_viewer, "_cancel_requested", False, raising=False)
+    monkeypatch.setattr(web_viewer, "_current_llm", {}, raising=False)
+    monkeypatch.setattr(web_viewer, "_session_ts", {}, raising=False)
+    monkeypatch.setattr(web_viewer, "_cancel_requested", {}, raising=False)
 
     config_dir = tmp_path / "config"
     config_dir.mkdir(exist_ok=True)

@@ -42,9 +42,10 @@ def _client(tmp_path, monkeypatch):
         "enabled: true\nttl_hours: 24\n", encoding="utf-8",
     )
 
-    monkeypatch.setattr(web_viewer, "_current_llm", None, raising=False)
-    monkeypatch.setattr(web_viewer, "_session_ts", "", raising=False)
-    monkeypatch.setattr(web_viewer, "_cancel_requested", False, raising=False)
+    monkeypatch.setattr(web_viewer, "_current_llm", {}, raising=False)
+    monkeypatch.setattr(web_viewer, "_session_ts", {}, raising=False)
+    monkeypatch.setattr(web_viewer, "_cancel_requested", {}, raising=False)
+    monkeypatch.setattr(web_viewer, "_active_llms", {}, raising=False)
 
     # Redirect _resource_store to per-brand workspace (no explicit storage_dir
     # so it resolves via brand_state_root, same as the scheduler's store)
