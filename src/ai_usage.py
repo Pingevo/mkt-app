@@ -50,7 +50,19 @@ def usage_log_path() -> Path:
 
 
 def _default_actor() -> str:
-    """คืน actor default ถ้าไม่มี context ตั้งไว้ — อ่านจาก env หรือ fallback."""
+    """คืน actor default — อ่านจาก workspace context ก่อน, แล้ว env, แล้ว fallback.
+
+    Login ตั้ง WorkspaceContext ต่อ request (และ propagate ไป worker thread
+    ผ่าน with_workspace_context) — ดึง user_id จากนั่นก่อนที่จะ fallback
+    ไป env var สำหรับ CLI/worker ที่ไม่มี user login.
+    """
+    try:
+        from .workspace_context import get_workspace
+        ws = get_workspace()
+        if ws and ws.user_id:
+            return ws.user_id
+    except Exception:
+        pass
     return get_env("AI_USAGE_HUB_USER", "mktapp")
 
 
