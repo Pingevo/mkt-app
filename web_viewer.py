@@ -5905,6 +5905,20 @@ async function mktappLogout() {
   .flow-box-nav .spacer { flex: 1; }
   /* custom tooltip: แสดงทันทีตอนชี้ ไม่รอ title attribute */
   span[data-tooltip] { cursor: help; }
+
+  /* Brand gate / switcher (MB-UI) — picker overlay reuses settings-modal;
+     blocking mode covers the workspace until a brand is selected. */
+  #brand-switcher-btn { border-color: #4a4d6a; color: #a5b4ff; }
+  #brand-switcher-btn:hover { border-color: #7c8aff; color: #7c8aff; }
+  #brand-gate-overlay { z-index: 20000; }
+  #brand-gate-overlay.blocking { background: rgba(0,0,0,0.85); }
+  .brand-gate-item { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #1c1e2a; border: 1px solid #2a2d3a; border-radius: 8px; margin-bottom: 8px; }
+  .brand-gate-item-name { flex: 1; font-size: 13px; color: #e0e0e0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .brand-gate-active-tag { font-size: 11px; color: #4ade80; white-space: nowrap; }
+  .brand-gate-select-btn { background: #7c8aff; color: #0f1117; border: none; border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .brand-gate-select-btn:hover { background: #6470ff; }
+  .brand-gate-select-btn:disabled { background: #3a3d5a; color: #888; cursor: not-allowed; }
+  .brand-gate-empty { font-size: 12px; color: #888; padding: 8px 0; }
 </style>
 </head>
 <body>
@@ -5914,6 +5928,7 @@ async function mktappLogout() {
     <p>เลือกสินค้า → เรียงลำดับ agent → ตั้งค่า content → กดยืนยันรัน flow</p>
   </div>
   <div class="header-right">
+    <button class="home-header-btn" id="brand-switcher-btn" style="display:none" onclick="openBrandPicker(false)" title="สลับแบรนด์"></button>
     <div class="credits-badge" id="credits-badge" style="display:none">กำลังโหลด...</div>
     <button class="home-header-btn" onclick="openScheduleList()" id="schedule-header-btn" style="position:relative;">📅 ตารางเวลา<span id="schedule-badge" style="display:none;position:absolute;top:-4px;right:-4px;background:#fbbf24;color:#0f1117;border-radius:10px;font-size:10px;padding:1px 6px;font-weight:700;">●</span></button>
     <button class="home-header-btn" onclick="openPillarsModal()">🎯 Pillars</button>
@@ -11216,6 +11231,191 @@ function saveAgentSettings() {
   });
 }
 
+// ---- Multi-brand gate + switcher (MB-UI) ----
+// Active brand is resolved per-request by AuthMiddleware from the verified
+// mktapp_brand cookie; this UI only ever submits a brand_id that came from
+// the server's own /api/brands list/create responses — never client-invented.
+let _brandGateBlocking = false;
+let _brandBusy = false;
+
+function _bgEl(id) { return document.getElementById(id); }
+
+function _brandGateError(msg) {
+  const el = _bgEl('brand-gate-status');
+  if (el) { el.textContent = msg || ''; el.className = 'upload-status' + (msg ? ' err' : ''); }
+}
+
+function _setBrandBusy(b) {
+  _brandBusy = b;
+  const ov = _bgEl('brand-gate-overlay');
+  if (ov) ov.querySelectorAll('button, input').forEach(c => { c.disabled = b; });
+}
+
+async function initBrandGate() {
+  try {
+    const r = await fetch('/api/brands/active');
+    if (r.status === 401) return;  // auth guard owns the redirect
+    if (!r.ok) {
+      openBrandPicker(true);
+      _brandGateError('โหลดสถานะแบรนด์ไม่สำเร็จ — ลองรีเฟรชหน้า');
+      return;
+    }
+    const data = await r.json();
+    if (data.active && data.brand) {
+      _showBrandSwitcher(data.brand.name);
+      return;
+    }
+    openBrandPicker(true);
+  } catch (e) {
+    openBrandPicker(true);
+    _brandGateError('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ — ลองรีเฟรชหน้า');
+  }
+}
+
+function _showBrandSwitcher(name) {
+  const btn = _bgEl('brand-switcher-btn');
+  if (!btn) return;
+  btn.textContent = '🏷 ' + (name || 'แบรนด์');
+  btn.style.display = '';
+}
+
+async function openBrandPicker(blocking) {
+  _brandGateBlocking = !!blocking;
+  const ov = _bgEl('brand-gate-overlay');
+  if (!ov) return;
+  ov.className = 'settings-modal-overlay visible' + (blocking ? ' blocking' : '');
+  const title = _bgEl('brand-gate-title');
+  if (title) title.textContent = blocking
+    ? 'เลือกหรือสร้างแบรนด์เพื่อเริ่มใช้งาน'
+    : 'สลับแบรนด์';
+  const closeBtn = _bgEl('brand-gate-close');
+  if (closeBtn) closeBtn.style.display = blocking ? 'none' : '';
+  _brandGateError('');
+  await _renderBrandGateList();
+}
+
+function closeBrandPicker() {
+  if (_brandGateBlocking || _brandBusy) return;  // blocking gate cannot be dismissed
+  const ov = _bgEl('brand-gate-overlay');
+  if (ov) ov.className = 'settings-modal-overlay';
+}
+
+async function _renderBrandGateList() {
+  const list = _bgEl('brand-gate-list');
+  if (!list) return;
+  list.textContent = '';
+  const loading = document.createElement('div');
+  loading.className = 'brand-gate-empty';
+  loading.textContent = 'กำลังโหลด...';
+  list.appendChild(loading);
+
+  let brands = [];
+  let activeId = null;
+  try {
+    const [lr, ar] = await Promise.all([
+      fetch('/api/brands'),
+      fetch('/api/brands/active'),
+    ]);
+    if (!lr.ok) throw new Error('list failed');
+    const ldata = await lr.json();
+    brands = ldata.brands || [];
+    if (ar.ok) {
+      const adata = await ar.json();
+      if (adata.active && adata.brand) activeId = adata.brand.brand_id;
+    }
+  } catch (e) {
+    list.textContent = '';
+    _brandGateError('โหลดรายชื่อแบรนด์ไม่สำเร็จ — ลองรีเฟรชหน้า');
+    return;
+  }
+
+  list.textContent = '';
+  if (!brands.length) {
+    const empty = document.createElement('div');
+    empty.className = 'brand-gate-empty';
+    empty.textContent = 'ยังไม่มีแบรนด์ — สร้างแบรนด์แรกด้านล่าง';
+    list.appendChild(empty);
+    return;
+  }
+  for (const b of brands) {
+    const row = document.createElement('div');
+    row.className = 'brand-gate-item';
+    row.dataset.brandId = b.brand_id;
+    const nm = document.createElement('span');
+    nm.className = 'brand-gate-item-name';
+    nm.textContent = b.name || '(no name)';  // user-controlled — textContent only, no innerHTML
+    row.appendChild(nm);
+    if (b.brand_id === activeId) {
+      const tag = document.createElement('span');
+      tag.className = 'brand-gate-active-tag';
+      tag.textContent = 'กำลังใช้งาน';
+      row.appendChild(tag);
+    }
+    const btn = document.createElement('button');
+    btn.className = 'brand-gate-select-btn';
+    btn.textContent = 'เลือก';
+    btn.disabled = _brandBusy;
+    btn.onclick = () => selectBrand(b.brand_id);
+    row.appendChild(btn);
+    list.appendChild(row);
+  }
+}
+
+async function selectBrand(brandId) {
+  if (_brandBusy || !brandId) return;
+  _setBrandBusy(true);
+  _brandGateError('');
+  try {
+    const r = await fetch('/api/brands/' + encodeURIComponent(brandId) + '/select', { method: 'POST' });
+    if (!r.ok) {
+      _brandGateError('เลือกแบรนด์ไม่สำเร็จ — ลองอีกครั้ง');
+      _setBrandBusy(false);
+      return;
+    }
+    location.reload();  // middleware rebuilds the verified workspace from the new cookie
+  } catch (e) {
+    _brandGateError('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้');
+    _setBrandBusy(false);
+  }
+}
+
+async function createBrandFromGate() {
+  if (_brandBusy) return;
+  const inp = _bgEl('brand-gate-name');
+  const name = ((inp && inp.value) || '').trim();
+  if (!name) { _brandGateError('กรุณาใส่ชื่อแบรนด์'); return; }
+  _setBrandBusy(true);
+  _brandGateError('');
+  try {
+    const cr = await fetch('/api/brands', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    });
+    if (!cr.ok) {
+      _brandGateError('สร้างแบรนด์ไม่สำเร็จ — ลองอีกครั้ง');
+      _setBrandBusy(false);
+      return;
+    }
+    const brand = await cr.json();
+    const sr = await fetch('/api/brands/' + encodeURIComponent(brand.brand_id) + '/select', { method: 'POST' });
+    if (!sr.ok) {
+      // Brand was created server-side — surface it in the list so the user
+      // can select it instead of creating a duplicate.
+      _brandGateError('สร้างแบรนด์แล้วแต่เลือกไม่สำเร็จ — เลือกจากรายการด้านบน');
+      _setBrandBusy(false);
+      await _renderBrandGateList();
+      return;
+    }
+    location.reload();
+  } catch (e) {
+    _brandGateError('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้');
+    _setBrandBusy(false);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', initBrandGate);
+
 loadFolderList();
 loadCredits();
 
@@ -11371,6 +11571,25 @@ function loadCredits() {
     <div class="settings-actions">
       <button class="settings-save" style="flex:1" onclick="saveBrandFileModal()">บันทึก</button>
     </div>
+  </div>
+</div>
+
+<!-- Brand gate / switcher (MB-UI): blocking onboarding when no active brand,
+     and the same picker re-used by the header switcher.  Brand names are
+     rendered via textContent only — never interpolated into innerHTML. -->
+<div class="settings-modal-overlay" id="brand-gate-overlay">
+  <div class="settings-modal" style="width:460px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 id="brand-gate-title" style="margin:0">เลือกหรือสร้างแบรนด์</h3>
+      <button id="brand-gate-close" onclick="closeBrandPicker()" title="ปิด" style="background:none;border:none;color:#888;font-size:24px;cursor:pointer;line-height:1;padding:0 4px">&times;</button>
+    </div>
+    <div id="brand-gate-list" style="margin-bottom:14px"></div>
+    <label for="brand-gate-name">ชื่อแบรนด์ใหม่</label>
+    <div style="display:flex;gap:8px;margin-top:4px">
+      <input type="text" id="brand-gate-name" placeholder="เช่น แบรนด์ของฉัน" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();createBrandFromGate();}">
+      <button id="brand-gate-create" class="settings-save" style="flex:none;padding:8px 16px" onclick="createBrandFromGate()">สร้างแบรนด์</button>
+    </div>
+    <div class="upload-status" id="brand-gate-status"></div>
   </div>
 </div>
 

@@ -440,8 +440,8 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 
 | Field | Current value |
 |---|---|
-| Current phase | **Stage C (Runtime/Recovery Isolation)** — implementation complete; pending Codex acceptance review. MB-02 `d625ecd` accepted/closed. AUTH-ISO-01 (Stages A/B + MB-01 + System81) accepted/frozen. |
-| Current objective | Close Stage C final acceptance: per-user runtime state isolation + per-user recovery archive. Then proceed to Media (image + video real UI/provider completion). |
+| Current phase | **MB-UI (Multi-Brand Account Flow UI)** — implementation complete; pending Codex acceptance review. Stage C `d904825` accepted. MB-02 `d625ecd` accepted/closed. AUTH-ISO-01 (Stages A/B + MB-01 + System81) accepted/frozen. |
+| Current objective | Close MB-UI final acceptance: real UI create/select/switch multi-brand flow proven in browser. Then proceed to Media (image + video real UI/provider completion). |
 | Checkpoint A — Final grounding boundary | `ACCEPTED / FROZEN` at `65ed8c7`. Generic final-output truth boundary wired into the smallest common pre-persistence seam for Agents 1–4; model reasoning for semantic entailment; no keyword/regex lists. Implemented safeguard — not yet re-qualified against current model. |
 | Gemini 3.8 migration | `ACCEPTED / FROZEN` at `c39f596`. Production text/reasoning workloads migrated to `google/gemini-3.8-flash` (read from `config/agents.yaml`). |
 | Checkpoint C1 — Media Core (mechanical transport) | `ACCEPTED / FROZEN` at `5cc4724` + `06157af`. Per-item product+asset reference selection via `extract_reference_ordinals`/`filter_catalog_by_ordinals`/`selected_reference_ordinals` in `compose_media_input`; `preflight_reference_mentions` rejects unknown/out-of-range ordinals and empty-catalog mentions. Reviewed and accepted by Codex. Do not reopen speculative media plumbing. |
@@ -479,7 +479,7 @@ Do not repeatedly run the full suite after small edits. Do not accept a run base
 |---|---|
 | Phase ID | AUTH-ISO-01 |
 | Agent ID | SHARED-RUNTIME |
-| Gate status | Stage A COMPLETE (commit `71c1e62`). Stage B COMPLETE (commit `7a3c293`). MB-01 COMPLETE (commit `f15cdbd`). System81 integration COMPLETE (commit `1a0ef78`). MB-02 ACCEPTED/CLOSED (commit `d625ecd`). Stage C implemented, pending Codex acceptance. |
+| Gate status | Stage A COMPLETE (commit `71c1e62`). Stage B COMPLETE (commit `7a3c293`). MB-01 COMPLETE (commit `f15cdbd`). System81 integration COMPLETE (commit `1a0ef78`). MB-02 ACCEPTED/CLOSED (commit `d625ecd`). Stage C ACCEPTED (commit `d904825`). MB-UI implemented, pending Codex acceptance. |
 | Blocking | Yes — supersedes all other work (including the deferred Wan 2.7 review) until closed |
 | Baseline HEAD | `3e0588f` (auth + workspace isolation initial implementation) |
 | Stage A commit | `71c1e62 fix(auth): enforce per-user workspace isolation` |
@@ -945,7 +945,7 @@ No other hard stops. APScheduler uses in-memory `MemoryJobStore` (default, no `j
 || Files changed (docs) | `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md` (this ledger) |
 || Scheduler | Business behavior untouched. No brand semantics added. Stage B APS IDs unchanged. |
 || System81 | Pending after multi-brand foundation. Not started. |
-|| Stage C | Implemented. Pending Codex acceptance review. |
+|| Stage C | ACCEPTED at `d904825`. |
 || Paid calls | $0. No LLM, web, image, video, provider, or network calls. |
 || Test results | BrandRegistry: 28 passed. BrandContext: 19 passed. Brand API: 17 passed. Stage A workspace/auth: 47 passed. Stage B scheduler (exec ownership + ownership + schedule API): 34 passed. Stage B scheduler (rerun/restart/missed/cleanup/misfire/attachments): 30 passed. Total: 175 passed, 0 failed. |
 || `git diff --check` | passed (no whitespace errors) |
@@ -986,7 +986,7 @@ No other hard stops. APScheduler uses in-memory `MemoryJobStore` (default, no `j
 || Unrelated pre-existing failures (not part of MB-02 gate) | `tests/test_recommendation_contract.py` (4 tests) — `CompetitorReportRenderer` rendering issues; pre-existing at HEAD `1a0ef78` (verified via `git stash` + rerun). Not part of the MB-02 regression subset. |
 || Paid/provider calls | $0. No LLM, embedding, web, image, video, provider, or network calls. |
 || `git diff --check` | passed (no whitespace errors) |
-|| Stage C | Implemented. Pending Codex acceptance review. |
+|| Stage C | ACCEPTED at `d904825`. |
 || System81/authentication production code | Unchanged. |
 || Next exact action | Codex MB-02 final acceptance review. |
 
@@ -997,7 +997,7 @@ No other hard stops. APScheduler uses in-memory `MemoryJobStore` (default, no `j
 |||---|---|
 ||| Phase ID | Stage C |
 ||| Agent ID | SHARED-RUNTIME |
-||| Gate status | Implemented; pending Codex acceptance review. |
+||| Gate status | ACCEPTED at `d904825` (per Codex multi-brand audit baseline). |
 ||| Baseline HEAD | `d625ecd` (MB-02 accepted/closed — frozen) |
 ||| Accepted checkpoints | Stage A `71c1e62`, Stage B `7a3c293`, MB-01 `f15cdbd`, System81 `1a0ef78`, MB-02 `d625ecd` |
 ||| Security motivation | A user or brand must not cancel, observe, reuse, overwrite, recover, or inherit another user/brand's runtime state. |
@@ -1019,6 +1019,30 @@ No other hard stops. APScheduler uses in-memory `MemoryJobStore` (default, no `j
 ||| System81/authentication production code | Unchanged. |
 ||| Media phase | Not started. |
 ||| Next exact action | Codex Stage C acceptance review. |
+
+## Progress Ledger — MB-UI (Multi-Brand Account Flow UI)
+
+||| Field | Value |
+|||---|---|
+||| Phase ID | MB-UI |
+||| Agent ID | SHARED-RUNTIME |
+||| Gate status | Implemented; pending Codex acceptance review. Backend audit classified **B. BACKEND COMPLETE, UI MISSING** — registry, ownership verification, selection cookie, brand-scoped storage all accepted and unchanged. |
+||| Baseline HEAD | `d904825` (Stage C accepted) |
+||| Accepted checkpoints | Stage A `71c1e62`, Stage B `7a3c293`, MB-01 `f15cdbd`, System81 `1a0ef78`, MB-02 `d625ecd` (backend isolation), Stage C `d904825` (runtime isolation) |
+||| Scope | User-facing multi-brand account flow through the real web UI: blocking brand picker/onboarding when no active brand; header brand switcher; create/select/switch via DOM only; `location.reload()` as the accepted switch architecture (AuthMiddleware rebuilds the verified WorkspaceContext from the new cookie). No server-side last-active-brand persistence (cookie-scoped selection is the existing design). Logout clearing brand selection remains accepted behavior. |
+||| Files changed (production) | `web_viewer.py` — `HTML_PAGE` only: brand-gate/switcher CSS block; `#brand-switcher-btn` in `.header-right`; `#brand-gate-overlay` picker markup; JS `initBrandGate`/`openBrandPicker`/`closeBrandPicker`/`_renderBrandGateList`/`selectBrand`/`createBrandFromGate` + `DOMContentLoaded` registration. No backend route/middleware/registry changes. |
+||| Files changed (tests — new) | `tests/test_browser_multibrand_e2e.py` — real uvicorn + Chromium; session-cookie injection only; all brand create/list/select/switch via real DOM controls; product data seeded directly under `users/<uid>/brands/<bid>/data/`; `mktapp_brand` never set by the test. |
+||| Files changed (docs) | `AI_EMPLOYEE_BETA_EXECUTION_PLAN.md` (this ledger) |
+||| Safety properties | Brand names rendered via `textContent`/DOM APIs only (no innerHTML interpolation). Empty/whitespace names rejected client-side. All picker controls disabled during in-flight create/select. Only server-returned `brand_id`s are submitted to `/select`. Backend remains authoritative. |
+||| Browser evidence | `python3 -m pytest tests/test_browser_multibrand_e2e.py -vv --tb=short` → `2 passed`: (1) `test_create_switch_isolation_and_reload` — no-brand blocking picker → create AlphaBrand via DOM → active → seed ProductA1 → open switcher → create BetaBrand via DOM → both listed → A2 active → seed ProductA2 → sidebar shows only A2 data → switch A2→A1 via DOM → only A1 data → switch A1→A2 → only A2 → switch back A2→A1 → A1 returns → `page.reload()` preserves A1 + data; no unexpected 401/403 after activation; no fatal console errors. (2) `test_existing_brands_listed_without_brand_cookie` — create GammaBrand via DOM in context A → new context with session cookie only (no `mktapp_brand`) → blocking picker lists GammaBrand → select via DOM → workspace opens with GammaBrand data. |
+||| Browser regression | `python3 -m pytest tests/test_browser_e2e.py tests/test_browser_integration_real_orch.py tests/test_browser_upload_real_source.py` → `29 passed, 33 skipped, 0 failed` (baseline preserved). |
+||| API regression subset | `python3 -m pytest tests/test_brand_api.py tests/test_brand_state_isolation.py tests/test_data_folders_brand_scoped.py -vv --tb=short` → `33 passed, 0 failed`. |
+||| Backend changes required | None. No System81/auth, MB-02, Stage C, scheduler, media, prompt, schema, or agent changes. |
+||| Paid/provider calls | $0. No LLM, embedding, web, image, video, provider, or network calls (`/api/credits` OpenRouter lookup stubbed in the new test fixture). |
+||| `git diff --check` | clean (no whitespace errors) |
+||| Plan status | The User/Brand isolation plan is **not** declared complete until this real UI flow is accepted by Codex. Media phase not started. |
+||| Next exact action | Codex MB-UI acceptance review. |
+
 ## Post-Beta Backlog
 
 - multi-Agent team flow และ artifact chaining
