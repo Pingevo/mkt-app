@@ -356,6 +356,15 @@ def build_multi_product_profile_context(product_ids: list[str]) -> str:
         if not profile:
             continue
         sections: list[str] = []
+        # User-verified facts — สูงสุด ปรากฏก่อน interpretation/positioning
+        facts = profile.get("facts")
+        if isinstance(facts, dict) and facts:
+            fact_lines = [f"  {k}: {v}" for k, v in facts.items() if v]
+            if fact_lines:
+                sections.append(
+                    "ข้อมูลสินค้าที่แก้ไขแล้ว (User-Verified Facts):\n"
+                    + "\n".join(fact_lines)
+                )
         audience = profile.get("audience")
         if audience:
             audience_text = _format_audience(audience)

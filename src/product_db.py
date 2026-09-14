@@ -367,11 +367,47 @@ def get_fields_for_agent(product_id: str) -> dict[str, Any]:
     }
 
 
+def _user_facts_text(product_id: str) -> str:
+    """Read user-verified facts from product_profile.json → rendered text.
+
+    Returns "" when the product has no profile or no non-empty ``facts`` dict.
+    The facts layer represents explicit user corrections / verified facts
+    that take precedence over AI-derived and raw-extracted information.
+
+    Category-agnostic: ``facts`` is a flat ``{key: value}`` dict — no
+    product-category-specific schema is enforced here.
+    """
+    if not product_id:
+        return ""
+    try:
+        from .brand_loader import load_product_profile
+        profile = load_product_profile(product_id)
+    except Exception:
+        return ""
+    facts = profile.get("facts")
+    if not isinstance(facts, dict) or not facts:
+        return ""
+    lines = [f"  {k}: {v}" for k, v in facts.items() if v]
+    if not lines:
+        return ""
+    return (
+        "--- ข้อมูลสินค้าที่แก้ไขแล้ว (User-Verified Product Facts) ---\n"
+        "ค่าเหล่านี้ผู้ใช้ยืนยันแล้ว ให้ใช้แทนข้อมูลที่ AI หรือ extraction สร้างขึ้น\n"
+        + "\n".join(lines)
+        + "\n--- สิ้นสุดข้อมูลสินค้าที่แก้ไขแล้ว ---\n"
+    )
+
+
 def get_agent_context_text(product_id: str) -> str:
     """สร้าง text สำหรับยัดเป็น context ของ agent การตลาด.
 
     วิธีสากล: ส่ง raw text ทั้งหมดให้ agent โดยไม่สกัด fields ล่วงหน้า
     แต่ละ agent จะแยกเองว่าต้องการข้อมูลอะไร
+
+    ลำดับ precedence (ตามที่ปรากฏใน context):
+      1. USER-VERIFIED / MANUAL PRODUCT FACTS  (แก้ไขโดยผู้ใช้ — สูงสุด)
+      2. ขอบเขตสินค้า (scope)
+      3. ข้อมูลดิบ (raw text + transcripts)
 
     ถ้าสินค้ามี scope (แยกจาก catalog) → ระบุชื่อ/รหัสสินค้าก่อน raw text
     เพื่อไม่ให้ agent สับสนเมื่อไฟล์ต้นฉบับเป็น catalog หลายรุ่น
@@ -382,7 +418,12 @@ def get_agent_context_text(product_id: str) -> str:
     data = get_fields_for_agent(product_id)
     parts = []
 
-    # ถ้ามี scope (สินค้าที่แยกจาก catalog) → บอก agent ว่านี่คือสินค้าใด
+    # 1. User-verified facts — สูงสุด ปรากฏก่อน raw evidence
+    facts_text = _user_facts_text(product_id)
+    if facts_text:
+        parts.append(facts_text)
+
+    # 2. ถ้ามี scope (สินค้าที่แยกจาก catalog) → บอก agent ว่านี่คือสินค้าใด
     scope = data.get("scope")
     if scope and scope.get("product_key"):
         parts.append(f"--- ขอบเขตสินค้า ---")
@@ -391,6 +432,7 @@ def get_agent_context_text(product_id: str) -> str:
             parts.append(f"แยกจาก: {scope['split_from']}")
         parts.append("--- สิ้นสุดขอบเขตสินค้า ---\n")
 
+    # 3. ข้อมูลดิบ (raw text + transcripts)
     if data["raw_text"]:
         parts.append("--- ข้อมูลดิบ (text) ---")
         parts.append(data["raw_text"][:_get_raw_text_max_length()])  # จำกัดป้องกัน token เกิน
@@ -473,8 +515,15 @@ def get_agent_context(product_id: str) -> dict[str, Any]:
     """
     record = load(product_id)
 
-    # text context (raw_text + transcripts)
+    # text context — user-verified facts first, then raw_text + transcripts
     text_parts = []
+
+    # 1. User-verified facts — สูงสุด ปรากฏก่อน raw evidence
+    facts_text = _user_facts_text(product_id)
+    if facts_text:
+        text_parts.append(facts_text)
+
+    # 2. ข้อมูลดิบ (raw text + transcripts)
     if record.get("raw_text"):
         text_parts.append("--- ข้อมูลดิบ (text) ---")
         text_parts.append(record["raw_text"][:_get_raw_text_max_length()])

@@ -2012,6 +2012,46 @@ def api_folder_files(folder: str) -> JSONResponse:
     return JSONResponse(files)
 
 
+@app.get("/api/product_source_file/{folder}/{filename:path}")
+def api_product_source_file(folder: str, filename: str):
+    """Read-only view of a raw source file (source_page.txt, uploaded .txt, etc.).
+
+    Lets the user inspect the original evidence alongside their manual facts
+    without a separate file manager.  Only text files are served as text;
+    images/video are returned as raw bytes.  Never lists or browses — the
+    filename must be known (from /api/folder_files).
+    """
+    err = _require_brand_context()
+    if err is not None:
+        return err
+    from fastapi.responses import Response
+    from src.workspace_context import contain_path
+    try:
+        product_dir = contain_path(folder, DATA_DIR())
+        filepath = contain_path(filename, product_dir)
+    except ValueError:
+        return JSONResponse({"content": "ไม่พบไฟล์"})
+    if not filepath.exists() or not filepath.is_file():
+        return JSONResponse({"content": "ไม่พบไฟล์"})
+    suffix = filepath.suffix.lower()
+    # Binary files — serve raw bytes (same pattern as /api/file)
+    if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm", ".mov"):
+        media_types = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".gif": "image/gif", ".webp": "image/webp",
+            ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
+        }
+        return Response(
+            content=filepath.read_bytes(),
+            media_type=media_types.get(suffix, "application/octet-stream"),
+        )
+    # Text files — return content as JSON (read-only, no write path)
+    try:
+        return JSONResponse({"content": filepath.read_text(encoding="utf-8"), "name": filename})
+    except (OSError, UnicodeDecodeError):
+        return JSONResponse({"content": "[ไฟล์นี้ไม่สามารถแสดงเป็น text ได้]", "name": filename})
+
+
 @app.get("/api/product_image/{folder}")
 def api_product_image(folder: str):
     """Serve the first image file found in a product folder as a thumbnail."""
@@ -2472,6 +2512,20 @@ async def api_product_profile_save(folder: str, request: Request) -> JSONRespons
         return JSONResponse({"error": "โฟลเดอร์ไม่ถูกต้อง"}, status_code=400)
     profile_dir.mkdir(parents=True, exist_ok=True)
     path = profile_dir / "product_profile.json"
+
+    # Preserve existing fields not present in the payload (e.g. ``facts``).
+    # The UI form sends only positioning/audience/tone/visual fields; user-
+    # verified facts live in the same file and must survive a tone-only save.
+    if path.exists():
+        try:
+            existing = _json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                for k, v in existing.items():
+                    if k not in body:
+                        body[k] = v
+        except (ValueError, OSError):
+            pass
+
     path.write_text(_json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # Sync explicit category from product_profile into product_db metadata
@@ -6594,6 +6648,10 @@ function loadExistingFilesInModal(folder) {
       html += '<div class="upload-queue-item" style="' + rowStyle + '">';
       html += '<span>' + si.icon + '</span><span class="upload-queue-name">' + escapeHtml(f.name) + typeLabel + '</span>';
       html += '<span style="font-size:10px;color:' + si.color + '">' + si.label + '</span>' + errorInfo;
+      // Read-only source view link (text files only)
+      if (f.type === 'text' && !isMarkedDelete) {
+        html += '<span style="font-size:11px;color:#7c8aff;cursor:pointer;text-decoration:underline" onclick="_viewSourceFile(\'' + folder.replace(/'/g,"\\'") + '\',\'' + safePath + '\')" title="ดูไฟล์ต้นฉบับ">👁</span>';
+      }
       if (isMarkedDelete) {
         html += '<span style="font-size:10px;color:#f87171">จะลบ</span>';
         html += '<span class="upload-queue-del" style="color:#4ade80" onclick="undoDeleteFileInModal(\'' + safePath + '\')" title="ยกเลิกการลบ">↩</span>';
@@ -6690,8 +6748,20 @@ function startIngestion(folder) {
   });
 }
 
-function deleteFileInModal(folder, filepath) {
-  // ไม่ลบจริง — แค่ทำเครื่องหมาย ลบจริงตอนกด "บันทึก"
+function _viewSourceFile(folder, filename) {
+  fetch('/api/product_source_file/' + encodeURIComponent(folder) + '/' + encodeURIComponent(filename))
+    .then(r => r.json()).then(data => {
+      const text = data.content || '(ไม่มีเนื้อหา)';
+      const w = window.open('', '_blank');
+      if (w) {
+        w.document.write('<pre style="white-space:pre-wrap;font-family:monospace;padding:16px;font-size:13px;word-break:break-all">' +
+          escapeHtml(text) + '</pre>');
+        w.document.title = data.name || filename;
+      }
+    }).catch(e => alert('ไม่สามารถอ่านไฟล์ได้: ' + e.message));
+}
+
+function deleteFileInModal(folder, filepath) {  // ไม่ลบจริง — แค่ทำเครื่องหมาย ลบจริงตอนกด "บันทึก"
   if (!_filesToDelete.some(p => p === filepath)) {
     _filesToDelete.push(filepath);
   }
@@ -7607,6 +7677,12 @@ let _uploadModalOriginal = null;
 function _getProductProfileFormData() {
   const get = id => { const el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; };
   const getList = id => { const el = document.getElementById(id); return (el ? String(el.value || '') : '').split(',').map(s => s.trim()).filter(Boolean); };
+  const facts = {};
+  document.querySelectorAll('.pf-fact-row').forEach(row => {
+    const k = (row.querySelector('.pf-fact-key') || {}).value || '';
+    const v = (row.querySelector('.pf-fact-val') || {}).value || '';
+    if (k.trim() && v.trim()) facts[k.trim()] = v.trim();
+  });
   return {
     audience: {
       primary: { age: get('pp-age'), role: get('pp-role') },
@@ -7621,6 +7697,7 @@ function _getProductProfileFormData() {
       image_style: { tone: get('pp-visual-tone') },
       keywords: getList('pp-visual-keywords'),
     },
+    facts: facts,
   };
 }
 
@@ -7661,6 +7738,24 @@ function _renderProductProfileInto(body, data) {
   _productProfileOriginal = _getProductProfileFormData();
 }
 
+function _pfFactRow(key, val) {
+  return '<div class="pf-fact-row" style="display:flex;gap:6px;margin-bottom:6px;align-items:center">' +
+    '<input class="pf-fact-key" value="' + escapeHtml(String(key || '')) + '" placeholder="เช่น ราคา" style="flex:1;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:6px;color:#e0e0e0;font-size:13px">' +
+    '<input class="pf-fact-val" value="' + escapeHtml(String(val || '')) + '" placeholder="เช่น 3,590 บาท" style="flex:1.5;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:6px;color:#e0e0e0;font-size:13px">' +
+    '<button type="button" onclick="_pfRemoveFactRow(this)" style="background:none;border:none;color:#f87171;cursor:pointer;font-size:16px;padding:2px 6px">×</button>' +
+    '</div>';
+}
+
+function _pfAddFactRow() {
+  const container = document.getElementById('pf-facts-container');
+  if (container) container.insertAdjacentHTML('beforeend', _pfFactRow('', ''));
+}
+
+function _pfRemoveFactRow(btn) {
+  const row = btn.closest('.pf-fact-row');
+  if (row) row.remove();
+}
+
 function _renderProductProfileForm(d) {
   let h = '';
   h += '<button id="pp-suggest-btn" onclick="suggestProductProfile()" title="AI จะอ่านสเปคสินค้าและเติมค่าลงในฟอร์มให้ ยังไม่บันทึกจนกว่าจะกด บันทึก (กดซ้ำได้ถ้าอยากให้เดาใหม่)" style="background:#7c8aff;border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:12px">🎓 ตั้งค่าด้วย AI</button>';
@@ -7693,6 +7788,21 @@ function _renderProductProfileForm(d) {
   h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">ปรับภาพ <span style="cursor:help;color:#7c8aff;font-size:12px" data-tooltip="กรอกเฉพาะตอนต้องการให้สินค้านี้มีภาพลักษณ์ต่างจากแบรนด์ ถ้าเว้นว่างจะใช้ของแบรนด์">ⓘ</span></div>';
   h += _textarea('โทนภาพ', 'pp-visual-tone', vis.tone, 'เช่น ดำ-ทอง พรีเมียม แสงนุ่ม', 'อธิบายสไตล์ภาพ/วิดีโอเฉพาะสินค้านี้ ถ้าเว้นว่างจะใช้ของแบรนด์');
   h += _chipField('Keywords ภาพ', 'pp-visual-keywords', vo.keywords, 'เช่น golden black, premium lighting (กด Enter)', 'คีย์เวิร์ดภาพเฉพาะสินค้านี้ ใช้ปรับ AI Image Prompt ถ้าเว้นว่างจะใช้ของแบรนด์');
+  // Product Facts — user corrections
+  const facts = d.facts || {};
+  h += '<div style="font-size:13px;color:#7c8aff;margin:16px 0 8px 0">ข้อมูลสินค้าที่แก้ไขแล้ว / Product Facts</div>';
+  h += '<p style="font-size:12px;color:#888;margin:0 0 8px 0">ค่าที่แก้ไขจะ override ข้อมูลที่ AI หรือ extraction สร้างขึ้น ข้อมูลดิบในไฟล์ต้นฉบับไม่ถูกแก้ไข</p>';
+  h += '<div id="pf-facts-container">';
+  const factEntries = Object.entries(facts);
+  if (factEntries.length === 0) {
+    h += _pfFactRow('', '');
+  } else {
+    for (const [k, v] of factEntries) {
+      h += _pfFactRow(k, v);
+    }
+  }
+  h += '</div>';
+  h += '<button type="button" onclick="_pfAddFactRow()" style="background:#1a1d27;border:1px dashed #3a3d4a;color:#7c8aff;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;margin-top:4px">+ เพิ่มข้อมูล</button>';
   return h;
 }
 
@@ -7763,7 +7873,14 @@ function saveProductProfile() {
     use_cases: _formList('pp-use-cases'),
     price_tier: _formVal('pp-price-tier'),
     tone_adjustment: _formVal('pp-tone'),
+    facts: {},
   };
+  // Collect facts from key/value rows
+  document.querySelectorAll('.pf-fact-row').forEach(row => {
+    const k = (row.querySelector('.pf-fact-key') || {}).value || '';
+    const v = (row.querySelector('.pf-fact-val') || {}).value || '';
+    if (k.trim() && v.trim()) payload.facts[k.trim()] = v.trim();
+  });
   // audience — ส่งเฉพาะถ้ามีค่า
   const audience = {};
   if (primAge || primRole) audience.primary = { age: primAge, role: primRole };
@@ -11677,8 +11794,8 @@ function loadCredits() {
     <div id="supported-formats-info" style="display:none"></div>
     <div id="existing-files-modal"></div>
     <div id="pp-section" style="display:none;margin-top:16px;padding:12px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px">
-      <div style="font-size:13px;color:#7c8aff;margin-bottom:8px">🎯 ตำแหน่งสินค้า</div>
-      <p style="font-size:12px;color:#888;margin:0 0 12px 0">ตำแหน่งสินค้าเฉพาะรุ่น — ค่าเริ่มต้นจะมาจากการคาดเดาของ AI</p>
+      <div style="font-size:13px;color:#7c8aff;margin-bottom:8px">🎯 ตำแหน่งสินค้า + ข้อมูลที่แก้ไข</div>
+      <p style="font-size:12px;color:#888;margin:0 0 12px 0">ตำแหน่งสินค้าเฉพาะรุ่น + ข้อมูลสินค้าที่แก้ไขแล้ว — ค่าเริ่มต้นจะมาจากการคาดเดาของ AI</p>
       <div id="pp-modal-body"></div>
       <div class="upload-status" id="pp-status"></div>
     </div>
