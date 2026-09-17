@@ -37,6 +37,9 @@ PRODUCT_HTML = f"""<!DOCTYPE html>
 <meta property="og:title" content="ACME Turbo Blender 9000">
 <meta property="og:description" content="Powerful 900W kitchen blender">
 <meta property="og:image" content="https://shop.example.com/img/blender.png">
+<script type="application/ld+json">{{"@context":"https://schema.org",
+"@type":"Product","name":"ACME Turbo Blender 9000",
+"offers":{{"@type":"Offer","price":"2590","priceCurrency":"THB"}}}}</script>
 </head><body>
 <h1>ACME Turbo Blender 9000</h1>
 <p>Price: 2,590 THB</p>
@@ -48,6 +51,36 @@ parts. Ships nationwide within 2-4 business days.</p>
 <script>var tracker=1;</script>
 </body></html>""".encode()
 
+MULTI_URL = "https://shop.example.com/catalog/blenders"
+MULTI_HTML = b"""<!DOCTYPE html>
+<html><head><title>Blender Catalog</title>
+<script type="application/ld+json">{"@context":"https://schema.org",
+"@type":"ItemList","itemListElement":[
+{"@type":"Product","name":"Blender A"},
+{"@type":"Product","name":"Blender B"}]}</script>
+</head><body><h1>All blenders</h1>
+<p>Compare our full blender range side by side. From compact personal
+blenders to commercial 2-litre machines, every model is listed here
+with prices, wattage, jug capacity and warranty terms so shoppers can
+pick the right one for their kitchen.</p>
+<ul><li>Blender A - 900W - 2,590 THB</li>
+<li>Blender B - 1200W - 3,990 THB</li>
+<li>Blender C - 1500W - 5,490 THB</li></ul>
+</body></html>"""
+
+AMBIG_URL = "https://shop.example.com/maybe-product"
+AMBIG_HTML = b"""<!DOCTYPE html>
+<html><head><title>Something</title>
+<meta property="og:type" content="product">
+<meta property="og:title" content="Mystery Item">
+</head><body><h1>Mystery Item</h1>
+<p>A page with og:type=product but no JSON-LD product evidence -
+per contract, og:type alone is insufficient confidence. The page
+still carries enough ordinary body text to be a usable fetched
+document, so the rejection must come from the classifier and not
+from the thin-content browser fallback path.</p>
+</body></html>"""
+
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 500
 
 
@@ -56,6 +89,14 @@ def _routes() -> dict:
         PRODUCT_URL: httpx.Response(
             200, headers={"content-type": "text/html; charset=utf-8"},
             content=PRODUCT_HTML,
+        ),
+        MULTI_URL: httpx.Response(
+            200, headers={"content-type": "text/html; charset=utf-8"},
+            content=MULTI_HTML,
+        ),
+        AMBIG_URL: httpx.Response(
+            200, headers={"content-type": "text/html; charset=utf-8"},
+            content=AMBIG_HTML,
         ),
         "https://shop.example.com/img/blender.png": httpx.Response(
             200, headers={"content-type": "image/png"}, content=PNG_BYTES
@@ -96,6 +137,44 @@ def _stub_fetch(monkeypatch):
     )
 
 
+class _FakeLLM:
+    """Deterministic detector + enrichment — SINGLE-PRODUCT-URL-CONTRACT-01
+    requires a real detection result, so the suite supplies one: single
+    product for segmentation, valid JSON for summary/profile calls.
+    Pass ``seg`` to simulate multi/ambiguous detection outcomes."""
+
+    def __init__(self, seg=None):
+        self._seg = seg
+        self.calls: list[str] = []
+
+    def chat(self, messages, *, response_format=None, source="", **kw):
+        self.calls.append(source)
+        if "segment" in (source or ""):
+            if isinstance(self._seg, Exception):
+                raise self._seg
+            seg = self._seg if self._seg is not None else {
+                "mode": "single",
+                "products": [{
+                    "product_key": "", "suggested_name": "source_page",
+                    "category": "", "summary": "",
+                    "source_refs": [], "common_refs": [],
+                    "text": "",
+                }],
+            }
+            return json.dumps(seg, ensure_ascii=False)
+        if "metadata_summary" in (source or ""):
+            return json.dumps({"summary": "s", "category": "",
+                               "derived_facts": {}})
+        return json.dumps({
+            "audience": {}, "competitors": [], "differentiators": [],
+            "use_cases": [], "price_tier": "mid",
+            "tone_adjustment": "", "visual_override": {},
+        })
+
+    def close(self):
+        pass
+
+
 @pytest.fixture
 def _app(tmp_path, monkeypatch):
     import importlib
@@ -107,6 +186,11 @@ def _app(tmp_path, monkeypatch):
     monkeypatch.setattr(web_viewer, "_session_ts", {}, raising=False)
     monkeypatch.setattr(web_viewer, "_cancel_requested", {}, raising=False)
     _stub_fetch(monkeypatch)
+    # URL single-product contract needs a real detector — provide a
+    # deterministic one (tests that need multi/ambiguous patch it again).
+    import src.ingestion as _ing
+    _state = {"llm": _FakeLLM()}
+    monkeypatch.setattr(_ing, "_make_llm", lambda: _state["llm"])
 
     config_dir = tmp_path / "config"
     config_dir.mkdir(exist_ok=True)
@@ -120,6 +204,7 @@ def _app(tmp_path, monkeypatch):
     return {
         "client": client, "uid": uid, "bid": bid,
         "brand_root": brand_root, "tmp": tmp_path,
+        "llm_state": _state,
     }
 
 
@@ -136,17 +221,35 @@ def _wait_ready(client, folder: str, timeout: float = 20.0) -> dict:
     raise AssertionError(f"ingest never finished: {last}")
 
 
+def _import_and_commit(client, url: str, product_name: str | None = None):
+    """Drive the staged URL-import contract: import → review → commit.
+
+    Returns (commit_response_json, created_folder_name)."""
+    body = {"url": url}
+    if product_name:
+        body["product_name"] = product_name
+    r = client.post("/api/product_from_url", json=body)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["ok"] is True and data.get("staged") is True, data
+    bid = data["batch_id"]
+    # human review: create the first segment using its previewed name
+    name = data["segments"][0].get("suggested_name") or "imported"
+    rc = client.post(f"/api/stage/{bid}/commit", json={
+        "choices": [{"segment_index": 0, "action": "create", "name": name}]})
+    assert rc.status_code == 200, rc.text
+    out = rc.json()
+    assert out["created"], out
+    return out, out["created"][0]
+
+
 # ---------------------------------------------------------------------------
 # Happy path — URL → existing ingestion seam → same product lifecycle
 # ---------------------------------------------------------------------------
 
 def test_import_creates_ready_product_via_existing_seam(_app):
     c = _app["client"]
-    r = c.post("/api/product_from_url", json={"url": PRODUCT_URL})
-    assert r.status_code == 200, r.text
-    data = r.json()
-    assert data["ok"] is True
-    folder = data["folder"]
+    _out, folder = _import_and_commit(c, PRODUCT_URL)
 
     st = _wait_ready(c, folder)
     assert st["status"] == "ready", st
@@ -225,9 +328,7 @@ def test_no_brand_403(tmp_path, monkeypatch):
 
 def test_a1_import_invisible_from_a2(_app):
     c = _app["client"]
-    r = c.post("/api/product_from_url", json={"url": PRODUCT_URL})
-    assert r.status_code == 200
-    folder = r.json()["folder"]
+    _out, folder = _import_and_commit(c, PRODUCT_URL)
     _wait_ready(c, folder)
 
     # Create + select brand A2 through the real brand API
@@ -283,24 +384,84 @@ def test_explicit_name_collision_rejected(_app):
 
 
 def test_derived_name_dedup_on_reimport(_app):
-    """Same URL imported twice → second product gets a deduped name, never merged."""
+    """Same URL imported twice → second commit gets a deduped name, never merged."""
     c = _app["client"]
-    r1 = c.post("/api/product_from_url", json={"url": PRODUCT_URL})
-    assert r1.status_code == 200
-    f1 = r1.json()["folder"]
+    _o1, f1 = _import_and_commit(c, PRODUCT_URL)
     _wait_ready(c, f1)
 
-    r2 = c.post("/api/product_from_url", json={"url": PRODUCT_URL})
-    assert r2.status_code == 200
-    f2 = r2.json()["folder"]
+    _o2, f2 = _import_and_commit(c, PRODUCT_URL)
     assert f2 != f1
     _wait_ready(c, f2)
 
 
 def test_explicit_name_used(_app):
+    """Explicit product_name flows into the staging preview's suggested_name
+    and becomes the created product's name after human commit."""
     c = _app["client"]
     r = c.post("/api/product_from_url",
                json={"url": PRODUCT_URL, "product_name": "My Named Product"})
     assert r.status_code == 200
-    assert r.json()["folder"] == "My Named Product"
+    data = r.json()
+    assert data.get("staged") is True
+    assert data["segments"][0]["suggested_name"] == "My Named Product"
+    # nothing materialized before review
+    assert not (_app["brand_root"] / "data" / "My Named Product").exists()
+
+    bid = data["batch_id"]
+    rc = c.post(f"/api/stage/{bid}/commit", json={
+        "choices": [{"segment_index": 0, "action": "create",
+                     "name": "My Named Product"}]})
+    assert rc.status_code == 200
+    assert rc.json()["created"] == ["My Named Product"]
     _wait_ready(c, "My Named Product")
+
+
+# ---------------------------------------------------------------------------
+# FREE-IMPORT-AI-PROPOSAL-01 — deterministic multi/ambiguous rejection:
+# structured page evidence only, no model call ever, nothing materialized.
+# ---------------------------------------------------------------------------
+
+
+def _data_products(brand_root):
+    d = brand_root / "data"
+    return {p.name for p in d.iterdir()
+            if p.is_dir() and not p.name.startswith(".")}
+
+
+def test_multi_product_url_rejected_zero_effects(_app):
+    """ItemList/multi-product page → 400 + Thai single-product message;
+    zero products, zero model calls, no staging leftovers."""
+    c = _app["client"]
+    before = _data_products(_app["brand_root"])
+
+    r = c.post("/api/product_from_url", json={"url": MULTI_URL})
+    assert r.status_code == 400, r.text
+    data = r.json()
+    assert data["ok"] is False
+    assert data.get("multi_product") is True
+    assert "สินค้า" in data["error"]
+
+    # zero materialization
+    assert _data_products(_app["brand_root"]) == before
+    # classification is deterministic — the LLM seam was never touched
+    assert _app["llm_state"]["llm"].calls == []
+    # batch discarded — no staging leftovers
+    staging_dir = _app["brand_root"] / "data" / ".staging"
+    assert not staging_dir.exists() or not any(staging_dir.iterdir())
+
+
+def test_ambiguous_url_fails_safe(_app):
+    """og:type=product without JSON-LD Product evidence → reject as
+    ambiguous; zero products, zero model calls."""
+    c = _app["client"]
+    before = _data_products(_app["brand_root"])
+
+    r = c.post("/api/product_from_url", json={"url": AMBIG_URL})
+    assert r.status_code == 400, r.text
+    data = r.json()
+    assert data["ok"] is False
+    assert data.get("ambiguous_product") is True
+    assert _data_products(_app["brand_root"]) == before
+    assert _app["llm_state"]["llm"].calls == []
+    staging_dir = _app["brand_root"] / "data" / ".staging"
+    assert not staging_dir.exists() or not any(staging_dir.iterdir())

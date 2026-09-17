@@ -44,8 +44,14 @@ class _FakeLLM:
                 "tone_adjustment": "",
                 "visual_override": {},
             })
-        # ถ้าเป็น summary call → คืน text สั้น
-        return self._summary
+        # metadata_summary call → JSON ตาม extraction schema
+        # (enrichment failure ตอนนี้เป็น no_usable_data จริง — text เปล่า
+        # จะทำให้ ingest fail เหมือน production)
+        return json.dumps({
+            "summary": self._summary,
+            "category": "",
+            "derived_facts": {},
+        }, ensure_ascii=False)
 
     def close(self):
         pass
@@ -154,12 +160,11 @@ def test_ingest_multi_product_creates_separate_products(_ingest, tmp_path, monke
     data_dir.mkdir(parents=True)
     (data_dir / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
 
-    # patch _make_llm ให้คืน FakeLLM
+    # explicit split invocation — generic machinery kept, caller supplies llm
     llm = _FakeLLM(_make_seg_response())
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
 
-    # ingest แบบ one-to-many (is_new_upload=True)
-    result = ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+    # ingest แบบ one-to-many (is_new_upload=True + explicit llm)
+    result = ingestion.ingest_product(temp_name, force=False, is_new_upload=True, llm=llm)
 
     # ต้องได้ 3 สินค้า
     all_products = product_db.get_all_products()
@@ -207,9 +212,8 @@ def test_ingest_multi_product_source_file_in_each_folder(_ingest, tmp_path, monk
     (data_dir / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
 
     llm = _FakeLLM(_make_seg_response())
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
 
-    ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+    ingestion.ingest_product(temp_name, force=False, is_new_upload=True, llm=llm)
 
     # ตรวจว่า catalog.txt อยู่ในทุกโฟลเดอร์สินค้า
     for name in ["CACGO K67", "CACGO K72", "CACGO K71"]:
@@ -240,9 +244,7 @@ def test_ingest_single_product_unchanged_behavior(_ingest, tmp_path, monkeypatch
             "common_refs": [],
         }]
     })
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
-
-    result = ingestion.ingest_product(product_id, force=False, is_new_upload=True)
+    result = ingestion.ingest_product(product_id, force=False, is_new_upload=True, llm=llm)
 
     # ต้องมีแค่ 1 สินค้า ชื่อเดิม
     all_products = product_db.get_all_products()
@@ -273,9 +275,8 @@ def test_ingest_multi_product_propagates_extracted_media(_ingest, tmp_path, monk
 
     monkeypatch.setitem(ingestion.PREPROCESSORS, "text", fake_extract_text)
     llm = _FakeLLM(_make_seg_response())
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
 
-    result = ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+    result = ingestion.ingest_product(temp_name, force=False, is_new_upload=True, llm=llm)
 
     for name in result["split_products"]:
         rec = product_db.load(name)
@@ -300,8 +301,6 @@ def test_ingest_multi_product_no_llm_uses_single_flow(_ingest, tmp_path, monkeyp
     data_dir = tmp_path / "data" / product_id
     data_dir.mkdir(parents=True)
     (data_dir / "info.txt").write_text("Some product info without LLM", encoding="utf-8")
-
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: None)
 
     result = ingestion.ingest_product(product_id, force=False, is_new_upload=True)
 
@@ -357,9 +356,8 @@ def test_reingest_scoped_product_keeps_scope(_ingest, tmp_path, monkeypatch):
 
     # re-ingest แบบ force=True (is_new_upload=False — ไม่ใช่ upload ใหม่)
     llm = _FakeLLM(_make_seg_response())  # ถ้าระบบเรียก seg ผิด → test จะตรวจได้
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
 
-    ingestion.ingest_product(product_id, force=True, is_new_upload=False)
+    ingestion.ingest_product(product_id, force=True, is_new_upload=False, llm=llm)
 
     # ต้องมีแค่ K67 ไม่เพิ่ม K72/K71
     all_products = product_db.get_all_products()
@@ -399,9 +397,8 @@ def test_split_name_collision_appends_suffix(_ingest, tmp_path, monkeypatch):
     (data_dir / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
 
     llm = _FakeLLM(_make_seg_response())
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
 
-    ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+    ingestion.ingest_product(temp_name, force=False, is_new_upload=True, llm=llm)
 
     all_products = product_db.get_all_products()
     names = [p["product_id"] for p in all_products]
@@ -427,7 +424,6 @@ def test_split_failure_rolls_back_no_partial_products(_ingest, tmp_path, monkeyp
     (data_dir / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
 
     llm = _FakeLLM(_make_seg_response())
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
 
     # ทำให้ product_db.save fail ตอนบันทึกสินค้าตัวที่ 2 (K72)
     # (จำลอง disk error หรือ corruption ระหว่าง materialize)
@@ -443,7 +439,7 @@ def test_split_failure_rolls_back_no_partial_products(_ingest, tmp_path, monkeyp
 
     # ingest ต้อง raise (ไม่กลืน error เงียบ)
     with pytest.raises(Exception, match="Split products failed"):
-        ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+        ingestion.ingest_product(temp_name, force=False, is_new_upload=True, llm=llm)
 
     # ตรวจ rollback — ไม่มี partial products
     all_products = product_db.get_all_products()
@@ -478,8 +474,7 @@ def test_reingest_catalog_recreates_only_missing_product(_ingest, tmp_path, monk
     data_dir.mkdir(parents=True)
     (data_dir / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
     llm = _FakeLLM(_make_seg_response())
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
-    ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+    ingestion.ingest_product(temp_name, force=False, is_new_upload=True, llm=llm)
 
     names = [p["product_id"] for p in product_db.get_all_products()]
     assert set(names) == {"CACGO K67", "CACGO K72", "CACGO K71"}
@@ -494,8 +489,7 @@ def test_reingest_catalog_recreates_only_missing_product(_ingest, tmp_path, monk
     data_dir2.mkdir(parents=True)
     (data_dir2 / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
     llm2 = _FakeLLM(_make_seg_response())
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm2)
-    ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+    ingestion.ingest_product(temp_name, force=False, is_new_upload=True, llm=llm2)
 
     # ต้องมี 3 สินค้า ไม่มีก้อนซ้ำ (ไม่มี (1) suffix)
     names2 = [p["product_id"] for p in product_db.get_all_products()]
@@ -514,8 +508,7 @@ def test_reingest_catalog_all_exist_no_duplicates(_ingest, tmp_path, monkeypatch
     data_dir.mkdir(parents=True)
     (data_dir / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
     llm = _FakeLLM(_make_seg_response())
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm)
-    ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+    ingestion.ingest_product(temp_name, force=False, is_new_upload=True, llm=llm)
 
     before = sorted(p["product_id"] for p in product_db.get_all_products())
 
@@ -524,8 +517,7 @@ def test_reingest_catalog_all_exist_no_duplicates(_ingest, tmp_path, monkeypatch
     data_dir2.mkdir(parents=True)
     (data_dir2 / "catalog.txt").write_text(_make_catalog_text(), encoding="utf-8")
     llm2 = _FakeLLM(_make_seg_response())
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: llm2)
-    ingestion.ingest_product(temp_name, force=False, is_new_upload=True)
+    ingestion.ingest_product(temp_name, force=False, is_new_upload=True, llm=llm2)
 
     after = sorted(p["product_id"] for p in product_db.get_all_products())
     assert after == before, f"ต้องไม่เพิ่ม/ซ้ำ: before={before} after={after}"

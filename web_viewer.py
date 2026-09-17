@@ -1650,9 +1650,14 @@ async def api_upload(
         product_dir = contain_path(folder_name, DATA_DIR())
     except ValueError:
         return JSONResponse({"error": "ชื่อสินค้าไม่ถูกต้อง"}, status_code=400)
-    # ตรวจว่าเป็นการอัปโหลดสินค้าใหม่ (โฟลเดอร์ยังไม่มี) — ใช้เปิด catalog segmentation
-    is_new_upload = not product_dir.exists()
-    product_dir.mkdir(parents=True, exist_ok=True)
+    # สินค้าใหม่ต้องผ่าน staging/review เท่านั้น — /api/upload รับเฉพาะ
+    # เพิ่มไฟล์เข้าสินค้าที่มีอยู่แล้ว (Product Detail workflow)
+    if not product_dir.exists():
+        return JSONResponse({
+            "ok": False,
+            "error": "สินค้าใหม่ต้องผ่านขั้นตอนตรวจสอบก่อนสร้าง — ใช้เพิ่มสินค้า (staging review) แทน",
+        }, status_code=400)
+    is_new_upload = False
 
     # อ่านเนื้อไฟล์ทั้งหมดก่อน (UploadFile ต้อง await) แล้วเซฟผ่าน save_uploaded_files
     # ซึ่งข้ามไฟล์ที่เนื้อซ้ำ (hash ตรง) — ป้องกันก้อนซ้ำ `ชื่อ_1.ext` ตอนอัปโหลดซ้ำ
@@ -1717,31 +1722,19 @@ async def api_product_from_url(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
     # Product name — explicit name uses the same containment check as
-    # /api/upload; derived names sanitize the page title and dedup like the
-    # staging create path ("name (N)").  An existing folder + explicit name is
-    # rejected: refresh/merge from URL is out of scope for v1.
+    # /api/upload; it becomes the staged preview's suggested_name below.
+    # An existing folder + explicit name is rejected: refresh/merge from
+    # URL is out of scope for v1.
     if product_name:
         try:
             contain_path(product_name, DATA_DIR())
         except ValueError:
             return JSONResponse({"ok": False, "error": "ชื่อสินค้าไม่ถูกต้อง"}, status_code=400)
-        folder_name = product_name
-        if (DATA_DIR() / folder_name).exists():
+        if (DATA_DIR() / product_name).exists():
             return JSONResponse({
                 "ok": False,
-                "error": f'มีสินค้า "{folder_name}" อยู่แล้ว — ตั้งชื่ออื่น หรืออัปโหลดไฟล์เข้าสินค้าเดิมแทน',
+                "error": f'มีสินค้า "{product_name}" อยู่แล้ว — ตั้งชื่ออื่น หรืออัปโหลดไฟล์เข้าสินค้าเดิมแทน',
             }, status_code=409)
-    else:
-        base = re.sub(
-            r"[^\u0E00-\u0E7A\w\s-]", "",
-            result.get("og_title") or result.get("page_title") or "",
-        )
-        base = " ".join(base.split()).strip() or f"สินค้า-{uuid.uuid4().hex[:8]}"
-        folder_name = base
-        i = 1
-        while (DATA_DIR() / folder_name).exists():
-            i += 1
-            folder_name = f"{base} ({i})"
 
     # URL artifacts → ordinary uploaded-source payloads [(name, bytes)]
     header = (
@@ -1751,12 +1744,31 @@ async def api_product_from_url(request: Request) -> JSONResponse:
     )
     files_to_save = [("source_page.txt", (header + result["text"]).encode("utf-8"))]
     files_to_save += [(img["name"], img["content"]) for img in result["images"]]
-    saved = product_db.save_uploaded_files(folder_name, files_to_save)
 
-    # Provenance — additive record key, written before the ingest thread so
-    # every later load/save keeps it.
-    record = product_db.load(folder_name)
-    record["source_import"] = {
+    # Route through the same staging/review flow as file upload — the user
+    # reviews before any product is committed.  FREE-IMPORT contract:
+    # single/multi/ambiguous is decided ONLY by deterministic structured
+    # page signals (classify_product_signals inside fetch_product_page) —
+    # never by a model call, and catalog/comparison pages are never split.
+    from src import staging
+
+    page_class = result.get("page_class")
+    if page_class == "multi":
+        return JSONResponse({
+            "ok": False, "multi_product": True,
+            "error": "หน้านี้มีหลายสินค้า — โปรดใช้ลิงก์สินค้าโดยตรง (1 สินค้าต่อหน้า)",
+        }, status_code=400)
+    if page_class != "single":
+        return JSONResponse({
+            "ok": False, "ambiguous_product": True,
+            "error": "ไม่สามารถยืนยันได้ว่าหน้านี้เป็นสินค้าเดียว — โปรดใช้ลิงก์สินค้าโดยตรง",
+        }, status_code=400)
+
+    batch_id = staging.create_batch(files_to_save)
+
+    # Store URL provenance in the batch so commit_batch applies it
+    # to every product created from this URL import.
+    source_import = {
         "original_url": result["original_url"],
         "final_url": result["final_url"],
         "canonical_url": result.get("canonical_url", ""),
@@ -1766,26 +1778,29 @@ async def api_product_from_url(request: Request) -> JSONResponse:
         "source_file": "source_page.txt",
         "image_count": len(result["images"]),
     }
-    product_db.save(folder_name, record)
+    batch = staging._load_batch(batch_id)
+    batch["source_import"] = source_import
+    staging._save_batch(batch_id, batch)
 
-    if saved:
-        import threading
-        from src.ingestion import ingest_product
+    # Deterministic single-segment staging (no llm → no model call).
+    seg_result = staging.run_segmentation(batch_id)
 
-        if product_db.get_status(folder_name) != product_db.STATUS_PROCESSING:
-            def _run():
-                try:
-                    ingest_product(folder_name, force=False, is_new_upload=True)
-                except Exception as e:
-                    product_db.set_status(folder_name, product_db.STATUS_NO_USABLE, extra={
-                        "ingest_error": str(e),
-                    })
-            threading.Thread(target=with_workspace_context(_run), daemon=True).start()
+    # A validated explicit product_name becomes the preview's proposed name
+    # for the first detected product — still only a default; the human
+    # reviews/edits in the staging preview before anything is committed.
+    if product_name and seg_result.get("segments"):
+        seg_result["segments"][0]["suggested_name"] = product_name
+        batch = staging._load_batch(batch_id)
+        batch["segments"] = seg_result["segments"]
+        staging._save_batch(batch_id, batch)
 
+    batch = staging._load_batch(batch_id)
     return JSONResponse({
-        "ok": True, "folder": folder_name, "files": saved,
-        "title": result.get("page_title", ""), "final_url": result["final_url"],
-        "image_count": len(result["images"]),
+        "ok": True, "staged": True,
+        "batch_id": batch_id,
+        "files": batch.get("files", []),
+        "segments": batch.get("segments", []),
+        "matches": batch.get("matches", []),
     })
 
 
@@ -1803,7 +1818,6 @@ async def api_upload_stage(files: list[UploadFile] = File(...)) -> JSONResponse:
     if err is not None:
         return err
     from src import staging
-    from src.ingestion import _make_llm
 
     files_to_save: list[tuple[str, bytes]] = []
     for f in files:
@@ -1816,13 +1830,10 @@ async def api_upload_stage(files: list[UploadFile] = File(...)) -> JSONResponse:
         return JSONResponse({"error": "ไม่มีไฟล์ที่รองรับ"}, status_code=400)
 
     batch_id = staging.create_batch(files_to_save)
-    try:
-        llm = _make_llm()
-    except Exception:
-        llm = None
-    result = staging.run_segmentation(batch_id, llm=llm)
-    if llm is not None:
-        llm.close()
+    # Deterministic single-product staging — FREE-IMPORT contract: no model
+    # call during upload/staging.  Multi-product splitting is a separate
+    # explicit AI workflow, not part of import.
+    result = staging.run_segmentation(batch_id)
 
     batch = staging._load_batch(batch_id)
     return JSONResponse({
@@ -1860,6 +1871,7 @@ def api_commit_stage(batch_id: str, body: dict = None) -> JSONResponse:
     if not choices:
         return JSONResponse({"error": "ต้องส่ง choices"}, status_code=400)
     try:
+        # Deterministic materialization only — no model call (FREE-IMPORT).
         result = staging.commit_batch(batch_id, choices)
         return JSONResponse(result)
     except ValueError as e:
@@ -2050,6 +2062,47 @@ def api_product_source_file(folder: str, filename: str):
         return JSONResponse({"content": filepath.read_text(encoding="utf-8"), "name": filename})
     except (OSError, UnicodeDecodeError):
         return JSONResponse({"content": "[ไฟล์นี้ไม่สามารถแสดงเป็น text ได้]", "name": filename})
+
+
+@app.get("/api/product_media/{folder}/{filename:path}")
+def api_product_media(folder: str, filename: str):
+    """Serve one extracted embedded-media asset by name.
+
+    Same brand-context gate + contain_path containment as the source-file
+    route, bounded to ``cache/{folder}/extracted_images/``.  Allow-list:
+    only files recorded in the product's ``image_descriptions`` with a
+    path under ``extracted_images/`` are servable — files merely present
+    in the directory are not.  Names only in; bytes out.
+    """
+    err = _require_brand_context()
+    if err is not None:
+        return err
+    from fastapi.responses import Response
+    from src.workspace_context import contain_path
+    try:
+        media_dir = contain_path("extracted_images",
+                                 contain_path(folder, CACHE_DIR()))
+        filepath = contain_path(filename, media_dir)
+    except ValueError:
+        return JSONResponse({"error": "ไม่พบไฟล์"}, status_code=404)
+    record = product_db.load(folder) or {}
+    recorded = {
+        Path(d["path"]).name
+        for d in record.get("image_descriptions", [])
+        if d.get("path")
+        and Path(d["path"]).parent.name == "extracted_images"
+        and not d.get("unassigned_source_media")
+    }
+    suffix = filepath.suffix.lower()
+    media_types = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    }
+    if (filepath.name not in recorded or suffix not in media_types
+            or not filepath.is_file()):
+        return JSONResponse({"error": "ไม่พบไฟล์"}, status_code=404)
+    return Response(content=filepath.read_bytes(),
+                    media_type=media_types[suffix])
 
 
 @app.get("/api/product_image/{folder}")
@@ -2497,6 +2550,91 @@ def api_product_profile_get(folder: str) -> JSONResponse:
     return JSONResponse(load_product_profile(folder))
 
 
+@app.get("/api/product_info/{folder}")
+def api_product_info_get(folder: str) -> JSONResponse:
+    """อ่าน effective product information view model สำหรับ UI.
+
+    รวม: product identity, category, summary, derived_facts, manual facts,
+    effective facts (merged), source files, URL provenance.
+    UI ใช้ endpoint นี้แสดงข้อมูลสินค้าที่ system เข้าใจ + แก้ไขได้.
+    """
+    err = _require_brand_context()
+    if err is not None:
+        return err
+    from src import product_db
+    from src.product_db import get_effective_facts
+
+    record = product_db.load(folder)
+    metadata = record.get("metadata") or {}
+    profile = load_product_profile(folder) or {}
+
+    # Source files (names only — no raw filesystem paths to client)
+    source_files = []
+    for f in record.get("files", []):
+        source_files.append({
+            "name": f.get("name", ""),
+            "type": f.get("type"),
+            "status": f.get("status", ""),
+        })
+
+    # URL provenance (if product was imported from URL)
+    url_provenance = None
+    si = record.get("source_import")
+    if si and isinstance(si, dict):
+        url_provenance = {
+            "original_url": si.get("original_url", ""),
+            "final_url": si.get("final_url", ""),
+            "page_title": si.get("page_title", ""),
+            "fetched_at": si.get("fetched_at", ""),
+        }
+
+    # Effective facts (derived + manual merged)
+    effective = get_effective_facts(folder)
+
+    # Manual facts (from product_profile.json)
+    manual_facts = profile.get("facts") if isinstance(profile.get("facts"), dict) else {}
+
+    # Derived facts (from product.json)
+    derived = record.get("derived_facts") or {}
+
+    # Source type for provenance badge: "url" if URL-imported, "file" otherwise
+    source_type = "url" if url_provenance else "file"
+
+    # Media extracted FROM source documents (embedded images in
+    # xlsx/docx/pdf) — represented separately from the source files
+    # themselves.  Extracted assets always live under
+    # cache/{product}/extracted_images/ — that path location is the
+    # distinguisher (both recorded shapes: {"file": image, "source": doc}
+    # and {"path", "file": source doc}).  Direct uploads live under
+    # data/ and are never extracted media.  Names only —
+    # /api/product_media serves the bytes by name.
+    extracted_media = []
+    for d in record.get("image_descriptions", []):
+        if d.get("unassigned_source_media"):
+            continue
+        p = d.get("path")
+        if not p or Path(p).parent.name != "extracted_images":
+            continue
+        if Path(p).is_file():
+            extracted_media.append({
+                "name": Path(p).name,
+                "source": str(d.get("source") or d.get("file") or ""),
+            })
+
+    return JSONResponse({
+        "product_id": folder,
+        "category": metadata.get("category", ""),
+        "summary": metadata.get("summary", ""),
+        "derived_facts": derived,
+        "manual_facts": manual_facts,
+        "effective_facts": effective,
+        "source_files": source_files,
+        "extracted_media": extracted_media,
+        "url_provenance": url_provenance,
+        "source_type": source_type,
+    })
+
+
 @app.post("/api/product_profile_save/{folder}")
 async def api_product_profile_save(folder: str, request: Request) -> JSONResponse:
     """บันทึก product_profile.json ลง cache/ — รับ dict จาก body."""
@@ -2523,6 +2661,15 @@ async def api_product_profile_save(folder: str, request: Request) -> JSONRespons
                 for k, v in existing.items():
                     if k not in body:
                         body[k] = v
+                # Field-deletion tombstones accumulate: a save that only
+                # renames another field must not resurrect a field the
+                # user deleted earlier.  Re-adding the key as a manual
+                # fact still overrides the tombstone downstream.
+                prior = existing.get("deleted_facts")
+                if isinstance(prior, list) and isinstance(
+                        body.get("deleted_facts"), list):
+                    body["deleted_facts"] = list(
+                        dict.fromkeys(list(prior) + body["deleted_facts"]))
         except (ValueError, OSError):
             pass
 
@@ -2544,37 +2691,112 @@ async def api_product_profile_save(folder: str, request: Request) -> JSONRespons
     return JSONResponse({"ok": True, "saved": str(path.relative_to(PROJECT_ROOT))})
 
 
-@app.post("/api/product_profile_suggest/{folder}")
-async def api_product_profile_suggest(folder: str) -> JSONResponse:
-    """AI อ่านสเปคสินค้า → สรุปตำแหน่งสินค้า (pre-fill ฟอร์ม).
+# ============================================================
+# AI Enrichment — explicit paid action, pending proposals only
+# (FREE-IMPORT-AI-PROPOSAL-01: import is always AI-free; the ONLY model
+#  invocation for product enrichment starts at POST .../enrich)
+# ============================================================
 
-    ใช้ product_db.get_agent_context_text() ดึงสเปค → analyze_product_positioning() → คืน suggested dict.
+def _require_product(folder: str):
+    """Containment + existence check shared by the product-ai endpoints.
+
+    Returns (data_dir, error_response) — error_response is None on success.
     """
+    from src.workspace_context import contain_path
+    try:
+        product_dir = contain_path(folder, DATA_DIR())
+    except ValueError:
+        return None, JSONResponse({"ok": False, "error": "โฟลเดอร์ไม่ถูกต้อง"}, status_code=400)
+    if not product_dir.exists() or not product_dir.is_dir():
+        return None, JSONResponse({"ok": False, "error": "ไม่พบสินค้า"}, status_code=404)
+    return product_dir, None
+
+
+@app.get("/api/product_ai/{folder}/proposal")
+def api_product_ai_proposal_get(folder: str) -> JSONResponse:
+    """Pending AI proposal + workflow state + current canonical values —
+    the CURRENT-vs-SUGGESTION diff view-model.  Read-only, always free."""
     err = _require_brand_context()
     if err is not None:
         return err
-    from src.product_db import get_agent_context_text, is_ready
-    from src.voice_learner import analyze_product_positioning
+    _dir, perr = _require_product(folder)
+    if perr is not None:
+        return perr
+    from src import ai_enrichment
+    return JSONResponse(ai_enrichment.get_proposal_view(folder))
 
-    if not is_ready(folder):
-        return JSONResponse({"ok": False, "error": f"สินค้า {folder} ยังไม่พร้อม (ต้อง ingest ก่อน)"})
 
-    spec_text = get_agent_context_text(folder)
-    if not spec_text.strip():
-        return JSONResponse({"ok": False, "error": "ไม่มีสเปคสินค้าให้วิเคราะห์"})
+@app.post("/api/product_ai/{folder}/enrich")
+async def api_product_ai_enrich(folder: str, request: Request) -> JSONResponse:
+    """THE cost boundary — the first model invocation a product may ever
+    trigger.  Reached only after the user pressed เริ่มใช้ AI."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
+    _dir, perr = _require_product(folder)
+    if perr is not None:
+        return perr
+    from src import ai_enrichment
+    from src.ingestion import _make_llm
 
-    # สร้าง LLM client (ใช้ pattern เดียวกับ voice_learn)
+    body = await request.json()
+    # Explicit empty selection is a 400 — never default an explicit user
+    # choice into a paid call.  Only a missing key defaults to both scopes.
+    raw_scopes = body.get("scopes")
+    if raw_scopes is None:
+        raw_scopes = list(ai_enrichment.SCOPES)
+    scopes = [s for s in raw_scopes if s in ai_enrichment.SCOPES]
+    if not scopes:
+        return JSONResponse({"ok": False, "error": "ไม่ได้เลือกขอบเขต AI"}, status_code=400)
+
+    llm = _make_llm()
+    if llm is None:
+        return JSONResponse({"ok": False, "error": "ไม่มีการตั้งค่า AI provider"}, status_code=503)
     try:
-        orch = Orchestrator(brand_dir="brand")
-        llm = orch.make_client()
+        proposal = ai_enrichment.generate_proposal(
+            folder, scopes, llm, replace=bool(body.get("replace")))
+    except ai_enrichment.ProposalPending:
+        return JSONResponse({
+            "ok": False, "error": "proposal_pending", "has_pending": True,
+        }, status_code=409)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
     except Exception as e:
-        return JSONResponse({"ok": False, "error": f"สร้าง LLM client ไม่ได้: {e}"}, status_code=500)
+        # AI failure never hurts the product — state is recorded in
+        # ai_enrichment and canonical data is untouched.
+        return JSONResponse({"ok": False, "error": f"AI วิเคราะห์ไม่สำเร็จ: {e}"}, status_code=500)
+    finally:
+        try:
+            llm.close()
+        except Exception:
+            pass
+    return JSONResponse({"ok": True, "proposal": proposal})
 
-    suggested = analyze_product_positioning(spec_text, llm)
-    if not suggested:
-        return JSONResponse({"ok": False, "error": "AI วิเคราะห์ไม่สำเร็จ ลองกรอกเองหรือลองใหม่อีกครั้ง"})
 
-    return JSONResponse({"ok": True, "suggested": suggested})
+@app.post("/api/product_ai/{folder}/resolve")
+async def api_product_ai_resolve(folder: str, request: Request) -> JSONResponse:
+    """The ONLY canonical write path for AI output — per-field
+    accept/keep/edit, Git-like stale-proposal conflict protection.
+    Free: no model call here."""
+    err = _require_brand_context()
+    if err is not None:
+        return err
+    _dir, perr = _require_product(folder)
+    if perr is not None:
+        return perr
+    from src import ai_enrichment
+
+    body = await request.json()
+    proposal_id = str(body.get("proposal_id") or "")
+    try:
+        if body.get("discard"):
+            ai_enrichment.discard_proposal(folder, proposal_id)
+            return JSONResponse({"ok": True, "discarded": True})
+        result = ai_enrichment.resolve_proposal(
+            folder, proposal_id, body.get("resolutions") or [])
+    except ai_enrichment.StaleProposal:
+        return JSONResponse({"ok": False, "error": "stale_proposal"}, status_code=409)
+    return JSONResponse({"ok": True, **result})
 
 
 # ============================================================
@@ -6113,6 +6335,30 @@ async function mktappLogout() {
       </div>
       <div id="flow-wizard-list"></div>
     </div>
+
+    <!-- Product Detail View — replaces flow wizard when a product is opened -->
+    <div id="product-detail-view" style="display:none;padding:24px;max-width:640px">
+      <div id="pd-back" style="margin-bottom:20px">
+        <span onclick="closeProductDetail()" style="color:#7c8aff;cursor:pointer;font-size:13px">← สินค้าทั้งหมด</span>
+      </div>
+      <div id="pd-header" style="margin-bottom:24px">
+        <div style="display:flex;align-items:flex-start;gap:16px">
+          <div id="pd-image" style="width:80px;height:80px;border-radius:12px;background:#1a1d27;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:32px;flex-shrink:0">📦</div>
+          <div style="flex:1;min-width:0">
+            <h2 id="pd-name" style="margin:0 0 4px 0;font-size:20px;color:#e0e0e0"></h2>
+            <div id="pd-meta" style="font-size:13px;color:#888"></div>
+          </div>
+          <div style="position:relative;flex-shrink:0">
+            <button onclick="_pdToggleMenu()" style="background:#1a1d27;border:1px solid #3a3d4a;color:#888;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:16px;line-height:1">⋯</button>
+            <div id="pd-menu" style="display:none;position:absolute;right:0;top:100%;margin-top:4px;background:#1a1d27;border:1px solid #3a3d4a;border-radius:8px;z-index:50;min-width:160px;padding:4px 0;box-shadow:0 4px 12px rgba(0,0,0,0.4)">
+              <div onclick="_pdMenuAction('delete')" style="padding:8px 16px;font-size:13px;color:#f87171;cursor:pointer" onmouseover="this.style.background='#2a2d3a'" onmouseout="this.style.background='none'">ลบสินค้า</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="pd-body"></div>
+      <input type="file" id="pd-file-input" multiple style="display:none" onchange="_pdFileSelected(this)">
+    </div>
   </div>
 </div>
 <script>
@@ -6255,7 +6501,7 @@ function loadFolderList() {
         if (multiSelectMode && canUseAgent) {
           html += '<div class="folder-info">';
         } else {
-          html += '<div class="folder-info" onclick="toggleFolderFiles(\'' + safePath + '\',this)" style="cursor:pointer">';
+          html += '<div class="folder-info" onclick="openProductDetail(\'' + safePath + '\')" style="cursor:pointer" title="ดูรายละเอียดสินค้า">';
         }
         html += '<div class="folder-name">' + escapeHtml(f.name) + '</div>';
         let metaExtra = '';
@@ -6269,7 +6515,7 @@ function loadFolderList() {
           if (isProcessing) {
             html += '<span class="folder-manage-btn" style="opacity:0.3;cursor:not-allowed" title="กำลังประมวลผลข้อมูล — รอให้เสร็จก่อน">⚙</span>';
           } else {
-            html += '<span class="folder-manage-btn" onclick="openFolderManage(\'' + safePath + '\', this.parentElement.dataset.status)" title="จัดการไฟล์/สินค้า">⚙</span>';
+            html += '<span class="folder-manage-btn" onclick="openProductDetail(\'' + safePath + '\')" title="ดูรายละเอียดสินค้า">⚙</span>';
           }
         }
         html += '</div>';
@@ -6516,6 +6762,46 @@ function _makeProductNameFromFile(file) {
   return clean || 'สินค้า-' + Date.now();
 }
 
+let _uploadMode = 'file';
+
+// Add Product modal: segmented file/URL toggle — exactly one mode visible
+// at a time (Product Owner UX decision).  Manage mode (existing product)
+// hides the toggle entirely and keeps the footer.
+function setUploadMode(mode) {
+  _uploadMode = mode === 'url' ? 'url' : 'file';
+  const on  = 'flex:1;padding:9px;background:#7c8aff;color:#fff;border:none;cursor:pointer;font-size:13px';
+  const off = 'flex:1;padding:9px;background:#0f1117;color:#aaa;border:none;cursor:pointer;font-size:13px';
+  const fb = document.getElementById('upload-mode-file');
+  const ub = document.getElementById('upload-mode-url');
+  if (fb) fb.style.cssText = _uploadMode === 'file' ? on : off;
+  if (ub) ub.style.cssText = _uploadMode === 'url' ? on : off;
+  const fileSec = document.getElementById('upload-file-mode');
+  const urlSec = document.getElementById('url-import-block');
+  const addBtn = document.getElementById('add-upload-btn');
+  if (fileSec) fileSec.style.display = _uploadMode === 'file' ? '' : 'none';
+  if (urlSec) urlSec.style.display = _uploadMode === 'url' ? '' : 'none';
+  if (addBtn) addBtn.style.display = (!_editingFolder && _uploadMode === 'file') ? 'block' : 'none';
+}
+
+// Hide/restore the mode UI while a staging preview is shown.
+function _setStagingModeUI(visible) {
+  if (!visible) {
+    ['upload-mode-toggle', 'upload-file-mode', 'url-import-block', 'add-upload-btn'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'none';
+    });
+    return;
+  }
+  if (_editingFolder) {
+    const fm = document.getElementById('upload-file-mode');
+    if (fm) fm.style.display = '';
+    return;
+  }
+  const t = document.getElementById('upload-mode-toggle');
+  if (t) t.style.display = 'flex';
+  setUploadMode(_uploadMode);
+}
+
 function openUploadModal() {
   _uploadQueue = [];
   _filesToDelete = [];
@@ -6537,16 +6823,21 @@ function openUploadModal() {
   if (nameInput) { nameInput.value = ''; nameInput.disabled = false; nameInput.style.display = 'none'; }
   const nameLabel = document.getElementById('upload-name-label');
   if (nameLabel) { nameLabel.textContent = ''; nameLabel.style.display = 'none'; }
-  const urlBlock = document.getElementById('url-import-block');
-  if (urlBlock) urlBlock.style.display = '';
   const urlInput = document.getElementById('import-url-input');
   if (urlInput) urlInput.value = '';
+  // Segmented toggle — add mode shows exactly one of file/URL at a time,
+  // Upload action inside the file section, no bottom footer.
+  const toggle = document.getElementById('upload-mode-toggle');
+  if (toggle) toggle.style.display = 'flex';
+  setUploadMode('file');
+  const footer = document.getElementById('upload-modal-footer');
+  if (footer) footer.style.display = 'none';
   renderUploadQueueModal();
   _uploadModalOriginal = _getUploadModalData();
   const status = document.getElementById('upload-modal-status');
   if (status) status.textContent = '';
   const title = document.getElementById('upload-modal-title');
-  if (title) title.textContent = 'เพิ่มสินค้าใหม่';
+  if (title) title.textContent = 'เพิ่มสินค้า';
   const existing = document.getElementById('existing-files-modal');
   if (existing) existing.innerHTML = '';
   const delBtn = document.getElementById('upload-delete-product-btn');
@@ -6588,9 +6879,18 @@ function openUploadModalForFolder(folder, status) {
   const nameLabel = document.getElementById('upload-name-label');
   nameLabel.textContent = 'ชื่อสินค้า';
   nameLabel.style.display = 'block';
-  // URL import creates new products only — hide it in manage mode
+  // Manage mode: no mode toggle, no URL import (creates new products only),
+  // file section + footer stay as before
+  const toggle = document.getElementById('upload-mode-toggle');
+  if (toggle) toggle.style.display = 'none';
   const urlBlock = document.getElementById('url-import-block');
   if (urlBlock) urlBlock.style.display = 'none';
+  const fileMode = document.getElementById('upload-file-mode');
+  if (fileMode) fileMode.style.display = '';
+  const addBtn = document.getElementById('add-upload-btn');
+  if (addBtn) addBtn.style.display = 'none';
+  const footer = document.getElementById('upload-modal-footer');
+  if (footer) footer.style.display = 'flex';
   renderUploadQueueModal();
   document.getElementById('upload-modal-status').textContent = '';
   // Title is fixed in manage mode — no fetch needed
@@ -6986,7 +7286,8 @@ function renderStagingPreview() {
   html += '</div>';
 
   el.innerHTML = html;
-  // ซ่อนปุ่มอัปโหลดเดิมตอนโชว์ preview
+  // ซ่อน mode UI + ปุ่มอัปโหลดเดิมตอนโชว์ preview
+  _setStagingModeUI(false);
   const submitBtn = document.getElementById('upload-submit-btn');
   if (submitBtn) submitBtn.style.display = 'none';
   // update confirm button label
@@ -7072,6 +7373,7 @@ function cancelStaging() {
   _stagingMatches = [];
   const el = document.getElementById('staging-preview-modal');
   if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+  _setStagingModeUI(true);
   const submitBtn = document.getElementById('upload-submit-btn');
   if (submitBtn) submitBtn.style.display = '';
   const status = document.getElementById('upload-modal-status');
@@ -7095,15 +7397,16 @@ function importProductFromUrl() {
     body: JSON.stringify({ url: url, product_name: name }),
   }).then(r => r.json()).then(data => {
     btn.disabled = false;
-    if (data.ok) {
+    if (data.ok && data.staged) {
+      // URL went through staging — show the deterministic single-product
+      // preview for user review (no model was involved)
+      _stagingBatchId = data.batch_id;
+      _stagingSegments = data.segments || [];
+      _stagingMatches = data.matches || [];
+      _uploadQueue = [];
+      renderStagingPreview();
       status.className = 'upload-status ok';
-      status.textContent = 'สร้างสินค้า "' + data.folder + '" แล้ว — กำลังประมวลผลข้อมูลอัตโนมัติ...';
-      urlEl.value = '';
-      _editingFolder = data.folder;
-      _uploadModalOriginal = _getUploadModalData();
-      loadFolderList();
-      startSidebarPolling();  // โชว์ progress ใน sidebar ทันที
-      setTimeout(() => closeUploadModal(true), 1500);
+      status.textContent = 'พบ ' + _stagingSegments.length + ' สินค้า — ตรวจสอบแล้วกดยืนยัน';
     } else {
       status.className = 'upload-status err';
       status.textContent = data.error || 'นำเข้าจากลิงก์ไม่สำเร็จ';
@@ -7679,9 +7982,19 @@ function _getProductProfileFormData() {
   const getList = id => { const el = document.getElementById(id); return (el ? String(el.value || '') : '').split(',').map(s => s.trim()).filter(Boolean); };
   const facts = {};
   document.querySelectorAll('.pf-fact-row').forEach(row => {
-    const k = (row.querySelector('.pf-fact-key') || {}).value || '';
+    const key = row.getAttribute('data-key') || '';
+    const label = (row.querySelector('.pf-fact-label') || {}).value || '';
     const v = (row.querySelector('.pf-fact-val') || {}).value || '';
-    if (k.trim() && v.trim()) facts[k.trim()] = v.trim();
+    const derivedVal = row.getAttribute('data-derived-value') || '';
+    const vTrim = v.trim();
+    if (!vTrim) return;  // skip empty values
+    // Use machine key if available, otherwise use label as key (manual-only)
+    const k = key.trim() || label.trim();
+    if (!k) return;
+    // Only store as manual correction if value differs from derived
+    // (if value matches derived, no correction needed — derived value is used)
+    if (derivedVal.trim() && vTrim === derivedVal.trim()) return;
+    facts[k] = vTrim;
   });
   return {
     audience: {
@@ -7709,8 +8022,15 @@ function _isProductProfileDirty() {
 function _getUploadModalData() {
   const nameInput = document.getElementById('upload-product-name-modal');
   const name = nameInput ? String(nameInput.value || '').trim() : '';
+  const urlInput = document.getElementById('import-url-input');
   const queue = _uploadQueue.map(f => ({ name: f.name, size: f.size }));
-  return { productName: name, queue: queue, filesToDelete: _filesToDelete.slice() };
+  return {
+    productName: name,
+    queue: queue,
+    filesToDelete: _filesToDelete.slice(),
+    url: urlInput ? String(urlInput.value || '').trim() : '',
+    pendingBatch: _stagingBatchId || null,
+  };
 }
 
 function _isUploadModalDirty() {
@@ -7725,30 +8045,42 @@ function loadProductProfileForManage(folder) {
   const status = document.getElementById('pp-status');
   if (section) section.style.display = 'block';
   if (status) { status.className = 'upload-status'; status.textContent = ''; status.style.display = 'none'; }
-  // โหลด profile เดิมก่อน (ถ้ามี) — ingest สร้างให้แล้ว ไม่ต้อง suggest ตอนเปิด
-  fetch('/api/product_profile/' + encodeURIComponent(folder)).then(r => r.json()).then(data => {
-    _renderProductProfileInto(body, data || {});
+  // โหลด profile + product info พร้อมกัน — product info มี effective facts
+  Promise.all([
+    fetch('/api/product_profile/' + encodeURIComponent(folder)).then(r => r.json()).catch(() => ({})),
+    fetch('/api/product_info/' + encodeURIComponent(folder)).then(r => r.json()).catch(() => ({})),
+  ]).then(([profileData, infoData]) => {
+    _renderProductProfileInto(body, profileData || {}, infoData || {});
   }).catch(() => {
-    _renderProductProfileInto(body, {});
+    _renderProductProfileInto(body, {}, {});
   });
 }
 
-function _renderProductProfileInto(body, data) {
-  body.innerHTML = _renderProductProfileForm(data);
+function _renderProductProfileInto(body, data, infoData) {
+  body.innerHTML = _renderProductProfileForm(data, infoData || {});
   _productProfileOriginal = _getProductProfileFormData();
 }
 
-function _pfFactRow(key, val) {
-  return '<div class="pf-fact-row" style="display:flex;gap:6px;margin-bottom:6px;align-items:center">' +
-    '<input class="pf-fact-key" value="' + escapeHtml(String(key || '')) + '" placeholder="เช่น ราคา" style="flex:1;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:6px;color:#e0e0e0;font-size:13px">' +
-    '<input class="pf-fact-val" value="' + escapeHtml(String(val || '')) + '" placeholder="เช่น 3,590 บาท" style="flex:1.5;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:6px;color:#e0e0e0;font-size:13px">' +
+function _pfFactRow(key, label, val, source, derivedVal, sourceType) {
+  const isManual = source === 'manual';
+  const fromLabel = sourceType === 'url' ? 'มาจาก URL' : 'มาจากไฟล์';
+  const badge = isManual
+    ? '<span style="font-size:10px;color:#facc15;white-space:nowrap">แก้ไขแล้ว</span>'
+    : '<span style="font-size:10px;color:#4ade80;white-space:nowrap">' + fromLabel + '</span>';
+  const resetBtn = (isManual && derivedVal !== undefined && derivedVal !== '')
+    ? '<button type="button" onclick="_pfResetFactRow(this)" title="↺ คืนค่าจากแหล่งข้อมูล" style="background:none;border:none;color:#7c8aff;cursor:pointer;font-size:12px;padding:2px 6px">↺</button>'
+    : '';
+  return '<div class="pf-fact-row" data-key="' + escapeHtml(String(key || '')) + '" data-derived-value="' + escapeHtml(String(derivedVal || '')) + '" style="display:flex;gap:6px;margin-bottom:6px;align-items:center">' +
+    '<input class="pf-fact-label" value="' + escapeHtml(String(label || '')) + '" placeholder="ชื่อฟิลด์" style="flex:1;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:6px;color:#e0e0e0;font-size:13px">' +
+    '<input class="pf-fact-val" value="' + escapeHtml(String(val || '')) + '" placeholder="ค่า" style="flex:1.5;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:6px;color:#e0e0e0;font-size:13px">' +
+    '<span style="display:flex;align-items:center;gap:2px;min-width:80px">' + badge + resetBtn + '</span>' +
     '<button type="button" onclick="_pfRemoveFactRow(this)" style="background:none;border:none;color:#f87171;cursor:pointer;font-size:16px;padding:2px 6px">×</button>' +
     '</div>';
 }
 
 function _pfAddFactRow() {
   const container = document.getElementById('pf-facts-container');
-  if (container) container.insertAdjacentHTML('beforeend', _pfFactRow('', ''));
+  if (container) container.insertAdjacentHTML('beforeend', _pfFactRow('', '', '', 'manual', ''));
 }
 
 function _pfRemoveFactRow(btn) {
@@ -7756,10 +8088,37 @@ function _pfRemoveFactRow(btn) {
   if (row) row.remove();
 }
 
-function _renderProductProfileForm(d) {
+function _pfResetFactRow(btn) {
+  const row = btn.closest('.pf-fact-row');
+  if (!row) return;
+  const derivedVal = row.getAttribute('data-derived-value') || '';
+  const valInput = row.querySelector('.pf-fact-val');
+  if (valInput) valInput.value = derivedVal;
+}
+
+function _renderProductProfileForm(d, infoData) {
   let h = '';
-  h += '<button id="pp-suggest-btn" onclick="suggestProductProfile()" title="AI จะอ่านสเปคสินค้าและเติมค่าลงในฟอร์มให้ ยังไม่บันทึกจนกว่าจะกด บันทึก (กดซ้ำได้ถ้าอยากให้เดาใหม่)" style="background:#7c8aff;border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:12px">🎓 ตั้งค่าด้วย AI</button>';
-  h += '<span id="pp-suggest-status" style="display:none;margin-left:8px;font-size:12px;vertical-align:middle"></span>';
+  // === Section 1: ข้อมูลสินค้า (Product Information — primary identity) ===
+  const info = infoData || {};
+  const effective = info.effective_facts || {};
+  const sourceType = info.source_type || 'file';
+  h += '<div class="pp-section-header" style="font-size:14px;font-weight:600;color:#e0e0e0;margin-bottom:8px">ข้อมูลสินค้า</div>';
+  h += '<div style="font-size:12px;color:#888;margin-bottom:12px">ข้อมูลที่ระบบรู้จัก — แก้ไขได้โดยตรง ค่าที่แก้ไขจะมีป้าย "แก้ไขแล้ว"</div>';
+  h += '<div id="pf-facts-container">';
+  const factEntries = Object.entries(effective);
+  if (factEntries.length === 0) {
+    h += _pfFactRow('', '', '', 'manual', '', sourceType);
+  } else {
+    for (const [k, factInfo] of factEntries) {
+      const derivedVal = (infoData.derived_facts && infoData.derived_facts[k]) ? infoData.derived_facts[k].value : '';
+      h += _pfFactRow(k, factInfo.label, factInfo.value, factInfo.source, derivedVal, sourceType);
+    }
+  }
+  h += '</div>';
+  h += '<button type="button" onclick="_pfAddFactRow()" style="background:#1a1d27;border:1px dashed #3a3d4a;color:#7c8aff;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;margin-top:4px">+ เพิ่มข้อมูล</button>';
+  // === Section 2: การตลาด / ตำแหน่งสินค้า (marketing positioning) ===
+  h += '<div class="pp-section-header" style="font-size:14px;font-weight:600;color:#e0e0e0;margin:20px 0 8px 0">การตลาด / ตำแหน่งสินค้า</div>';
+  h += '<div style="font-size:12px;color:#888;margin-bottom:12px">ตำแหน่งสินค้าเฉพาะรุ่น — กรอกเอง หรือใช้ ✨ เติมข้อมูลด้วย AI ในหน้ารายละเอียดสินค้าเพื่อรับข้อเสนอแบบตรวจสอบได้</div>';
   // Audience
   const aud = d.audience || {};
   const prim = aud.primary || {};
@@ -7769,8 +8128,7 @@ function _renderProductProfileForm(d) {
   h += _field('บทบาทผู้ซื้อ', 'pp-role', prim.role, 'เช่น ผู้ปกครองยุคใหม่ที่ใส่ใจเทคโนโลยี', 'บทบาทช่วย AI รู้ว่าคุยกับใคร มีผลต่อลำดับภาษาและ pain points ทีเน้น');
   h += _field('ช่วงอายุผู้ใช้ปลายทาง', 'pp-eu-age', eu.age, 'เช่น 5-12 ปี', 'ถ้าผู้ใช้งานจริงต่างจากผู้ซื้อ ระบุช่วงอายุช่วยให้คอนเทนต์/ภาพตรงกับคนใช้งาน');
   h += _field('ลักษณะผู้ใช้ปลายทาง', 'pp-eu-desc', eu.desc, 'เช่น เด็กวัยประถมที่ชอบเล่นกีฬา', 'ลักษณะของผู้ใช้ปลายทาง ช่วย AI สร้างเนื้อหาและภาพที่ตรงกับคนที่จริงใช้สินค้า');
-  // Positioning
-  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">ตำแหน่งสินค้า</div>';
+  // Positioning fields
   h += _chipField('คู่แข่งหลัก', 'pp-competitors', d.competitors, 'เช่น Apple Watch, Fitbit (กด Enter)', 'บอกคู่แข่งหลักเพื่อให้ AI เปรียบเทียบจุดขายและหามุมที่แตกต่างได้');
   h += _chipField('จุดขายหลัก', 'pp-differentiators', d.differentiators, 'เช่น กล้อง 5MP, กันน้ำ IP68 (กด Enter)', 'จุดขายที่ทำให้สินค้านี้ต่างจากคู่แข่ง AI จะหยิบจุดนี้มาเขียนข้อความโน้มน้าวใจ');
   h += _chipField('Use cases', 'pp-use-cases', d.use_cases, 'เช่น ติดตามลูก, ออกกำลังกาย (กด Enter)', 'สถานการณ์ใช้งานจริง ช่วย AI เลือกมุมมองที่ตรงกับชีวิตลูกค้า');
@@ -7782,82 +8140,13 @@ function _renderProductProfileForm(d) {
     '<option value="flagship"' + (d.price_tier === 'flagship' ? ' selected' : '') + '>flagship (ระดับสูง)</option>' +
     '</select></div>';
   h += _textarea('ปรับโทน', 'pp-tone', d.tone_adjustment, 'เช่น อบอุ่น วางใจได้ ให้ความรู้สึกปลอดภัย', 'ปรับน้ำหนักโทนของเนื้อหาให้เหมาะกับสินค้าตัวนี้ โดยไม่เปลี่ยน Voice ของแบรนด์ ถ้าเว้นว่างจะใช้โทนแบรนด์');
-  // Visual override
+  // === Section 3: ภาพ / Visual Direction ===
   const vo = d.visual_override || {};
   const vis = vo.image_style || {};
-  h += '<div style="font-size:13px;color:#7c8aff;margin:12px 0 8px 0">ปรับภาพ <span style="cursor:help;color:#7c8aff;font-size:12px" data-tooltip="กรอกเฉพาะตอนต้องการให้สินค้านี้มีภาพลักษณ์ต่างจากแบรนด์ ถ้าเว้นว่างจะใช้ของแบรนด์">ⓘ</span></div>';
+  h += '<div class="pp-section-header" style="font-size:14px;font-weight:600;color:#e0e0e0;margin:20px 0 8px 0">ภาพ / Visual Direction <span style="cursor:help;color:#7c8aff;font-size:12px;font-weight:400" data-tooltip="กรอกเฉพาะตอนต้องการให้สินค้านี้มีภาพลักษณ์ต่างจากแบรนด์ ถ้าเว้นว่างจะใช้ของแบรนด์">ⓘ</span></div>';
   h += _textarea('โทนภาพ', 'pp-visual-tone', vis.tone, 'เช่น ดำ-ทอง พรีเมียม แสงนุ่ม', 'อธิบายสไตล์ภาพ/วิดีโอเฉพาะสินค้านี้ ถ้าเว้นว่างจะใช้ของแบรนด์');
   h += _chipField('Keywords ภาพ', 'pp-visual-keywords', vo.keywords, 'เช่น golden black, premium lighting (กด Enter)', 'คีย์เวิร์ดภาพเฉพาะสินค้านี้ ใช้ปรับ AI Image Prompt ถ้าเว้นว่างจะใช้ของแบรนด์');
-  // Product Facts — user corrections
-  const facts = d.facts || {};
-  h += '<div style="font-size:13px;color:#7c8aff;margin:16px 0 8px 0">ข้อมูลสินค้าที่แก้ไขแล้ว / Product Facts</div>';
-  h += '<p style="font-size:12px;color:#888;margin:0 0 8px 0">ค่าที่แก้ไขจะ override ข้อมูลที่ AI หรือ extraction สร้างขึ้น ข้อมูลดิบในไฟล์ต้นฉบับไม่ถูกแก้ไข</p>';
-  h += '<div id="pf-facts-container">';
-  const factEntries = Object.entries(facts);
-  if (factEntries.length === 0) {
-    h += _pfFactRow('', '');
-  } else {
-    for (const [k, v] of factEntries) {
-      h += _pfFactRow(k, v);
-    }
-  }
-  h += '</div>';
-  h += '<button type="button" onclick="_pfAddFactRow()" style="background:#1a1d27;border:1px dashed #3a3d4a;color:#7c8aff;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;margin-top:4px">+ เพิ่มข้อมูล</button>';
   return h;
-}
-
-function suggestProductProfile(autoSave) {
-  if (!_ppFolder) return;
-  const btn = document.getElementById('pp-suggest-btn');
-  const status = document.getElementById('pp-suggest-status');
-  if (btn) btn.disabled = true;
-  if (status && !autoSave) {
-    status.style.display = 'inline-block';
-    status.style.color = '#facc15';
-    status.textContent = 'AI กำลังอ่านสเปค...';
-  }
-  fetch('/api/product_profile_suggest/' + encodeURIComponent(_ppFolder), {
-    method: 'POST',
-  }).then(r => r.json()).then(data => {
-    if (data.ok) {
-      const suggested = data.suggested;
-      // pre-fill ฟอร์มเฉพาะฟิลด์ที่ AI ให้ค่า ไม่ทับค่าที่ผู้ใช้กรอกไว้แล้ว
-      const setVal = (id, v) => { const el = document.getElementById(id); if (el && v) el.value = v; };
-      const setList = (id, arr) => { if (!arr || !arr.length) return; if (document.getElementById(id + '-chips')) { _renderChips(id, arr); } else { const el = document.getElementById(id); if (el) el.value = arr.join(', '); } };
-      const prim = (suggested.audience && suggested.audience.primary) || {};
-      const eu = (suggested.audience && suggested.audience.end_user) || {};
-      setVal('pp-age', prim.age);
-      setVal('pp-role', prim.role);
-      setVal('pp-eu-age', eu.age);
-      setVal('pp-eu-desc', eu.desc);
-      setList('pp-competitors', suggested.competitors);
-      setList('pp-differentiators', suggested.differentiators);
-      setList('pp-use-cases', suggested.use_cases);
-      setVal('pp-price-tier', suggested.price_tier);
-      setVal('pp-tone', suggested.tone_adjustment);
-      if (status) {
-        status.style.display = 'inline-block';
-        status.style.color = '#4ade80';
-        status.textContent = '✅ AI วิเคราะห์สเปคแล้ว — กรุณากด "บันทึก" เพื่อบันทึก';
-      }
-      if (btn) btn.disabled = false;
-      // ไม่ auto-save — ผู้ใช้ต้องกดปุ่ม "บันทึก" เอง
-    } else {
-      if (status) {
-        status.style.display = 'inline-block';
-        status.style.color = '#f87171';
-        status.textContent = data.error || 'AI วิเคราะห์ไม่สำเร็จ';
-      }
-      if (btn) btn.disabled = false;
-    }
-  }).catch(e => {
-    if (status) {
-      status.style.display = 'inline-block';
-      status.style.color = '#f87171';
-      status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
-    }
-    if (btn) btn.disabled = false;
-  });
 }
 
 function saveProductProfile() {
@@ -7875,24 +8164,32 @@ function saveProductProfile() {
     tone_adjustment: _formVal('pp-tone'),
     facts: {},
   };
-  // Collect facts from key/value rows
+  // Collect facts from product information rows
+  // Uses machine key (data-key) + label + value, with "skip if matches derived" logic
   document.querySelectorAll('.pf-fact-row').forEach(row => {
-    const k = (row.querySelector('.pf-fact-key') || {}).value || '';
+    const key = row.getAttribute('data-key') || '';
+    const label = (row.querySelector('.pf-fact-label') || {}).value || '';
     const v = (row.querySelector('.pf-fact-val') || {}).value || '';
-    if (k.trim() && v.trim()) payload.facts[k.trim()] = v.trim();
+    const derivedVal = row.getAttribute('data-derived-value') || '';
+    const vTrim = v.trim();
+    if (!vTrim) return;  // skip empty values
+    const k = key.trim() || label.trim();
+    if (!k) return;
+    // Skip if value matches derived (no correction needed)
+    if (derivedVal.trim() && vTrim === derivedVal.trim()) return;
+    payload.facts[k] = vTrim;
   });
-  // audience — ส่งเฉพาะถ้ามีค่า
+  // audience — ส่งเสมอแม้ว่าง เพื่อให้การล้างค่า persist (server merge
+  // จะคืนค่าเก่าถ้าไม่ส่ง key มา)
   const audience = {};
   if (primAge || primRole) audience.primary = { age: primAge, role: primRole };
   if (euAge || euDesc) audience.end_user = { age: euAge, desc: euDesc };
-  if (Object.keys(audience).length) payload.audience = audience;
-  // visual_override — ส่งเฉพาะถ้ามีค่า
+  payload.audience = audience;
+  // visual_override — ส่งเสมอด้วยเหตุผลเดียวกัน
   const visTone = _formVal('pp-visual-tone'), visKw = _formList('pp-visual-keywords');
-  if (visTone || visKw.length) {
-    payload.visual_override = {};
-    if (visTone) payload.visual_override.image_style = { tone: visTone };
-    if (visKw.length) payload.visual_override.keywords = visKw;
-  }
+  payload.visual_override = {};
+  if (visTone) payload.visual_override.image_style = { tone: visTone };
+  if (visKw.length) payload.visual_override.keywords = visKw;
   status.style.display = 'none';
   status.textContent = '';
   return fetch('/api/product_profile_save/' + encodeURIComponent(folder), {
@@ -7922,6 +8219,899 @@ function saveProductProfile() {
     throw e;
   }).finally(() => {
     if (_productProfileSavingFor === folder) _productProfileSavingFor = null;
+  });
+}
+
+// ============================================================
+// Product Detail View — canonical management surface for existing products
+// ============================================================
+
+let _pdFolder = '';
+let _pdEditingSection = null;   // 'facts' | 'marketing' | null
+let _pdFactsInitial = null;     // canonical facts snapshot
+let _pdMktInitial = null;       // canonical marketing snapshot
+let _pdExpandedFacts = false;
+let _pdExpandedSections = {};   // {marketing: bool, sources: bool}
+
+const _PD_MAX_VISIBLE_FACTS = 5;
+
+// --- Data loading ---
+
+function _pdLoad() {
+  return Promise.all([
+    fetch('/api/product_profile/' + encodeURIComponent(_pdFolder)).then(r => r.json()).catch(() => ({})),
+    fetch('/api/product_info/' + encodeURIComponent(_pdFolder)).then(r => r.json()).catch(() => ({})),
+    fetch('/api/folder_files/' + encodeURIComponent(_pdFolder)).then(r => r.json()).catch(() => []),
+    fetch('/api/product_ai/' + encodeURIComponent(_pdFolder) + '/proposal').then(r => r.json()).catch(() => ({})),
+  ]);
+}
+
+function _pdRefresh() { _pdLoad().then(([p, i, f, a]) => _renderProductDetailView(p, i, f, a)); }
+
+// --- Open / close ---
+
+function openProductDetail(folder) {
+  _pdFolder = folder;
+  _pdEditingSection = null;
+  _pdFactsInitial = null;
+  _pdMktInitial = null;
+  _pdExpandedFacts = false;
+  _pdExpandedSections = {};
+  document.getElementById('flow-wizard').style.display = 'none';
+  document.getElementById('product-detail-view').style.display = 'block';
+  _pdRefresh();
+}
+
+function closeProductDetail() {
+  if (_pdIsAnyDirty()) {
+    if (!confirm('มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก\n\nทิ้งการเปลี่ยนแปลง?')) return;
+  }
+  _pdFolder = '';
+  _pdEditingSection = null;
+  _pdFactsInitial = null;
+  _pdMktInitial = null;
+  document.getElementById('product-detail-view').style.display = 'none';
+  document.getElementById('flow-wizard').style.display = 'block';
+}
+
+// --- ⋯ menu ---
+
+function _pdToggleMenu() {
+  const menu = document.getElementById('pd-menu');
+  if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+}
+
+function _pdMenuAction(action) {
+  document.getElementById('pd-menu').style.display = 'none';
+  if (action === 'delete') deleteProductInDetail();
+}
+
+// Close menus on outside click
+document.addEventListener('click', function(e) {
+  const menu = document.getElementById('pd-menu');
+  if (menu && menu.style.display !== 'none' && !e.target.closest('#pd-menu') && !e.target.closest('[onclick*="_pdToggleMenu"]')) {
+    menu.style.display = 'none';
+  }
+  if (!e.target.closest('.pd-file-menu') && !e.target.closest('[onclick*="_pdToggleFileMenu"]')) {
+    document.querySelectorAll('.pd-file-menu').forEach(m => m.style.display = 'none');
+  }
+});
+
+// --- Dirty tracking ---
+
+let _pdEditInitialKeys = [];  // keys present when the facts edit started
+
+function _pdGetFactsState() {
+  const facts = {};
+  const present = new Set();
+  document.querySelectorAll('#pd-facts-container .pd-fact-row').forEach(row => {
+    const key = (row.getAttribute('data-key') || '').trim();
+    const origLabel = row.getAttribute('data-orig-label') || '';
+    const label = (row.querySelector('.pd-fact-label') || {}).value || '';
+    const v = (row.querySelector('.pd-fact-val') || {}).value || '';
+    const derivedVal = row.getAttribute('data-derived-value') || '';
+    const vTrim = v.trim();
+    // A renamed field tombstones its old key and is written under the new
+    // label — the key IS the fact identity, so a wrong title can't linger.
+    const renamed = !!key && !!label.trim() && label.trim() !== origLabel;
+    if (key && !renamed) present.add(key);
+    if (!vTrim) return;
+    const k = renamed ? label.trim() : (key || label.trim());
+    if (!k) return;
+    if (!renamed && derivedVal.trim() && vTrim === derivedVal.trim()) return;
+    facts[k] = vTrim;
+  });
+  // Rows removed during the edit are field deletions — the whole field
+  // (title + value) is tombstoned, not just blanked.
+  const deleted = _pdEditInitialKeys.filter(k => !present.has(k));
+  return { facts: facts, deleted_facts: deleted };
+}
+
+function _pdGetMktState() {
+  const get = id => { const el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; };
+  const getList = id => { const el = document.getElementById(id); return (el ? String(el.value || '') : '').split(',').map(s => s.trim()).filter(Boolean); };
+  return {
+    audience: {
+      primary: { age: get('pd-mkt-age'), role: get('pd-mkt-role') },
+      end_user: { age: get('pd-mkt-eu-age'), desc: get('pd-mkt-eu-desc') },
+    },
+    competitors: getList('pd-mkt-competitors'),
+    differentiators: getList('pd-mkt-differentiators'),
+    use_cases: getList('pd-mkt-use-cases'),
+    price_tier: get('pd-mkt-price-tier'),
+    tone_adjustment: get('pd-mkt-tone'),
+    visual_override: {
+      image_style: { tone: get('pd-mkt-visual-tone') },
+      keywords: getList('pd-mkt-visual-keywords'),
+    },
+  };
+}
+
+function _pdIsAnyDirty() {
+  if (_pdEditingSection === 'facts' && _pdFactsInitial) {
+    return JSON.stringify(_pdGetFactsState()) !== JSON.stringify(_pdFactsInitial);
+  }
+  if (_pdEditingSection === 'marketing' && _pdMktInitial) {
+    return JSON.stringify(_pdGetMktState()) !== JSON.stringify(_pdMktInitial);
+  }
+  return false;
+}
+
+// --- View renderer ---
+
+function _renderProductDetailView(profile, info, files, ai) {
+  const pd = document.getElementById('pd-body');
+  const name = _pdFolder;
+  const category = (info.category || '').trim();
+  const sourceType = info.source_type || 'file';
+  const sourceLabel = sourceType === 'url' ? 'นำเข้าจาก URL' : 'อัปโหลดไฟล์';
+  const summary = info.summary || '';
+  const effective = info.effective_facts || {};
+  const derived = info.derived_facts || {};
+
+  document.getElementById('pd-name').textContent = name;
+  document.getElementById('pd-meta').textContent = (category ? category + ' · ' : '') + sourceLabel;
+
+  let h = '';
+  h += _pdRenderFactsView(effective, derived, sourceType);
+  if (summary) {
+    h += '<div class="pd-section" style="margin-bottom:24px">';
+    h += '<div style="font-size:14px;font-weight:600;color:#e0e0e0;margin-bottom:8px">สรุปสินค้า</div>';
+    h += '<div style="font-size:13px;color:#aaa;line-height:1.6">' + escapeHtml(summary) + '</div>';
+    h += '</div>';
+  }
+  h += _pdRenderAiSection(ai);
+  h += _pdRenderMktSection(profile);
+  h += _pdRenderSrcSection(files, sourceType, info);
+  pd.innerHTML = h;
+}
+
+// --- AI enrichment section + proposal review ---
+
+const _PD_AI_PROFILE_LABELS = {
+  audience: 'กลุ่มเป้าหมาย', competitors: 'คู่แข่ง',
+  differentiators: 'จุดขาย', use_cases: 'Use cases',
+  price_tier: 'ระดับราคา', tone_adjustment: 'ปรับโทน',
+  visual_override: 'ภาพ / Visual',
+};
+
+function _pdRenderAiSection(ai) {
+  const enrich = (ai && ai.ai_enrichment) || {};
+  const proposal = ai && ai.proposal;
+  const status = enrich.status || 'never_run';
+  let h = '<div class="pd-section" style="margin-bottom:24px">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center">';
+  h += '<div style="font-size:14px;font-weight:600;color:#e0e0e0">AI</div>';
+  h += '<button onclick="pdAiOpen()" style="background:none;border:1px solid #7c8aff;color:#7c8aff;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px">✨ เติมข้อมูลด้วย AI</button>';
+  h += '</div>';
+  if (proposal) {
+    h += '<div style="margin-top:8px;font-size:12px;color:#facc15">มีข้อเสนอจาก AI รอตรวจสอบ — <span onclick="pdAiOpen()" style="color:#7c8aff;cursor:pointer">เปิดดูข้อเสนอ ›</span></div>';
+  } else if (status === 'failed') {
+    h += '<div style="margin-top:8px;font-size:12px;color:#f87171">AI วิเคราะห์ไม่สำเร็จครั้งล่าสุด — สินค้ายังใช้งานได้ปกติ กดปุ่มเพื่อลองใหม่</div>';
+  } else {
+    h += '<div style="margin-top:8px;font-size:12px;color:#555">สินค้าใช้งานได้เต็มที่โดยไม่ต้องใช้ AI — กดปุ่มเมื่อต้องการให้ AI เสนอข้อมูลเพิ่ม (ใช้เครดิต)</div>';
+  }
+  h += '</div>';
+  return h;
+}
+
+let _pdAiView = null;  // latest /proposal view-model while the dialog is open
+
+function pdAiOpen() {
+  // Opens the AI setup/review dialog — NO model call happens here.  The
+  // only paid invocation starts at เริ่มใช้ AI → POST .../enrich.
+  document.getElementById('pd-ai-overlay').classList.add('visible');
+  document.getElementById('pd-ai-status').textContent = '';
+  _pdAiLoad();
+}
+
+function pdAiClose() {
+  document.getElementById('pd-ai-overlay').classList.remove('visible');
+  _pdAiView = null;
+}
+
+function _pdAiLoad() {
+  fetch('/api/product_ai/' + encodeURIComponent(_pdFolder) + '/proposal')
+    .then(r => r.json()).then(view => {
+      _pdAiView = view;
+      _pdAiRender();
+    }).catch(() => {
+      document.getElementById('pd-ai-body').innerHTML =
+        '<div style="font-size:13px;color:#f87171">โหลดสถานะ AI ไม่สำเร็จ</div>';
+    });
+}
+
+function _pdAiRender() {
+  const view = _pdAiView || {};
+  const body = document.getElementById('pd-ai-body');
+  if (view.proposal) {
+    body.innerHTML = _pdAiReviewHtml(view);
+    return;
+  }
+  // Setup phase — scope selection; the confirm button is the cost boundary.
+  const enrich = view.ai_enrichment || {};
+  let h = '';
+  h += '<div style="font-size:13px;color:#aaa;margin-bottom:14px;line-height:1.6">AI จะอ่านไฟล์ต้นทางของสินค้าแล้วเสนอข้อมูลให้ตรวจสอบ — ข้อมูลเดิมของคุณจะไม่ถูกเปลี่ยนจนกว่าจะเลือกรับทีละฟิลด์</div>';
+  h += '<label style="display:flex;gap:8px;align-items:center;font-size:13px;color:#e0e0e0;margin-bottom:8px"><input type="checkbox" id="pd-ai-scope-facts" checked> ข้อมูลสินค้า (สรุป / หมวด / คุณสมบัติ)</label>';
+  h += '<label style="display:flex;gap:8px;align-items:center;font-size:13px;color:#e0e0e0;margin-bottom:14px"><input type="checkbox" id="pd-ai-scope-marketing" checked> Marketing (กลุ่มเป้าหมาย / จุดขาย / โทน)</label>';
+  if (enrich.status === 'failed') {
+    h += '<div style="font-size:12px;color:#f87171;margin-bottom:10px">ครั้งล่าสุดล้มเหลว: ' + escapeHtml(enrich.error || '') + '</div>';
+  }
+  h += '<div style="font-size:12px;color:#facc15;margin-bottom:14px">การกดปุ่มด้านล่างจะเรียกใช้ AI (ใช้เครดิต) กับสินค้านี้</div>';
+  h += '<button class="settings-save" onclick="pdAiStart()" style="width:100%">เริ่มใช้ AI</button>';
+  body.innerHTML = h;
+}
+
+function _pdAiValText(v) {
+  if (v === null || v === undefined || v === '') return '';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+// escapeHtml does NOT escape '"' — attribute values carrying model output
+// (data-sug/data-key) need quote escaping too, or " injects attributes.
+function _pdAiAttr(s) {
+  return escapeHtml(String(s)).replace(/"/g, '&quot;');
+}
+
+function _pdAiRow(kind, key, label, cur, sug, stale) {
+  const curT = _pdAiValText(cur);
+  const sugT = _pdAiValText(sug);
+  const empty = !curT;
+  let h = '<div class="pd-ai-row" style="border:1px solid #2a2d3a;border-radius:8px;padding:10px;margin-bottom:10px">';
+  h += '<div style="font-size:12px;color:#7c8aff;margin-bottom:6px">' + escapeHtml(label) + '</div>';
+  h += '<div style="display:flex;gap:10px;font-size:13px">';
+  h += '<div style="flex:1;min-width:0"><div style="font-size:10px;color:#666;margin-bottom:2px">CURRENT</div><div style="color:#e0e0e0;word-break:break-word">' + (curT ? escapeHtml(curT) : '<span style="color:#555">— ว่าง —</span>') + '</div></div>';
+  h += '<div style="flex:1;min-width:0"><div style="font-size:10px;color:#666;margin-bottom:2px">AI SUGGESTION</div><div style="color:#4ade80;word-break:break-word">' + escapeHtml(sugT) + '</div></div>';
+  h += '</div>';
+  h += '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap" data-kind="' + _pdAiAttr(kind) + '" data-key="' + _pdAiAttr(key) + '" data-sug="' + _pdAiAttr(sugT) + '" data-empty="' + (empty ? '1' : '0') + '">';
+  const btnS = 'background:#1a1d27;border:1px solid #3a3d4a;color:#e0e0e0;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px';
+  const btnA = 'background:#1a3d2a;border:1px solid #4ade80;color:#4ade80;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px';
+  // Stale source: accepting obsolete AI output is not a valid action —
+  // keep (writes nothing) and edit (the user's own value) stay available.
+  if (empty) {
+    if (!stale) h += '<button onclick="pdAiResolveOne(this,\'accept\')" style="' + btnA + '">รับค่า</button>';
+    h += '<button onclick="pdAiResolveOne(this,\'keep\')" style="' + btnS + '">ไม่ใช้</button>';
+    h += '<button onclick="pdAiEditRow(this)" style="' + btnS + '">แก้ไขก่อนรับ</button>';
+  } else {
+    h += '<button onclick="pdAiResolveOne(this,\'keep\')" style="' + btnS + '">เก็บค่าเดิม</button>';
+    if (!stale) h += '<button onclick="pdAiResolveOne(this,\'accept\')" style="' + btnA + '">ใช้ค่าที่ AI แนะนำ</button>';
+    h += '<button onclick="pdAiEditRow(this)" style="' + btnS + '">แก้ไขเอง</button>';
+  }
+  h += '</div></div>';
+  return h;
+}
+
+function _pdAiReviewHtml(view) {
+  const p = view.proposal || {};
+  const cur = view.current || {};
+  const stale = !!view.source_stale;
+  let h = '<div style="font-size:12px;color:#aaa;margin-bottom:12px;line-height:1.5">ตรวจสอบข้อเสนอจาก AI ทีละฟิลด์ — ข้อมูลเดิมจะไม่เปลี่ยนจนกว่าคุณจะเลือก</div>';
+  if (stale) {
+    h += '<div class="pd-ai-stale" style="font-size:12px;color:#facc15;border:1px solid #facc15;border-radius:8px;padding:10px;margin-bottom:12px;line-height:1.6">ไฟล์ต้นทางของสินค้าเปลี่ยนไปหลังจาก AI สร้างข้อเสนอนี้ — ข้อเสนอด้านล่างสร้างจากข้อมูลเดิม จึงไม่สามารถรับค่าได้ (ทิ้งข้อเสนอแล้วเริ่ม AI ใหม่เพื่อวิเคราะห์ข้อมูลล่าสุด)</div>';
+  } else {
+    h += '<div style="margin-bottom:12px"><button onclick="pdAiAcceptEmpty()" style="background:#1a3d2a;border:1px solid #4ade80;color:#4ade80;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px">รับเฉพาะข้อมูลใหม่ในช่องว่าง</button></div>';
+  }
+  const curFacts = cur.facts || {};
+  for (const [key, f] of Object.entries(p.facts || {})) {
+    h += _pdAiRow('fact', key, (f && f.label) || key, (curFacts[key] || {}).value, f && f.value, stale);
+  }
+  if (p.summary) h += _pdAiRow('summary', 'summary', 'สรุปสินค้า', cur.summary, p.summary, stale);
+  if (p.category) h += _pdAiRow('category', 'category', 'หมวดสินค้า', cur.category, p.category, stale);
+  const curProfile = cur.profile || {};
+  for (const [key, val] of Object.entries(p.profile || {})) {
+    h += _pdAiRow('profile', key, _PD_AI_PROFILE_LABELS[key] || key, curProfile[key], val, stale);
+  }
+  h += '<div style="margin-top:14px"><button onclick="pdAiDiscard()" style="background:none;border:1px solid #f87171;color:#f87171;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px">ทิ้งข้อเสนอทั้งหมด</button></div>';
+  return h;
+}
+
+function _pdAiScopes() {
+  const scopes = [];
+  const f = document.getElementById('pd-ai-scope-facts');
+  const m = document.getElementById('pd-ai-scope-marketing');
+  if (f && f.checked) scopes.push('facts');
+  if (m && m.checked) scopes.push('marketing');
+  return scopes;
+}
+
+function pdAiStart() {
+  // THE cost boundary — first allowed model invocation for this product.
+  const scopes = _pdAiScopes();
+  const status = document.getElementById('pd-ai-status');
+  if (!scopes.length) {
+    status.className = 'upload-status err';
+    status.textContent = 'เลือกขอบเขตอย่างน้อย 1 อย่าง';
+    return;
+  }
+  status.className = 'upload-status';
+  status.textContent = 'AI กำลังวิเคราะห์...';
+  _pdAiEnrich(scopes, false);
+}
+
+function _pdAiEnrich(scopes, replace) {
+  const status = document.getElementById('pd-ai-status');
+  fetch('/api/product_ai/' + encodeURIComponent(_pdFolder) + '/enrich', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scopes: scopes, replace: replace }),
+  }).then(async r => ({ code: r.status, d: await r.json() })).then(({ code, d }) => {
+    if (code === 409 && d.has_pending) {
+      status.textContent = '';
+      if (confirm('มีข้อเสนอ AI ที่ยังไม่ได้ตรวจสอบ\n\nเริ่มใหม่และทิ้งข้อเสนอเดิม?')) {
+        _pdAiEnrich(scopes, true);
+      }
+      return;
+    }
+    status.textContent = '';
+    if (d.ok) {
+      _pdAiLoad();
+      _pdRefresh();
+    } else {
+      status.className = 'upload-status err';
+      status.textContent = d.error || 'AI วิเคราะห์ไม่สำเร็จ';
+      _pdRefresh();  // product stays usable — show failed state in section
+    }
+  }).catch(e => {
+    status.className = 'upload-status err';
+    status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+  });
+}
+
+function pdAiEditRow(btn) {
+  const holder = btn.closest('[data-kind]');
+  const sug = holder.getAttribute('data-sug') || '';
+  const btnS = 'background:#1a3d2a;border:1px solid #4ade80;color:#4ade80;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px';
+  const btnC = 'background:#1a1d27;border:1px solid #3a3d4a;color:#888;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px';
+  holder.innerHTML = '<textarea class="pd-ai-edit" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;min-height:56px">' + escapeHtml(sug) + '</textarea>' +
+    '<div style="display:flex;gap:6px;margin-top:6px">' +
+    '<button onclick="pdAiResolveOne(this,\'edit\')" style="' + btnS + '">บันทึกค่าของฉัน</button>' +
+    '<button onclick="_pdAiLoad()" style="' + btnC + '">ยกเลิก</button>' +
+    '</div>';
+}
+
+function pdAiResolveOne(btn, action) {
+  const holder = btn.closest('[data-kind]');
+  const res = {
+    kind: holder.getAttribute('data-kind'),
+    key: holder.getAttribute('data-key'),
+    action: action,
+  };
+  if (action === 'edit') {
+    const ta = holder.querySelector('.pd-ai-edit');
+    let v = ta ? ta.value : '';
+    const orig = (holder.getAttribute('data-sug') || '').trim();
+    // Preserve JSON type for complex profile fields (object/array values)
+    if (/^[\[{]/.test(orig) || /^[\[{]/.test(v.trim())) {
+      try { v = JSON.parse(v); } catch (e) { /* keep as string */ }
+    }
+    res.value = v;
+  }
+  _pdAiResolve([res]);
+}
+
+function pdAiAcceptEmpty() {
+  const res = [];
+  document.querySelectorAll('#pd-ai-body [data-kind]').forEach(h => {
+    if (h.getAttribute('data-empty') === '1') {
+      res.push({ kind: h.getAttribute('data-kind'), key: h.getAttribute('data-key'), action: 'accept' });
+    }
+  });
+  if (res.length) _pdAiResolve(res);
+}
+
+function pdAiDiscard() {
+  const p = (_pdAiView || {}).proposal || {};
+  fetch('/api/product_ai/' + encodeURIComponent(_pdFolder) + '/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ proposal_id: p.proposal_id, discard: true }),
+  }).then(r => r.json()).then(() => { _pdAiLoad(); _pdRefresh(); });
+}
+
+function _pdAiResolve(resolutions) {
+  const p = (_pdAiView || {}).proposal || {};
+  const status = document.getElementById('pd-ai-status');
+  fetch('/api/product_ai/' + encodeURIComponent(_pdFolder) + '/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ proposal_id: p.proposal_id, resolutions: resolutions }),
+  }).then(r => r.json()).then(d => {
+    if (d.ok) {
+      if (d.conflicts && d.conflicts.length) {
+        status.className = 'upload-status err';
+        if (d.conflicts.some(c => c.reason === 'source_changed')) {
+          // Source evidence changed since generation — obsolete AI output
+          // was NOT written; discard + rerun analyzes the latest source.
+          status.textContent = 'ไฟล์ต้นทางเปลี่ยนไปหลัง AI สร้างข้อเสนอ — ไม่มีการเขียนค่าใดๆ โปรดทิ้งข้อเสนอแล้วเริ่ม AI ใหม่';
+        } else {
+          // Stale proposal — canonical moved since generation; the field
+          // was NOT written.  Reload shows refreshed CURRENT for re-decision.
+          status.textContent = 'ค่าปัจจุบันเปลี่ยนไปหลังสร้างข้อเสนอ — โปรดตรวจสอบใหม่: ' +
+            d.conflicts.map(c => c.label || c.key).join(', ');
+        }
+      }
+      _pdAiLoad();
+      _pdRefresh();
+    } else {
+      status.className = 'upload-status err';
+      status.textContent = d.error || 'ไม่สำเร็จ';
+    }
+  }).catch(e => {
+    status.className = 'upload-status err';
+    status.textContent = 'เกิดข้อผิดพลาด: ' + e.message;
+  });
+}
+
+// --- Facts section ---
+
+function _pdRenderFactsView(effective, derived, sourceType) {
+  let h = '<div class="pd-section" style="margin-bottom:24px">';
+  const isEditing = _pdEditingSection === 'facts';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
+  h += '<div style="font-size:14px;font-weight:600;color:#e0e0e0">ข้อมูลสินค้า</div>';
+  if (!isEditing) {
+    h += '<button onclick="pdEditFacts()" style="background:none;border:1px solid #3a3d4a;color:#7c8aff;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px">แก้ไข</button>';
+  } else {
+    h += '<span style="display:flex;gap:6px">';
+    h += '<button onclick="pdSaveFacts()" style="background:#22c55e;border:none;color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">บันทึก</button>';
+    h += '<button onclick="pdCancelEdit()" style="background:none;border:1px solid #3a3d4a;color:#888;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px">ยกเลิก</button>';
+    h += '</span>';
+  }
+  h += '</div>';
+  if (!isEditing) {
+    const factEntries = Object.entries(effective);
+    if (factEntries.length === 0) {
+      h += '<div style="font-size:13px;color:#555">ยังไม่มีข้อมูลสินค้า</div>';
+    } else {
+      const visibleCount = _pdExpandedFacts ? factEntries.length : Math.min(factEntries.length, _PD_MAX_VISIBLE_FACTS);
+      for (let i = 0; i < visibleCount; i++) {
+        const [k, f] = factEntries[i];
+        const isManual = f.source === 'manual';
+        const badge = isManual ? 'แก้ไขแล้ว' : (sourceType === 'url' ? 'มาจาก URL' : 'มาจากไฟล์');
+        const badgeColor = isManual ? '#facc15' : '#4ade80';
+        h += '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:8px 0;border-bottom:1px solid #1a1d27">';
+        h += '<div style="font-size:13px;color:#888;flex:0 0 140px">' + escapeHtml(f.label) + '</div>';
+        h += '<div style="font-size:13px;color:#e0e0e0;flex:1">' + escapeHtml(f.value) + '</div>';
+        h += '<div style="font-size:11px;color:' + badgeColor + ';flex:0 0 auto">' + badge + '</div>';
+        h += '</div>';
+      }
+      if (factEntries.length > _PD_MAX_VISIBLE_FACTS && !_pdExpandedFacts) {
+        h += '<div style="margin-top:8px"><span onclick="_pdExpandFacts()" style="color:#7c8aff;cursor:pointer;font-size:13px">ดูข้อมูลทั้งหมด (' + factEntries.length + ' รายการ) ›</span></div>';
+      }
+    }
+  } else {
+    _pdEditInitialKeys = Object.keys(effective);
+    h += '<div id="pd-facts-container">';
+    for (const [k, f] of Object.entries(effective)) {
+      const isManual = f.source === 'manual';
+      const derivedVal = derived[k] ? derived[k].value : '';
+      const badge = isManual ? 'แก้ไขแล้ว' : (sourceType === 'url' ? 'มาจาก URL' : 'มาจากไฟล์');
+      const badgeColor = isManual ? '#facc15' : '#4ade80';
+      h += '<div class="pd-fact-row" data-key="' + _pdAiAttr(k) + '" data-orig-label="' + _pdAiAttr(f.label) + '" data-derived-value="' + _pdAiAttr(derivedVal) + '" style="margin-bottom:12px">';
+      // Field title is editable — the data may be wrong from the heading
+      // itself, so the label is an input, not static text.
+      h += '<div style="font-size:12px;color:#888;margin-bottom:4px"><input class="pd-fact-label" value="' + _pdAiAttr(f.label) + '" placeholder="ชื่อฟิลด์" style="width:100%;background:transparent;border:none;border-bottom:1px solid transparent;color:#888;font-size:12px;padding:2px 0" onfocus="this.style.borderBottomColor=\'#3a3d4a\'" onblur="this.style.borderBottomColor=\'transparent\'"></div>';
+      h += '<div style="display:flex;align-items:center;gap:8px">';
+      h += '<input class="pd-fact-val" value="' + escapeHtml(f.value) + '" style="flex:1;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">';
+      h += '<span style="font-size:11px;color:' + badgeColor + ';white-space:nowrap">' + badge + '</span>';
+      if (isManual && derivedVal) {
+        h += '<button type="button" onclick="_pdResetFact(this)" title="↺ คืนค่าจากแหล่งข้อมูล" style="background:none;border:none;color:#7c8aff;cursor:pointer;font-size:12px;padding:2px 4px">↺</button>';
+      }
+      // Every field is deletable — a wrong field title/key must be
+      // removable, not just its value (tombstone lands on save).
+      h += '<button type="button" onclick="_pdRemoveFact(this)" title="ลบข้อมูล" style="background:none;border:none;color:#f87171;cursor:pointer;font-size:14px;padding:2px 4px">×</button>';
+      h += '</div></div>';
+    }
+    h += '</div>';
+    // Chip-style inline add — same pattern as the keyword chips in the
+    // pillars modal: type a field name, Enter creates the row; no
+    // repeated empty forms.
+    h += '<span class="pillar-keyword-add" style="margin-top:4px"><input placeholder="+ เพิ่มข้อมูล (ชื่อฟิลด์)" onkeydown="if(event.key===\'Enter\'){event.preventDefault();_pdAddFact(this.value.trim());this.value=\'\';}" style="width:230px"></span>';
+  }
+  h += '</div>';
+  return h;
+}
+
+// --- Marketing section ---
+
+function _pdRenderMktSection(profile) {
+  const expanded = _pdExpandedSections['marketing'] || false;
+  const isEditing = _pdEditingSection === 'marketing';
+  let h = '<div class="pd-section" style="margin-bottom:24px">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center">';
+  h += '<div style="font-size:14px;font-weight:600;color:#e0e0e0;cursor:pointer" onclick="_pdToggleSection(\'marketing\')">การตลาด ' + (expanded || isEditing ? '▾' : '▸') + '</div>';
+  if (!isEditing && expanded) {
+    h += '<button onclick="pdEditMkt()" style="background:none;border:1px solid #3a3d4a;color:#7c8aff;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px">แก้ไข</button>';
+  } else if (isEditing) {
+    h += '<span style="display:flex;gap:6px">';
+    h += '<button onclick="pdSaveMkt()" style="background:#22c55e;border:none;color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">บันทึก</button>';
+    h += '<button onclick="pdCancelEdit()" style="background:none;border:1px solid #3a3d4a;color:#888;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px">ยกเลิก</button>';
+    h += '</span>';
+  }
+  h += '</div>';
+  if (!expanded && !isEditing) {
+    const parts = [];
+    if (profile.audience?.primary?.age) parts.push('กลุ่มเป้าหมาย ' + profile.audience.primary.age);
+    if (profile.differentiators?.length) parts.push(profile.differentiators.length + ' จุดขาย');
+    if (profile.competitors?.length) parts.push(profile.competitors.length + ' คู่แข่ง');
+    h += '<div style="font-size:12px;color:#555;margin-top:4px">' + (parts.length ? parts.join(' · ') : 'ยังไม่มีข้อมูลการตลาด') + '</div>';
+  } else if (!isEditing) {
+    h += '<div style="margin-top:12px;font-size:13px;color:#aaa">';
+    const aud = profile.audience || {};
+    if (aud.primary?.age || aud.primary?.role) h += '<div style="margin-bottom:8px"><span style="color:#888">กลุ่มเป้าหมาย:</span> ' + escapeHtml(aud.primary.age || '') + ' ' + escapeHtml(aud.primary.role || '') + '</div>';
+    if (aud.end_user?.age || aud.end_user?.desc) h += '<div style="margin-bottom:8px"><span style="color:#888">ผู้ใช้ปลายทาง:</span> ' + escapeHtml(aud.end_user.age || '') + ' ' + escapeHtml(aud.end_user.desc || '') + '</div>';
+    if (profile.competitors?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">คู่แข่ง:</span> ' + escapeHtml(profile.competitors.join(', ')) + '</div>';
+    if (profile.differentiators?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">จุดขาย:</span> ' + escapeHtml(profile.differentiators.join(', ')) + '</div>';
+    if (profile.use_cases?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">Use cases:</span> ' + escapeHtml(profile.use_cases.join(', ')) + '</div>';
+    if (profile.price_tier) h += '<div style="margin-bottom:8px"><span style="color:#888">ระดับราคา:</span> ' + escapeHtml(profile.price_tier) + '</div>';
+    if (profile.tone_adjustment) h += '<div style="margin-bottom:8px"><span style="color:#888">ปรับโทน:</span> ' + escapeHtml(profile.tone_adjustment) + '</div>';
+    const vo = profile.visual_override || {};
+    if (vo.image_style?.tone) h += '<div style="margin-bottom:8px"><span style="color:#888">โทนภาพ:</span> ' + escapeHtml(vo.image_style.tone) + '</div>';
+    if (vo.keywords?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">Keywords ภาพ:</span> ' + escapeHtml(vo.keywords.join(', ')) + '</div>';
+    h += '</div>';
+  } else {
+    const aud = profile.audience || {};
+    const prim = aud.primary || {};
+    const eu = aud.end_user || {};
+    const vo = profile.visual_override || {};
+    const vis = vo.image_style || {};
+    h += '<div style="margin-top:12px">';
+    h += '<div style="font-size:13px;color:#7c8aff;margin-bottom:8px">กลุ่มเป้าหมาย</div>';
+    h += _field('ช่วงอายุผู้ซื้อ', 'pd-mkt-age', prim.age, 'เช่น 28-45 ปี', 'กำหนดช่วงอายุผู้ซื้อหลัก มีผลต่อภาษา มุมมอง และช่องทางที AI เลือกใช้');
+    h += _field('บทบาทผู้ซื้อ', 'pd-mkt-role', prim.role, 'เช่น ผู้ปกครองยุคใหม่', 'บทบาทช่วย AI รู้ว่าคุยกับใคร มีผลต่อลำดับภาษาและ pain points ทีเน้น');
+    h += _field('ช่วงอายุผู้ใช้ปลายทาง', 'pd-mkt-eu-age', eu.age, 'เช่น 5-12 ปี', 'ถ้าผู้ใช้งานจริงต่างจากผู้ซื้อ ระบุช่วงอายุช่วยให้คอนเทนต์/ภาพตรงกับคนใช้งาน');
+    h += _field('ลักษณะผู้ใช้ปลายทาง', 'pd-mkt-eu-desc', eu.desc, 'เช่น เด็กวัยประถม', 'ลักษณะของผู้ใช้ปลายทาง ช่วย AI สร้างเนื้อหาและภาพที่ตรงกับคนที่จริงใช้สินค้า');
+    h += _chipField('คู่แข่งหลัก', 'pd-mkt-competitors', profile.competitors, 'เช่น Apple Watch, Fitbit (กด Enter)', 'บอกคู่แข่งหลักเพื่อให้ AI เปรียบเทียบจุดขายและหามุมที่แตกต่างได้');
+    h += _chipField('จุดขายหลัก', 'pd-mkt-differentiators', profile.differentiators, 'เช่น กล้อง 5MP, กันน้ำ IP68 (กด Enter)', 'จุดขายที่ทำให้สินค้านี้ต่างจากคู่แข่ง AI จะหยิบจุดนี้มาเขียนข้อความโน้มน้าวใจ');
+    h += _chipField('Use cases', 'pd-mkt-use-cases', profile.use_cases, 'เช่น ติดตามลูก, ออกกำลังกาย (กด Enter)', 'สถานการณ์ใช้งานจริง ช่วย AI เลือกมุมมองที่ตรงกับชีวิตลูกค้า');
+    h += '<div style="margin-bottom:12px"><label style="font-size:12px;color:#888;display:block;margin-bottom:4px">ระดับราคา ' + _tipIcon('ระดับราคาช่วยกำหนดทิศทางโทนคอนเทนต์: entry=คุ้มค่า/เข้าถึงง่าย, mid=สมดุล, flagship=พรีเมียม/น่าเชื่อถือ') + '</label>' +
+      '<select id="pd-mkt-price-tier" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">' +
+      '<option value=""' + (profile.price_tier === '' || !profile.price_tier ? ' selected' : '') + '>— เลือก —</option>' +
+      '<option value="entry"' + (profile.price_tier === 'entry' ? ' selected' : '') + '>entry (ราคาเริ่มต้น)</option>' +
+      '<option value="mid"' + (profile.price_tier === 'mid' ? ' selected' : '') + '>mid (กลาง)</option>' +
+      '<option value="flagship"' + (profile.price_tier === 'flagship' ? ' selected' : '') + '>flagship (ระดับสูง)</option>' +
+      '</select></div>';
+    h += _textarea('ปรับโทน', 'pd-mkt-tone', profile.tone_adjustment, 'เช่น อบอุ่น วางใจได้', 'ปรับน้ำหนักโทนของเนื้อหาให้เหมาะกับสินค้าตัวนี้ โดยไม่เปลี่ยน Voice ของแบรนด์ ถ้าเว้นว่างจะใช้โทนแบรนด์');
+    h += '<div style="font-size:13px;color:#7c8aff;margin:16px 0 8px 0">ภาพ / Visual Direction ' + _tipIcon('กรอกเฉพาะตอนต้องการให้สินค้านี้มีภาพลักษณ์ต่างจากแบรนด์ ถ้าเว้นว่างจะใช้ของแบรนด์') + '</div>';
+    h += _textarea('โทนภาพ', 'pd-mkt-visual-tone', vis.tone, 'เช่น ดำ-ทอง พรีเมียม', 'อธิบายสไตล์ภาพ/วิดีโอเฉพาะสินค้านี้ ถ้าเว้นว่างจะใช้ของแบรนด์');
+    h += _chipField('Keywords ภาพ', 'pd-mkt-visual-keywords', vo.keywords, 'เช่น golden black (กด Enter)', 'คีย์เวิร์ดภาพเฉพาะสินค้านี้ ใช้ปรับ AI Image Prompt ถ้าเว้นว่างจะใช้ของแบรนด์');
+    h += '</div>';
+  }
+  h += '</div>';
+  return h;
+}
+
+// --- Sources section ---
+
+function _pdRenderSrcSection(files, sourceType, info) {
+  const expanded = _pdExpandedSections['sources'] || false;
+  const sourceUrl = (info.url_provenance && info.url_provenance.original_url) || '';
+  let h = '<div class="pd-section" style="margin-bottom:24px">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer" onclick="_pdToggleSection(\'sources\')">';
+  h += '<div style="font-size:14px;font-weight:600;color:#e0e0e0">สื่อและแหล่งข้อมูล ' + (expanded ? '▾' : '▸') + '</div>';
+  h += '</div>';
+  const media = info.extracted_media || [];
+  if (!expanded) {
+    const imgCount = files.filter(f => f.type === 'image').length;
+    const parts = [];
+    if (imgCount) parts.push(imgCount + ' รูป');
+    if (files.length - imgCount) parts.push((files.length - imgCount) + ' ไฟล์');
+    if (media.length) parts.push(media.length + ' สื่อที่สกัด');
+    if (sourceUrl) parts.push('URL');
+    h += '<div style="font-size:12px;color:#555;margin-top:4px">' + (parts.join(' · ') || 'ไม่มีไฟล์') + '</div>';
+  } else {
+    h += '<div style="margin-top:12px">';
+    if (sourceUrl) {
+      h += '<div style="font-size:12px;color:#888;margin-bottom:8px">นำเข้าจาก: <a href="' + escapeHtml(sourceUrl) + '" target="_blank" style="color:#7c8aff">' + escapeHtml(sourceUrl) + '</a></div>';
+    }
+    for (const f of files) {
+      const icon = f.type === 'image' ? '🖼' : f.type === 'text' ? '📄' : '📎';
+      const thumbUrl = f.type === 'image'
+        ? '/api/product_source_file/' + encodeURIComponent(_pdFolder) + '/' + encodeURIComponent(f.name)
+        : '';
+      const safeFp = f.path.replace(/'/g,"\\'").replace(/"/g,"&quot;");
+      const viewItem = f.type === 'text'
+        ? '<div onclick="_pdFileAction(this,\'view_source\',\'' + safeFp + '\')" style="padding:6px 12px;font-size:12px;color:#e0e0e0;cursor:pointer" onmouseover="this.style.background=\'#2a2d3a\'" onmouseout="this.style.background=\'none\'">ดูต้นฉบับ</div>'
+        : '<div onclick="_pdFileAction(this,\'view\',\'' + safeFp + '\')" style="padding:6px 12px;font-size:12px;color:#e0e0e0;cursor:pointer" onmouseover="this.style.background=\'#2a2d3a\'" onmouseout="this.style.background=\'none\'">ดู</div>';
+      h += _pdSrcRowHtml({
+        thumbUrl: thumbUrl, icon: icon, name: f.name,
+        menuItems: viewItem +
+          '<div onclick="_pdFileAction(this,\'delete\',\'' + safeFp + '\')" style="padding:6px 12px;font-size:12px;color:#f87171;cursor:pointer" onmouseover="this.style.background=\'#2a2d3a\'" onmouseout="this.style.background=\'none\'">ลบไฟล์</div>',
+      });
+    }
+    h += '<button type="button" onclick="document.getElementById(\'pd-file-input\').click()" style="background:#1a1d27;border:1px dashed #3a3d4a;color:#7c8aff;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;margin-top:8px">+ เพิ่มไฟล์</button>';
+    if (media.length) {
+      // Media extracted FROM the source files (embedded images in
+      // xlsx/docx/pdf) — same row presentation as source-file media (one
+      // renderer, one DOM contract); only the byte route and the
+      // attribution differ.  Extracted bytes are not user files, so the
+      // menu offers view only — deleting the source file covers removal.
+      h += '<div style="margin-top:14px;padding-top:10px;border-top:1px solid #1a1d27">';
+      h += '<div style="font-size:12px;color:#888;margin-bottom:8px">สื่อที่สกัดจากไฟล์ (' + media.length + ')</div>';
+      for (const m of media) {
+        const murl = '/api/product_media/' + encodeURIComponent(_pdFolder) + '/' + encodeURIComponent(m.name);
+        h += _pdSrcRowHtml({
+          thumbUrl: murl, icon: '🖼', name: m.name,
+          nameTitle: m.source ? 'จาก: ' + m.source : '',
+          menuItems: '<div onclick="window.open(\'' + murl + '\',\'_blank\');this.closest(\'.pd-file-menu\').style.display=\'none\'" style="padding:6px 12px;font-size:12px;color:#e0e0e0;cursor:pointer" onmouseover="this.style.background=\'#2a2d3a\'" onmouseout="this.style.background=\'none\'">ดู</div>',
+        });
+      }
+      h += '</div>';
+    }
+    h += '</div>';
+  }
+  h += '</div>';
+  return h;
+}
+
+// One row presentation for file-like entries in Media & Sources —
+// source files AND document-extracted media share this renderer so
+// URL-imported and file-imported products look identical: 32px thumb
+// (icon fallback via onerror), name, compact ⋯ menu.  CSS class
+// ``pd-src-row`` is the shared DOM contract.
+function _pdSrcRowHtml({thumbUrl, icon, name, menuItems, nameTitle}) {
+  let h = '<div class="pd-src-row" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #1a1d27">';
+  if (thumbUrl) {
+    // Thumbnail via the secure read-only route; a missing/broken file
+    // degrades to the icon instead of breaking the section.
+    h += '<img src="' + thumbUrl + '" onerror="this.outerHTML=\'' + (icon || '🖼') + '\'" style="width:32px;height:32px;object-fit:cover;border-radius:4px">';
+  } else {
+    h += '<span style="font-size:16px">' + (icon || '📎') + '</span>';
+  }
+  h += '<span style="font-size:13px;color:#e0e0e0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"' + (nameTitle ? ' title="' + escapeHtml(nameTitle) + '"' : '') + '>' + escapeHtml(name) + '</span>';
+  if (menuItems) {
+    h += '<div style="position:relative">';
+    h += '<button onclick="_pdToggleFileMenu(this)" style="background:none;border:none;color:#888;cursor:pointer;font-size:14px;padding:2px 4px">⋯</button>';
+    h += '<div class="pd-file-menu" style="display:none;position:absolute;right:0;top:100%;margin-top:2px;background:#1a1d27;border:1px solid #3a3d4a;border-radius:8px;z-index:50;min-width:120px;padding:4px 0;box-shadow:0 4px 12px rgba(0,0,0,0.4)">';
+    h += menuItems;
+    h += '</div></div>';
+  }
+  h += '</div>';
+  return h;
+}
+
+// --- File ⋯ menu ---
+
+function _pdToggleFileMenu(btn) {
+  document.querySelectorAll('.pd-file-menu').forEach(m => {
+    if (m !== btn.nextElementSibling) m.style.display = 'none';
+  });
+  const menu = btn.nextElementSibling;
+  if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+}
+
+function _pdFileAction(el, action, filepath) {
+  const menu = el.closest('.pd-file-menu');
+  if (menu) menu.style.display = 'none';
+  if (action === 'view_source') {
+    _viewSourceFile(_pdFolder, filepath);
+  } else if (action === 'view') {
+    window.open('/api/product_source_file/' + encodeURIComponent(_pdFolder) + '/' + encodeURIComponent(filepath), '_blank');
+  } else if (action === 'delete') {
+    _pdDeleteFile(filepath);
+  }
+}
+
+function _pdDeleteFile(filepath) {
+  if (!confirm('ลบไฟล์ ' + filepath + ' ?')) return;
+  fetch('/api/folder_file/' + encodeURIComponent(_pdFolder), {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folder: _pdFolder, filepath: filepath }),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      _pdRefresh();
+      loadFolderList();
+    }
+  });
+}
+
+function _pdFileSelected(input) {
+  if (!input.files || !input.files.length || !_pdFolder) return;
+  const formData = new FormData();
+  formData.append('product_name', _pdFolder);
+  for (const f of input.files) formData.append('files', f);
+  fetch('/api/upload', { method: 'POST', body: formData }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      _pdRefresh();
+      loadFolderList();
+    }
+  });
+  input.value = '';
+}
+
+// --- Section toggles ---
+
+function _pdExpandFacts() {
+  _pdExpandedFacts = true;
+  _pdRefresh();
+}
+
+function _pdToggleSection(key) {
+  if (_pdEditingSection === key && _pdIsAnyDirty()) {
+    if (!confirm('มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก\n\nทิ้งการเปลี่ยนแปลง?')) return;
+    _pdEditingSection = null;
+  } else if (_pdEditingSection && _pdIsAnyDirty()) {
+    if (!confirm('มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก\n\nทิ้งการเปลี่ยนแปลง?')) return;
+    _pdEditingSection = null;
+  }
+  _pdExpandedSections[key] = !_pdExpandedSections[key];
+  _pdRefresh();
+}
+
+// --- Facts edit session ---
+
+function pdEditFacts() {
+  if (_pdEditingSection === 'facts') return;
+  if (_pdEditingSection && _pdIsAnyDirty()) {
+    if (!confirm('มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก\n\nทิ้งการเปลี่ยนแปลง?')) return;
+  }
+  _pdEditingSection = 'facts';
+  _pdLoad().then(([profile, info, files, ai]) => {
+    _renderProductDetailView(profile, info, files, ai);
+    _pdFactsInitial = _pdGetFactsState();
+  });
+}
+
+function pdCancelEdit() {
+  if (_pdIsAnyDirty()) {
+    if (!confirm('มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก\n\nทิ้งการเปลี่ยนแปลง?')) return;
+  }
+  _pdEditingSection = null;
+  _pdFactsInitial = null;
+  _pdMktInitial = null;
+  _pdRefresh();
+}
+
+function pdSaveFacts() {
+  if (!_pdFolder) return;
+  const folder = _pdFolder;
+  const state = _pdGetFactsState();
+  fetch('/api/product_profile_save/' + encodeURIComponent(folder), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ facts: state.facts, deleted_facts: state.deleted_facts }),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      _pdEditingSection = null;
+      _pdFactsInitial = null;
+      _pdRefresh();
+      loadFolderList();
+    } else {
+      alert('เกิดข้อผิดพลาด: ' + (data.error || 'ไม่สามารถบันทึก'));
+    }
+  }).catch(e => alert('เกิดข้อผิดพลาด: ' + e.message));
+}
+
+// --- Marketing edit session ---
+
+function pdEditMkt() {
+  if (_pdEditingSection === 'marketing') return;
+  if (_pdEditingSection && _pdIsAnyDirty()) {
+    if (!confirm('มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก\n\nทิ้งการเปลี่ยนแปลง?')) return;
+  }
+  _pdEditingSection = 'marketing';
+  _pdExpandedSections['marketing'] = true;
+  _pdLoad().then(([profile, info, files, ai]) => {
+    _renderProductDetailView(profile, info, files, ai);
+    _pdMktInitial = _pdGetMktState();
+  });
+}
+
+function pdSaveMkt() {
+  if (!_pdFolder) return;
+  const folder = _pdFolder;
+  const state = _pdGetMktState();
+  const payload = {
+    competitors: state.competitors,
+    differentiators: state.differentiators,
+    use_cases: state.use_cases,
+    price_tier: state.price_tier,
+    tone_adjustment: state.tone_adjustment,
+  };
+  const aud = state.audience || {};
+  const prim = aud.primary || {};
+  const eu = aud.end_user || {};
+  const audience = {};
+  if (prim.age || prim.role) audience.primary = { age: prim.age, role: prim.role };
+  if (eu.age || eu.desc) audience.end_user = { age: eu.age, desc: eu.desc };
+  // always send the keys — an empty object means "user cleared these";
+  // omitting them lets the server merge the old values back in
+  payload.audience = audience;
+  const visTone = state.visual_override?.image_style?.tone || '';
+  const visKw = state.visual_override?.keywords || [];
+  payload.visual_override = {};
+  if (visTone) payload.visual_override.image_style = { tone: visTone };
+  if (visKw.length) payload.visual_override.keywords = visKw;
+  fetch('/api/product_profile_save/' + encodeURIComponent(folder), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      _pdEditingSection = null;
+      _pdMktInitial = null;
+      _pdRefresh();
+      loadFolderList();
+    } else {
+      alert('เกิดข้อผิดพลาด: ' + (data.error || 'ไม่สามารถบันทึก'));
+    }
+  }).catch(e => alert('เกิดข้อผิดพลาด: ' + e.message));
+}
+
+// --- Fact row helpers ---
+
+function _pdAddFact(label) {
+  // Chip-style add — the inline input supplies the field name; the new
+  // row appears prefilled with its value box focused.  An empty name is
+  // not a chip and creates no row.
+  if (!label) return;
+  const container = document.getElementById('pd-facts-container');
+  if (!container) return;
+  const div = document.createElement('div');
+  div.className = 'pd-fact-row';
+  div.setAttribute('data-key', '');
+  div.setAttribute('data-derived-value', '');
+  div.style.marginBottom = '12px';
+  div.innerHTML = '<div style="font-size:12px;color:#888;margin-bottom:4px"><input class="pd-fact-label" placeholder="ชื่อฟิลด์" value="' + _pdAiAttr(label) + '" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:4px 8px;color:#e0e0e0;font-size:12px"></div>' +
+    '<div style="display:flex;align-items:center;gap:8px">' +
+    '<input class="pd-fact-val" placeholder="ค่า" style="flex:1;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px">' +
+    '<button type="button" onclick="_pdRemoveFact(this)" title="ลบข้อมูล" style="background:none;border:none;color:#f87171;cursor:pointer;font-size:14px;padding:2px 4px">×</button>' +
+    '</div>';
+  container.appendChild(div);
+  const val = div.querySelector('.pd-fact-val');
+  if (val) val.focus();
+}
+
+function _pdRemoveFact(btn) {
+  const row = btn.closest('.pd-fact-row');
+  if (row) row.remove();
+}
+
+function _pdResetFact(btn) {
+  const row = btn.closest('.pd-fact-row');
+  if (!row) return;
+  const derivedVal = row.getAttribute('data-derived-value') || '';
+  const valInput = row.querySelector('.pd-fact-val');
+  if (valInput) valInput.value = derivedVal;
+}
+
+// --- Product delete ---
+
+function deleteProductInDetail() {
+  const name = _pdFolder;
+  if (!name) return;
+  if (!confirm('ลบสินค้า ' + name + ' และไฟล์ทั้งหมดข้างใน ?')) return;
+  fetch('/api/folder', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folder: name }),
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      closeProductDetail();
+      loadFolderList();
+    }
   });
 }
 
@@ -11772,19 +12962,23 @@ function loadCredits() {
 <div class="settings-modal-overlay" id="upload-overlay">
   <div class="settings-modal" style="width:720px;max-width:92vw">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <h3 id="upload-modal-title" style="margin:0">เพิ่มสินค้าใหม่</h3>
+      <h3 id="upload-modal-title" style="margin:0">เพิ่มสินค้า</h3>
       <button onclick="closeUploadModal()" title="ปิด" style="background:none;border:none;color:#888;font-size:24px;cursor:pointer;line-height:1;padding:0 4px">&times;</button>
     </div>
     <label id="upload-name-label">ชื่อสินค้า</label>
     <input type="text" id="upload-product-name-modal" placeholder="เช่น Lagenio K2">
-    <label>เลือกไฟล์ <span id="upload-formats-tooltip" style="cursor:help;color:#7c8aff;font-size:12px" title="กำลังโหลด...">ⓘ</span></label>
-    <input type="file" id="upload-files-modal" multiple onchange="addFilesToQueueModal()">
-    <div id="upload-queue-modal" class="upload-queue"></div>
-    <div id="url-import-block">
-      <div style="display:flex;align-items:center;gap:10px;margin:14px 0 8px 0;color:#666;font-size:12px">
-        <div style="flex:1;height:1px;background:#2a2d3a"></div>หรือ<div style="flex:1;height:1px;background:#2a2d3a"></div>
-      </div>
-      <label>วางลิงก์สินค้า (หน้าเว็บสาธารณะ)</label>
+    <div id="upload-mode-toggle" style="display:none;margin:14px 0;border:1px solid #3a3d4a;border-radius:8px;overflow:hidden">
+      <button type="button" id="upload-mode-file" onclick="setUploadMode('file')" style="flex:1;padding:9px;background:#7c8aff;color:#fff;border:none;cursor:pointer;font-size:13px">อัปโหลดไฟล์</button>
+      <button type="button" id="upload-mode-url" onclick="setUploadMode('url')" style="flex:1;padding:9px;background:#0f1117;color:#aaa;border:none;cursor:pointer;font-size:13px">วางลิงก์สินค้า</button>
+    </div>
+    <div id="upload-file-mode">
+      <label>เลือกไฟล์ <span id="upload-formats-tooltip" style="cursor:help;color:#7c8aff;font-size:12px" title="กำลังโหลด...">ⓘ</span></label>
+      <input type="file" id="upload-files-modal" multiple onchange="addFilesToQueueModal()">
+      <div id="upload-queue-modal" class="upload-queue"></div>
+      <button type="button" id="add-upload-btn" class="settings-save" onclick="uploadFiles()" style="display:none;width:100%;margin-top:10px">อัปโหลด</button>
+    </div>
+    <div id="url-import-block" style="display:none">
+      <label>วางลิงก์สินค้า (หน้าเว็บสาธารณะ · 1 สินค้าต่อหน้า)</label>
       <div style="display:flex;gap:8px">
         <input type="url" id="import-url-input" placeholder="https://..." style="flex:1">
         <button id="import-url-btn" class="settings-save" onclick="importProductFromUrl()" style="white-space:nowrap">นำเข้าจากลิงก์</button>
@@ -11794,16 +12988,25 @@ function loadCredits() {
     <div id="supported-formats-info" style="display:none"></div>
     <div id="existing-files-modal"></div>
     <div id="pp-section" style="display:none;margin-top:16px;padding:12px;background:#0f1117;border:1px solid #2a2d3a;border-radius:8px">
-      <div style="font-size:13px;color:#7c8aff;margin-bottom:8px">🎯 ตำแหน่งสินค้า + ข้อมูลที่แก้ไข</div>
-      <p style="font-size:12px;color:#888;margin:0 0 12px 0">ตำแหน่งสินค้าเฉพาะรุ่น + ข้อมูลสินค้าที่แก้ไขแล้ว — ค่าเริ่มต้นจะมาจากการคาดเดาของ AI</p>
       <div id="pp-modal-body"></div>
       <div class="upload-status" id="pp-status"></div>
     </div>
     <div class="upload-status" id="upload-modal-status"></div>
-    <div class="settings-actions">
+    <div class="settings-actions" id="upload-modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
       <button id="upload-delete-product-btn" class="settings-cancel" style="display:none;border-color:#f87171;color:#f87171" onclick="deleteProductInModal()">ลบสินค้า</button>
+      <button class="settings-cancel" onclick="closeUploadModal()">ยกเลิก</button>
       <button id="upload-submit-btn" class="settings-save" onclick="uploadFiles()">อัปโหลด</button>
     </div>
+  </div>
+</div>
+<div class="settings-modal-overlay" id="pd-ai-overlay">
+  <div class="settings-modal" style="width:640px;max-width:92vw;max-height:85vh;overflow-y:auto;overflow-x:hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h3 style="margin:0">✨ เติมข้อมูลด้วย AI</h3>
+      <button onclick="pdAiClose()" title="ปิด" style="background:none;border:none;color:#888;font-size:24px;cursor:pointer;line-height:1;padding:0 4px">&times;</button>
+    </div>
+    <div id="pd-ai-body"></div>
+    <div class="upload-status" id="pd-ai-status"></div>
   </div>
 </div>
 <div class="settings-modal-overlay" id="settings-overlay">

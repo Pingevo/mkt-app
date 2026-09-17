@@ -75,6 +75,8 @@ def _run_llm_json(
     schema_name: str,
     schema: dict[str, Any],
     source: str,
+    *,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """ส่ง prompt ให้ LLM พร้อม Structured Outputs → คืน parsed JSON dict.
 
@@ -113,9 +115,13 @@ def _run_llm_json(
             last_error = e
             # retry ครั้งต่อไป (LLM flaky — ลองใหม่อาจสำเร็จ)
             continue
-    # ทุก attempt ล้มเหลว — log แล้วคืน {}
+    # ทุก attempt ล้มเหลว — log แล้วคืน {} (strict=True → raise แทน เพื่อให้
+    # caller ที่ต้องการความจริงของ enrichment เห็นว่าล้มเหลวจริง)
     print(f"[voice_learner] _run_llm_json failed after 3 attempts ({source}): "
           f"{type(last_error).__name__}: {last_error}", file=sys.stderr, flush=True)
+    if strict:
+        raise RuntimeError(
+            f"{source} failed after 3 attempts: {last_error}") from last_error
     return {}
 
 
@@ -499,7 +505,7 @@ _PRODUCT_PROFILE_SCHEMA = {
 }
 
 
-def analyze_product_positioning(spec_text: str, llm: Any) -> dict[str, Any]:
+def analyze_product_positioning(spec_text: str, llm: Any, *, strict: bool = False) -> dict[str, Any]:
     """อ่านสเปคสินค้า → สรุปตำแหน่งสินค้า (product profile) สำหรับเซฟเป็น product_profile.json.
 
     ใช้ pattern เดียวกับ analyze_brand แต่รับสเปคสินค้าแทนตัวอย่างโพสต์
@@ -535,4 +541,5 @@ def analyze_product_positioning(spec_text: str, llm: Any) -> dict[str, Any]:
     return _run_llm_json(
         llm, system_prompt, user_prompt,
         "product_profile", _PRODUCT_PROFILE_SCHEMA, "voice_learner.analyze_product_positioning",
+        strict=strict,
     )

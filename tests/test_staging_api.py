@@ -12,53 +12,22 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def _client(monkeypatch, tmp_path):
-    """Setup tmp project root + reload staging/product_db + TestClient."""
-    import src.product_db as product_db
-    import src.staging as staging
+    """Authed client + selected brand — staging APIs require brand context.
 
-    monkeypatch.setattr(product_db, "_project_root", lambda: tmp_path)
-    monkeypatch.setattr(staging, "_project_root", lambda: tmp_path)
-    monkeypatch.setattr(staging, "product_db", product_db)
-
-    # monkeypatch ingestion._project_root ด้วย (staging.commit_batch เรียก ingestion)
-    import src.ingestion as ingestion
-    monkeypatch.setattr(ingestion, "_project_root", lambda: tmp_path)
-
-    # สร้าง config/ingestion.yaml ใน tmp_path (commit_batch ใช้ _load_config)
-    cfg_dir = tmp_path / "config"
-    cfg_dir.mkdir(parents=True)
-    real_cfg = Path(__file__).resolve().parent.parent / "config" / "ingestion.yaml"
-    if real_cfg.exists():
-        (cfg_dir / "ingestion.yaml").write_bytes(real_cfg.read_bytes())
-    else:
-        (cfg_dir / "ingestion.yaml").write_text(
-            "supported_formats:\n  text: ['.txt', '.md', '.pdf']\n"
-            "  image: ['.jpg', '.jpeg', '.png']\n"
-            "model: test/model\ntemperature: 0.3\ntimeout_seconds: 30\n",
-            encoding="utf-8")
-
+    ``make_brand_client`` patches ``web_viewer.PROJECT_ROOT`` to tmp_path, so
+    every ``_state_root()``/``brand_state_root()`` resolution lands inside
+    the per-user brand workspace — no ``_project_root`` patching needed.
+    Returns (client, brand_root).
+    """
     import web_viewer
     # monkeypatch ingestion._make_llm ให้คืน None — ไม่เรียก LLM จริงใน test
     import src.ingestion as ing
     monkeypatch.setattr(ing, "_make_llm", lambda: None)
 
-    # Authenticate the client
-    from tests.conftest import make_authed_client
-    client, user_id, ws_root = make_authed_client(web_viewer.app, tmp_path, monkeypatch)
-    # Patch path functions to per-user workspace
-    monkeypatch.setattr(web_viewer, "OUTPUT_DIR", lambda: ws_root / "output")
-    monkeypatch.setattr(web_viewer, "DATA_DIR", lambda: ws_root / "data")
-    monkeypatch.setattr(web_viewer, "CACHE_DIR", lambda: ws_root / "cache")
-    monkeypatch.setattr(web_viewer, "BRAND_DIR", lambda: ws_root / "brand")
-    # Patch state modules to per-user workspace
-    monkeypatch.setattr(product_db, "_project_root", lambda: ws_root)
-    monkeypatch.setattr(staging, "_project_root", lambda: ws_root)
-    monkeypatch.setattr(ing, "_project_root", lambda: ws_root)
-    # Create per-user dirs
-    (ws_root / "data").mkdir(parents=True, exist_ok=True)
-    (ws_root / "cache").mkdir(parents=True, exist_ok=True)
-    (ws_root / "output").mkdir(parents=True, exist_ok=True)
-    return client, ws_root
+    from tests.conftest import make_brand_client
+    client, user_id, brand_id, brand_root = make_brand_client(
+        web_viewer.app, tmp_path, monkeypatch)
+    return client, brand_root, user_id, brand_id
 
 
 # ------------------------------------------------------------------
@@ -67,7 +36,7 @@ def _client(monkeypatch, tmp_path):
 
 def test_upload_stage_creates_batch_and_returns_segments(_client):
     """POST /api/upload_stage → สร้าง batch + รัน segmentation + คืน segments/matches."""
-    client, tmp_path = _client
+    client, tmp_path, uid, bid = _client
 
     files = [("files", ("k2.txt", b"Lagenio K2 smartwatch", "text/plain"))]
     r = client.post("/api/upload_stage", files=files)
@@ -83,7 +52,7 @@ def test_upload_stage_creates_batch_and_returns_segments(_client):
 
 def test_upload_stage_skips_dotfiles(_client):
     """upload_stage ข้าม dotfile."""
-    client, tmp_path = _client
+    client, tmp_path, uid, bid = _client
 
     files = [
         ("files", (".DS_Store", b"junk", "application/octet-stream")),
@@ -101,7 +70,7 @@ def test_upload_stage_skips_dotfiles(_client):
 
 def test_get_stage_returns_batch_info(_client):
     """GET /api/stage/{batch_id} → คืน batch info ที่เซฟไว้."""
-    client, tmp_path = _client
+    client, tmp_path, uid, bid = _client
 
     files = [("files", ("k2.txt", b"content", "text/plain"))]
     r = client.post("/api/upload_stage", files=files)
@@ -116,7 +85,7 @@ def test_get_stage_returns_batch_info(_client):
 
 def test_get_stage_nonexistent_returns_404(_client):
     """GET /api/stage/{batch_id} ที่ไม่มี → 404."""
-    client, tmp_path = _client
+    client, tmp_path, uid, bid = _client
     r = client.get("/api/stage/nonexistent-batch")
     assert r.status_code == 404
 
@@ -127,7 +96,7 @@ def test_get_stage_nonexistent_returns_404(_client):
 
 def test_commit_stage_creates_product(_client):
     """POST /api/stage/{batch_id}/commit กับ action=create → สร้างสินค้า."""
-    client, tmp_path = _client
+    client, tmp_path, uid, bid = _client
 
     files = [("files", ("k2.txt", b"Lagenio K2 smartwatch", "text/plain"))]
     batch_id = client.post("/api/upload_stage", files=files).json()["batch_id"]
@@ -144,20 +113,26 @@ def test_commit_stage_creates_product(_client):
 
 def test_commit_stage_update_existing(_client):
     """commit กับ action=update → อัปเดตสินค้าเดิม ไม่สร้างใหม่."""
-    client, tmp_path = _client
+    client, tmp_path, uid, bid = _client
     import src.product_db as product_db
 
-    # สร้างสินค้าเดิมก่อน
+    # สร้างสินค้าเดิมก่อน — direct product_db access needs brand context
     shared_text = "Lagenio K2 smartwatch"
     product_id = "Lagenio K2"
     d = tmp_path / "data" / product_id
     d.mkdir(parents=True)
     (d / "k2.txt").write_text(shared_text, encoding="utf-8")
-    rec = product_db.load(product_id)
-    rec["product_id"] = product_id
-    rec["status"] = product_db.STATUS_READY
-    rec["raw_text"] = shared_text
-    product_db.save(product_id, rec)
+    from src.workspace_context import WorkspaceContext, set_workspace, reset_workspace
+    # tmp_path here is brand_root = proj/users/<uid>/brands/<bid>
+    token = set_workspace(WorkspaceContext.for_brand(uid, bid, tmp_path.parents[3]))
+    try:
+        rec = product_db.load(product_id)
+        rec["product_id"] = product_id
+        rec["status"] = product_db.STATUS_READY
+        rec["raw_text"] = shared_text
+        product_db.save(product_id, rec)
+    finally:
+        reset_workspace(token)
 
     files = [("files", ("k2.txt", shared_text.encode("utf-8"), "text/plain"))]
     batch_id = client.post("/api/upload_stage", files=files).json()["batch_id"]
@@ -177,7 +152,7 @@ def test_commit_stage_update_existing(_client):
 
 def test_delete_stage_removes_batch(_client):
     """DELETE /api/stage/{batch_id} → ลบ staging."""
-    client, tmp_path = _client
+    client, tmp_path, uid, bid = _client
 
     files = [("files", ("k2.txt", b"content", "text/plain"))]
     batch_id = client.post("/api/upload_stage", files=files).json()["batch_id"]
@@ -189,6 +164,6 @@ def test_delete_stage_removes_batch(_client):
 
 def test_delete_stage_nonexistent_is_noop(_client):
     """DELETE /api/stage/{batch_id} ที่ไม่มี → ไม่ error."""
-    client, tmp_path = _client
+    client, tmp_path, uid, bid = _client
     r = client.delete("/api/stage/nonexistent")
     assert r.status_code == 200

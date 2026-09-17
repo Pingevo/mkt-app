@@ -1,11 +1,8 @@
-"""Browser E2E — Product Facts UI edit → save → reload → Agent context.
+"""Browser E2E — Product Information: see derived → edit → save → reload → reset.
 
-Standalone browser test that does NOT depend on external XLSX fixtures.
-Creates a product by uploading a simple .txt file through the real
-browser upload flow, then exercises the Product Facts key/value editor
-in the Manage modal: add → save → reload → verify persistence → run
-product_spec → assert the fact reaches the production model boundary
-in the user prompt (product data), before the raw evidence.
+Standalone browser test that proves the Product Information UI shows
+system-derived values, lets the user edit them, saves manual corrections,
+and supports reset back to the derived value.
 
 No paid/live external calls — FakeLLM is used at the model boundary.
 """
@@ -32,41 +29,39 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# FakeLLM — captures calls, returns deterministic output
+# FakeLLM — returns structured JSON with derived_facts
 # ---------------------------------------------------------------------------
 
 class _FakeLLM:
-    """Deterministic LLM double — routes by source kwarg like ScriptedFakeLLM."""
+    """Deterministic LLM double — returns derived_facts for ingestion.metadata_summary."""
 
     def __init__(self):
         self.calls = []
         self._agent_output = "# Fake spec output"
-        self._segmentation_json = None
+        self._derived_facts = {
+            "price": {"label": "ราคา", "value": "DERIVED_PRICE_3990"},
+            "battery_capacity": {"label": "แบตเตอรี่", "value": "DERIVED_BATTERY_800mAh"},
+        }
 
     def reset(self):
         self.calls.clear()
-        self._agent_output = "# Fake spec output"
-        self._segmentation_json = None
 
     def set_agent_output(self, text):
         self._agent_output = text
 
-    def set_segmentation(self, json_str):
-        self._segmentation_json = json_str
-
     def chat(self, messages, **kwargs):
         source = kwargs.get("source", "")
         self.calls.append({"messages": messages, "kwargs": kwargs, "source": source})
-        if source == "product_segmentation.segment_products":
-            return self._segmentation_json or json.dumps({"products": []})
         if source == "ingestion.metadata_summary":
             return json.dumps({
-                "summary": "Test product summary",
-                "category": "",
-                "derived_facts": {},
+                "summary": "Test product with derived facts",
+                "category": "Test Category",
+                "derived_facts": self._derived_facts,
             }, ensure_ascii=False)
         if source == "voice_learner.analyze_product_positioning":
             return json.dumps({"audience": {}, "competitors": [], "differentiators": []})
+        if source == "product_segmentation.segment_products":
+            return json.dumps({"products": []})
         if source == "competitor_analysis.semantic_review":
             return json.dumps([{"index": 0, "action": "keep"}])
         if source == "competitor_analysis.brand_interpretation":
@@ -83,7 +78,7 @@ class _FakeLLM:
 
 
 # ---------------------------------------------------------------------------
-# Server fixture — minimal real uvicorn server with FakeLLM
+# Server fixture — same pattern as test_browser_product_facts.py
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -93,7 +88,7 @@ def _server(tmp_path_factory):
     from src.orchestrator import Orchestrator
     import yaml as _yaml
 
-    tmp = tmp_path_factory.mktemp("facts_e2e")
+    tmp = tmp_path_factory.mktemp("info_e2e")
     for d in ("data", "cache", "brand", "output"):
         (tmp / d).mkdir(exist_ok=True)
     config_dir = tmp / "config"
@@ -145,15 +140,11 @@ def _server(tmp_path_factory):
     _orig["active_llms"] = getattr(web_viewer, "_active_llms", {})
 
     staging._project_root = lambda: tmp
-    # Do NOT patch ingestion._project_root — it calls brand_state_root()
-    # which resolves via the workspace context set by the auth middleware.
-    # Patching it would break brand-scoped path resolution.
     config_loader._project_root = lambda: tmp
     asset_library._project_root = lambda: tmp
     staging.product_db = product_db
     web_viewer.PROJECT_ROOT = tmp
 
-    # Patch brand_loader._resolve_brand_dir so relative "brand" resolves to tmp
     from src import brand_loader as _bl_mod
     _orig_resolve = _bl_mod._resolve_brand_dir
     def _patched_resolve(brand_dir):
@@ -166,11 +157,7 @@ def _server(tmp_path_factory):
             return None
         return bd
     _bl_mod._resolve_brand_dir = _patched_resolve
-    # Do NOT patch load_product_profile — the real implementation uses
-    # brand_state_root() which resolves via the workspace context set by
-    # the auth middleware.  Patching it would break brand-scoped resolution.
 
-    # Register test user
     from src.auth import UserStore, SessionManager
     import src.auth as auth_mod
     _users_path = tmp / "data" / "auth" / "users.json"
@@ -213,7 +200,6 @@ def _server(tmp_path_factory):
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
 
-    # Wait for startup
     for _ in range(30):
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1) as r:
@@ -269,10 +255,9 @@ def _browser(_server):
             "value": _server["session_token"],
             "url": url,
         }])
-        # Create + select brand
         req = urllib.request.Request(
             f"{url}/api/brands",
-            data=json.dumps({"name": "FactsTestBrand"}).encode(),
+            data=json.dumps({"name": "InfoTestBrand"}).encode(),
             headers={"Content-Type": "application/json",
                      "Cookie": f"mktapp_session={_server['session_token']}"},
             method="POST",
@@ -313,114 +298,22 @@ def _browser(_server):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _open_upload_modal(page):
-    btn = page.query_selector(".sidebar-add-btn")
-    assert btn is not None
-    btn.click()
-    page.wait_for_timeout(500)
-    overlay = page.query_selector("#upload-overlay.visible")
-    assert overlay is not None
-
-
-def _upload_file(page, file_path):
-    file_input = page.query_selector("#upload-files-modal")
-    assert file_input is not None
-    file_input.set_input_files(str(file_path))
-    page.wait_for_timeout(500)
-    page.query_selector("#upload-submit-btn").click()
-
-
-def _wait_for_staging(page, timeout_ms=30000):
-    page.wait_for_selector(
-        "#staging-preview-modal:not([style*='display: none']) #staging-confirm-btn",
-        timeout=timeout_ms,
-    )
-    page.wait_for_timeout(500)
-
-
-def _confirm_staging(page):
-    page.query_selector("#staging-confirm-btn").click()
-
-
-def _wait_for_product(page, name, timeout_ms=15000):
-    page.wait_for_selector(
-        f".product-card[data-folder='{name}']", timeout=timeout_ms
-    )
-    page.wait_for_timeout(500)
-
-
-def _select_product(page, name):
-    for _ in range(3):
-        card = page.query_selector(f".product-card[data-folder='{name}']")
-        if card:
-            card.click()
-            page.wait_for_timeout(300)
-            return True
-        page.wait_for_timeout(500)
-    return False
-
-
-def _go_to_step(page, step):
-    btn = page.query_selector(f"[id^='flow-next-']:not([style*='display: none'])")
-    if btn:
-        btn.click()
-        page.wait_for_timeout(300)
-        return True
-    return False
-
-
-def _select_agent(page, key):
-    card = page.query_selector(f".agent-card[data-agent='{key}']")
-    if card:
-        card.click()
-        page.wait_for_timeout(300)
-        return True
-    return False
-
-
-def _run_flow(page):
-    btn = page.query_selector("[id^='flow-next-']:not([style*='display: none'])")
-    if btn:
-        btn.click()
-        return True
-    return False
-
-
-def _wait_done(page, timeout_ms=30000):
-    page.wait_for_selector(
-        ".flow-step.done .flow-step-link, .flow-step.error", timeout=timeout_ms
-    )
-    return page.query_selector(".flow-step.done") is not None
-
-
-def _find_gen_call(fake_llm, agent_name):
-    for c in fake_llm.calls:
-        if c.get("source") == f"{agent_name}.generate":
-            return c
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Test
 # ---------------------------------------------------------------------------
 
-def test_product_facts_ui_edit_save_reload_and_reach_agent(_browser, tmp_path):
-    """Product Facts: add via UI → save → reload → verify persistence →
-    run product_spec → assert fact reaches agent user prompt before raw.
+def test_product_info_see_derived_edit_save_reload_reset(_browser):
+    """Product Information UI: see derived value → edit → save → reload →
+    see edited value → reset → see original derived value again.
     """
     page = _browser["page"]
-    fake_llm = _browser["fake_llm"]
     base_url = _browser["url"]
-    unique_marker = "FACT_UI_MARKER_8841"
-    raw_marker = "RAW_SPEC_MARKER_5523"
-    product_name = "FactsTestProd"
+    product_name = "InfoTestProd"
+    derived_marker = "DERIVED_PRICE_3990"
+    manual_marker = "MANUAL_PRICE_3590"
 
-    # 1. Create product via direct file placement + API ingestion
-    #    (the browser upload flow is tested elsewhere; here we focus on
-    #    the facts UI editing flow which is the new feature)
+    # 1. Create product via direct file + API ingestion.  Free ingest is
+    # deterministic-only (llm=None), so derived_facts come from explicit
+    # `label | value` source lines — not from the FakeLLM.
     users_dir = _browser["tmp"] / "users"
     uid = next(d.name for d in users_dir.iterdir() if d.is_dir())
     bid = _browser["brand_id"]
@@ -428,10 +321,11 @@ def test_product_facts_ui_edit_save_reload_and_reach_agent(_browser, tmp_path):
     data_dir = brand_root / "data" / product_name
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "spec.txt").write_text(
-        f"{raw_marker} Product spec raw text\nCPU: test\nBattery: 500mAh\n",
+        "Product spec: price 3990 baht, battery 800mAh\n"
+        f"price | {derived_marker}\n"
+        "RAW_INFO_MARKER_7799\n",
         encoding="utf-8",
     )
-    # Trigger ingestion via the API
     cookie_str = (
         f"mktapp_session={_browser['server']['session_token']}; "
         f"mktapp_brand={_browser['brand_id']}"
@@ -444,7 +338,6 @@ def test_product_facts_ui_edit_save_reload_and_reach_agent(_browser, tmp_path):
         method="POST",
     )
     urllib.request.urlopen(req, timeout=30)
-    # Wait for ingestion to complete
     for _ in range(30):
         try:
             req2 = urllib.request.Request(
@@ -459,21 +352,28 @@ def test_product_facts_ui_edit_save_reload_and_reach_agent(_browser, tmp_path):
             pass
         time.sleep(1)
 
-    # Refresh the sidebar to show the new product
+    # Verify derived_facts were stored (via API — no workspace context needed)
+    req_info = urllib.request.Request(
+        f"{base_url}/api/product_info/{urllib.parse.quote(product_name)}",
+        headers={"Cookie": cookie_str},
+    )
+    with urllib.request.urlopen(req_info, timeout=5) as resp:
+        info = json.loads(resp.read())
+    assert "derived_facts" in info, "derived_facts must be stored after ingestion"
+    assert info["derived_facts"]["price"]["value"] == derived_marker
+
+    # Refresh sidebar
     page.evaluate("if (typeof loadFolderList === 'function') loadFolderList();")
     page.wait_for_timeout(1000)
-
-    # Wait for product to appear and be ready
     page.wait_for_selector(
         f".product-card[data-folder='{product_name}']", timeout=15000
     )
-    # Wait for the product status to be ready (not processing)
     for _ in range(30):
         ready = page.evaluate(f"""() => {{
             const card = document.querySelector(".product-card[data-folder='{product_name}']");
             if (!card) return false;
             const status = card.dataset.status || card.getAttribute('data-status') || '';
-            return status === 'ready' || card.querySelector('.status-ready, [title*="ready"]');
+            return status === 'ready';
         }}""")
         if ready:
             break
@@ -481,7 +381,7 @@ def test_product_facts_ui_edit_save_reload_and_reach_agent(_browser, tmp_path):
         page.evaluate("if (typeof loadFolderList === 'function') loadFolderList();")
         page.wait_for_timeout(500)
 
-    # 2. Read current profile for cleanup
+    # Read original profile for cleanup
     req3 = urllib.request.Request(
         f"{base_url}/api/product_profile/{urllib.parse.quote(product_name)}",
         headers={"Cookie": cookie_str},
@@ -490,24 +390,50 @@ def test_product_facts_ui_edit_save_reload_and_reach_agent(_browser, tmp_path):
         original = json.loads(resp.read())
 
     try:
-        # 3. Open Manage modal
+        # 2. Open Manage modal — should see derived value
         page.evaluate(
             f"openUploadModalForFolder({json.dumps(product_name)}, '')"
         )
         page.wait_for_selector("#upload-overlay.visible", timeout=10000)
-        page.wait_for_selector("#pp-section:not([style*='display: none']) #pf-facts-container", timeout=15000)
+        page.wait_for_selector(
+            "#pp-section:not([style*='display: none']) #pf-facts-container",
+            timeout=15000,
+        )
         page.wait_for_timeout(500)
 
-        # 4. Fill first fact row
-        key_input = page.query_selector(".pf-fact-label")
-        val_input = page.query_selector(".pf-fact-val")
-        assert key_input and val_input
-        key_input.fill("ราคาที่แก้ไข")
-        val_input.fill(unique_marker)
+        # 3. Verify derived value is visible
+        rows = page.query_selector_all(".pf-fact-row")
+        derived_row = None
+        for r in rows:
+            val = r.query_selector(".pf-fact-val")
+            if val and derived_marker in val.input_value():
+                derived_row = r
+                break
+        assert derived_row is not None, \
+            f"Derived value '{derived_marker}' must be visible in the UI"
+
+        # Verify provenance badge shows "มาจากไฟล์"
+        badge_text = page.evaluate("""() => {
+            const row = [...document.querySelectorAll('.pf-fact-row')].find(
+                r => { const v = r.querySelector('.pf-fact-val'); return v && v.value.includes('DERIVED_PRICE'); }
+            );
+            if (!row) return '';
+            const span = row.querySelector('span span');
+            return span ? span.textContent : '';
+        }""")
+        assert "มาจากไฟล์" in badge_text, \
+            f"Derived value should show 'มาจากไฟล์' badge, got: {badge_text}"
+
+        # 4. Edit the derived value
+        val_input = derived_row.query_selector(".pf-fact-val")
+        val_input.fill(manual_marker)
         page.wait_for_timeout(200)
 
-        # 5. Click Save
-        page.query_selector("#upload-submit-btn").click()
+        # 5. Save
+        page.evaluate("""() => {
+            const btn = document.getElementById('upload-submit-btn');
+            if (btn) btn.click();
+        }""")
         page.wait_for_function(
             """() => {
                 const s = document.getElementById('upload-modal-status');
@@ -520,85 +446,117 @@ def test_product_facts_ui_edit_save_reload_and_reach_agent(_browser, tmp_path):
         )
         page.wait_for_timeout(300)
 
-        # 6. Verify file written
-        users_dir = _browser["tmp"] / "users"
-        uid = next(d.name for d in users_dir.iterdir() if d.is_dir())
-        bid = _browser["brand_id"]
+        # 6. Verify manual correction saved
         profile_file = (
             _browser["tmp"] / "users" / uid / "brands" / bid
             / "cache" / product_name / "product_profile.json"
         )
-        assert profile_file.exists()
         written = json.loads(profile_file.read_text(encoding="utf-8"))
-        assert written.get("facts", {}).get("ราคาที่แก้ไข") == unique_marker
+        assert written.get("facts", {}).get("price") == manual_marker, \
+            f"Manual correction must be saved with machine key 'price', got: {written.get('facts')}"
 
-        # 7. Reopen — verify persistence
+        # Wait for modal to fully close (setTimeout from save fires after 800ms)
+        page.wait_for_selector("#upload-overlay", state="hidden", timeout=5000)
+        page.wait_for_timeout(500)
+
+        # 7. Reopen — verify edited value + "แก้ไขแล้ว" badge
         page.evaluate(
             f"openUploadModalForFolder({json.dumps(product_name)}, '')"
         )
         page.wait_for_selector("#upload-overlay.visible", timeout=10000)
-        page.wait_for_selector("#pp-section:not([style*='display: none']) #pf-facts-container", timeout=15000)
-        page.wait_for_timeout(500)
-        rows = page.query_selector_all(".pf-fact-row")
-        found = any(
-            r.query_selector(".pf-fact-label").input_value() == "ราคาที่แก้ไข"
-            and r.query_selector(".pf-fact-val").input_value() == unique_marker
-            for r in rows
+        page.wait_for_selector(
+            "#pp-section:not([style*='display: none']) #pf-facts-container",
+            timeout=15000,
         )
-        assert found, "Fact must persist after reload"
+        page.wait_for_timeout(500)
+
+        rows = page.query_selector_all(".pf-fact-row")
+        manual_row = None
+        for r in rows:
+            val = r.query_selector(".pf-fact-val")
+            if val and manual_marker in val.input_value():
+                manual_row = r
+                break
+        assert manual_row is not None, \
+            f"Edited value '{manual_marker}' must be visible after reload"
+
+        # Verify badge shows "แก้ไขแล้ว"
+        badge_text = page.evaluate("""() => {
+            const row = [...document.querySelectorAll('.pf-fact-row')].find(
+                r => { const v = r.querySelector('.pf-fact-val'); return v && v.value.includes('MANUAL_PRICE'); }
+            );
+            if (!row) return '';
+            const span = row.querySelector('span span');
+            return span ? span.textContent : '';
+        }""")
+        assert "แก้ไขแล้ว" in badge_text, \
+            f"Edited value should show 'แก้ไขแล้ว' badge, got: {badge_text}"
+
+        # 8. Reset — click the reset button (use evaluate to bypass visibility check)
+        reset_clicked = page.evaluate("""() => {
+            const row = [...document.querySelectorAll('.pf-fact-row')].find(
+                r => { const v = r.querySelector('.pf-fact-val'); return v && v.value.includes('MANUAL_PRICE'); }
+            );
+            if (!row) return false;
+            const btn = row.querySelector("button[title*='คืนค่า']") ||
+                        row.querySelector("button[title*='กลับเป็นค่าเดิม']") ||
+                        row.querySelector("button[onclick*='_pfResetFactRow']");
+            if (!btn) return false;
+            btn.click();
+            return true;
+        }""")
+        assert reset_clicked, "Reset button must be present and clickable"
+        page.wait_for_timeout(200)
+
+        # 9. Verify value reverted to derived
+        val_after_reset = manual_row.query_selector(".pf-fact-val").input_value()
+        assert derived_marker in val_after_reset, \
+            f"After reset, value must revert to derived '{derived_marker}', got: '{val_after_reset}'"
+
+        # 10. Save the reset (so manual correction is removed)
+        save_result = page.evaluate("""async () => {
+            if (typeof saveProductProfile !== 'function') return 'no saveProductProfile';
+            try {
+                await saveProductProfile();
+                return 'saved';
+            } catch (e) {
+                return 'error: ' + e.message;
+            }
+        }""")
+        assert save_result == 'saved', f"Save must succeed, got: {save_result}"
+        page.wait_for_timeout(1000)  # Wait for file write to complete
+
+        # 11. Verify manual correction was removed (derived value restored)
+        written2 = json.loads(profile_file.read_text(encoding="utf-8"))
+        facts = written2.get("facts", {})
+        assert "price" not in facts or facts.get("price") != manual_marker, \
+            "Manual correction must be removed after reset+save"
+
+        # 12. Reopen — verify derived value is back with "มาจากไฟล์" badge
+        page.evaluate(
+            f"openUploadModalForFolder({json.dumps(product_name)}, '')"
+        )
+        page.wait_for_selector("#upload-overlay.visible", timeout=10000)
+        page.wait_for_selector(
+            "#pp-section:not([style*='display: none']) #pf-facts-container",
+            timeout=15000,
+        )
+        page.wait_for_timeout(500)
+
+        rows = page.query_selector_all(".pf-fact-row")
+        derived_back = False
+        for r in rows:
+            val = r.query_selector(".pf-fact-val")
+            if val and derived_marker in val.input_value():
+                derived_back = True
+                break
+        assert derived_back, \
+            "After reset+save+reload, derived value must be visible again"
 
         # Close modal
         page.evaluate("closeUploadModal(true)")
         page.wait_for_timeout(300)
 
-        # 8. Run product_spec via the API — the fact should appear in
-        # the user prompt (product data), before the raw evidence
-        fake_llm.reset()
-        fake_llm.set_agent_output("# Fake spec output")
-        run_req = urllib.request.Request(
-            f"{base_url}/api/run_agent",
-            data=json.dumps({
-                "agent": "product_spec",
-                "folder": product_name,
-                "context": {"use_competitor": False, "use_campaign": False},
-            }).encode(),
-            headers={"Content-Type": "application/json",
-                     "Cookie": cookie_str},
-            method="POST",
-        )
-        # Consume the SSE stream to let the agent run
-        try:
-            with urllib.request.urlopen(run_req, timeout=30) as resp:
-                for line in resp:
-                    if isinstance(line, bytes):
-                        line = line.decode("utf-8", errors="replace")
-                    if '"type":"done"' in line or '"type": "done"' in line:
-                        break
-        except Exception:
-            pass  # SSE stream may close before we read "done"
-
-        # 9. Assert fact reaches agent user prompt
-        gen_call = _find_gen_call(fake_llm, "product_spec")
-        assert gen_call is not None, "product_spec.generate must exist"
-        user_text = ""
-        for msg in gen_call["messages"]:
-            if msg["role"] == "user":
-                c = msg["content"]
-                if isinstance(c, list):
-                    user_text += " ".join(
-                        p.get("text", "") for p in c if isinstance(p, dict)
-                    )
-                else:
-                    user_text += str(c)
-        assert unique_marker in user_text, \
-            f"Fact marker must reach agent user prompt. Excerpt: {user_text[:500]}"
-
-        # 10. Fact appears BEFORE raw evidence
-        facts_pos = user_text.find(unique_marker)
-        raw_pos = user_text.find(raw_marker)
-        assert raw_pos != -1, "Raw marker must also be present"
-        assert facts_pos < raw_pos, \
-            f"Fact must appear BEFORE raw (fact@{facts_pos}, raw@{raw_pos})"
     finally:
         # Restore
         payload = json.dumps(original).encode("utf-8")

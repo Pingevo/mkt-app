@@ -38,6 +38,12 @@ def _generate_product_profile(product_id: str, llm=None) -> None:
     _impl(product_id, llm)
 
 
+def _generate_metadata_summary(product_id: str, llm=None) -> None:
+    """Lazy wrapper — หลีกเลี่ยง circular import กับ ingestion."""
+    from .ingestion import _generate_metadata_summary as _impl
+    _impl(product_id, llm)
+
+
 def _project_root() -> Path:
     """Resolve brand-scoped state root — requires an active brand context (MB-02).
 
@@ -130,8 +136,12 @@ def _name_from_filename(filename: str) -> str:
 
 
 def _extract_text_from_source(source_dir: Path) -> list[dict]:
-    """extract text จากไฟล์ใน source/ — คืน [{name, text}] (skip ที่ extract ไม่ได้)."""
-    from .file_loader import load_file
+    """extract text จากไฟล์ใน source/ — คืน [{name, text, tables}] (skip ที่ extract ไม่ได้).
+
+    ``tables`` keeps positioned rows (``iter_structured_tables``) so the
+    deterministic catalog detector can see identity-column structure that
+    flattened text destroys."""
+    from .file_loader import load_file, iter_structured_tables
 
     extracted: list[dict] = []
     for f in sorted(source_dir.iterdir()):
@@ -140,7 +150,11 @@ def _extract_text_from_source(source_dir: Path) -> list[dict]:
         try:
             text = load_file(f)
             if text and text.strip():
-                extracted.append({"name": f.name, "text": text})
+                extracted.append({
+                    "name": f.name,
+                    "text": text,
+                    "tables": iter_structured_tables(f),
+                })
         except Exception:
             continue  # ไฟล์ที่ extract ไม่ได้ (รูป, วิดีโอ) → ข้าม
     return extracted
@@ -166,10 +180,21 @@ def run_segmentation(batch_id: str, llm=None) -> dict:
 
     extracted = _extract_text_from_source(source_dir)
 
-    # ถ้ามี LLM → ลอง segmentation (แยกหลายสินค้าจาก catalog)
+    # Deterministic multi-product detection first — a catalog table with a
+    # stable identity column (Model/SKU/…) and ≥2 distinct values is
+    # mechanically multi-product; no model call decides file product count
+    # (FREE-IMPORT contract).  Runs on every import incl. llm=None.
     segments: list[dict] | None = None
     seg_mode: str = "single"
-    if llm is not None and extracted:
+    if extracted:
+        from .product_segmentation import segment_structured_tables
+        det = segment_structured_tables(extracted)
+        if det and det.get("products"):
+            segments = det["products"]
+            seg_mode = "multi"
+
+    # ถ้ามี LLM → ลอง segmentation (แยกหลายสินค้าจาก catalog)
+    if segments is None and llm is not None and extracted:
         from .product_segmentation import segment_products
         seg_files = [{"name": e["name"], "path": "", "text": e["text"], "type": "text"}
                      for e in extracted]
@@ -231,13 +256,17 @@ def _save_batch(batch_id: str, batch: dict) -> None:
     path.write_text(json.dumps(batch, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def commit_batch(batch_id: str, choices: list[dict]) -> dict:
+def commit_batch(batch_id: str, choices: list[dict], llm=None) -> dict:
     """materialize ตามที่ user เลือก แล้วลบ staging.
 
     Args:
         batch_id: จาก create_batch (ต้อง run_segmentation แล้ว)
         choices: list ของ {segment_index, action: "create"|"update",
                             target?: str (สำหรับ update), name?: str (สำหรับ create)}
+        llm: LLM client (optional) — shared across all selected products for
+            the post-commit enrichment seam (metadata summary + derived_facts,
+            product profile).  None → enrichment runs offline fallback only,
+            same as ingest_product without a model.
 
     คืน: {created: [names], updated: [names]}
 
@@ -261,45 +290,75 @@ def commit_batch(batch_id: str, choices: list[dict]) -> dict:
     if seg_mode not in ("single", "multi"):
         seg_mode = "multi" if len(segments) > 1 else "single"
     source_dir = _batch_dir(batch_id) / "source"
+    source_import = batch.get("source_import")
     project_root = _project_root()
-    created: list[str] = []
-    updated: list[str] = []
+    data_root = project_root / "data"
 
+    # --- Phase 1: validate EVERY choice before any side effect ----------
+    # ทุกอย่างใน request ต้อง valid ก่อน — ถ้ามีตัวไหนไม่ผ่าน ทั้ง batch
+    # ถูก reject โดยยังไม่ได้ mkdir/copy/enrich อะไรเลย (no partial commit)
+    from .workspace_context import contain_path
+
+    def _flat_product_name(value: Any, what: str) -> str:
+        """ชื่อสินค้าต้องเป็นชื่อโฟลเดอร์ชั้นเดียว — ไม่มี path separator."""
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{what} ว่างหรือไม่ถูกต้อง: {value!r}")
+        name = value.strip()
+        if name in (".", "..") or "/" in name or "\\" in name:
+            raise ValueError(f"{what} มี path component: {value!r}")
+        return name
+
+    plan: list[tuple[str, dict, str, Path]] = []  # (action, seg, name, data_dir)
+    seen_indices: set[int] = set()
+    planned_names: set[str] = set()
     for choice in choices:
-        idx = choice["segment_index"]
-        action = choice["action"]
+        idx = choice.get("segment_index")
+        if (not isinstance(idx, int) or isinstance(idx, bool)
+                or idx < 0 or idx >= len(segments)):
+            raise ValueError(f"segment_index ไม่ถูกต้อง: {idx!r}")
+        if idx in seen_indices:
+            raise ValueError(f"segment_index ซ้ำ: {idx}")
+        seen_indices.add(idx)
         seg = segments[idx]
 
+        action = choice.get("action")
+        if action == "skip":
+            continue  # เจตนาไม่เลือก — validate แล้ว แต่ไม่ materialize
         if action == "create":
-            name = choice.get("name") or seg.get("suggested_name") or f"product-{idx + 1}"
-            # dedup ชื่อที่มีอยู่แล้ว
+            name = _flat_product_name(
+                choice.get("name") or seg.get("suggested_name")
+                or f"product-{idx + 1}", "ชื่อสินค้า")
+            dest = contain_path(name, data_root)
+            # dedup ชื่อที่มีอยู่แล้ว (ทั้งบน disk และใน batch นี้)
             base_name = name
             suffix = 1
-            while (project_root / "data" / name).exists():
+            while dest.exists() or name in planned_names:
                 name = f"{base_name} ({suffix})"
                 suffix += 1
-
-            new_data_dir = project_root / "data" / name
-            new_data_dir.mkdir(parents=True, exist_ok=False)
-            # copy ไฟล์จาก staging (hard link หรือ copy — ทั้งสอง survive discard)
-            saved_files = _copy_source_files(source_dir, new_data_dir)
-
-            _write_product_record(name, seg, new_data_dir, is_create=True,
-                                  saved_files=saved_files, seg_mode=seg_mode)
-            created.append(name)
-
+                dest = contain_path(name, data_root)
+            planned_names.add(name)
+            plan.append(("create", seg, name, dest))
         elif action == "update":
-            name = choice.get("target")
-            if not name:
-                raise ValueError(f"update ต้องมี target (segment {idx})")
-            data_dir = project_root / "data" / name
-            # Copy newly uploaded batch source files into the target's
-            # data directory so media extraction sees the NEW files,
-            # not just the old ones.  Existing files are preserved.
-            saved_files = _copy_source_files(source_dir, data_dir)
-            _write_product_record(name, seg, data_dir, is_create=False,
-                                  saved_files=saved_files, seg_mode=seg_mode)
-            updated.append(name)
+            target = _flat_product_name(choice.get("target"), "update target")
+            dest = contain_path(target, data_root)
+            if not dest.is_dir():
+                raise ValueError(f"ไม่พบสินค้าเป้าหมาย: {target!r}")
+            plan.append(("update", seg, target, dest))
+        else:
+            raise ValueError(f"action ไม่รองรับ: {action!r}")
+
+    # --- Phase 2: materialize — request passed validation ทั้งหมดแล้ว ----
+    created: list[str] = []
+    updated: list[str] = []
+    for action, seg, name, data_dir in plan:
+        if action == "create":
+            data_dir.mkdir(parents=True, exist_ok=False)
+        # copy ไฟล์จาก staging (hard link หรือ copy — ทั้งสอง survive discard)
+        saved_files = _copy_source_files(source_dir, data_dir)
+        _write_product_record(name, seg, data_dir, is_create=(action == "create"),
+                              saved_files=saved_files, seg_mode=seg_mode,
+                              source_import=source_import, llm=llm)
+        (created if action == "create" else updated).append(name)
 
     # ลบ staging
     discard_batch(batch_id)
@@ -385,7 +444,9 @@ def _copy_source_files(source_dir: Path, dest_dir: Path) -> dict[str, str]:
 
 def _write_product_record(name: str, seg: dict, data_dir: Path, *, is_create: bool,
                           saved_files: dict[str, str] | None = None,
-                          seg_mode: str = "single") -> None:
+                          seg_mode: str = "single",
+                          source_import: dict | None = None,
+                          llm=None) -> None:
     """สร้าง/อัปเดต product DB record จาก segment + ไฟล์ใน data_dir.
 
     For create: fresh record, extracted media replaces image_descriptions.
@@ -487,6 +548,26 @@ def _write_product_record(name: str, seg: dict, data_dir: Path, *, is_create: bo
     new_paths = {img.get("path") for img in new_extracted_images}
     merged_images = [img for img in existing_images if img.get("path") not in new_paths and Path(img.get("path", "")).exists()]
     merged_images.extend(new_extracted_images)
+
+    # Raw image files (jpg/png/webp copied into the product dir) are
+    # first-class product media — same registration as ingest_product()
+    # appends for ftype=="image", merged by path without duplicates.
+    known_img_paths = {img.get("path") for img in merged_images}
+    for f in files_list:
+        if f.get("type") == "image" and f.get("path") not in known_img_paths:
+            entry = {
+                "file": f["name"],
+                "path": f["path"],
+                "description": "",
+            }
+            # Raw image files carry no page/position provenance — in a
+            # multi-product source they cannot be deterministically
+            # associated with this product → shared source media, not
+            # product-owned media (same contract as XLSX/DOCX above).
+            if is_multi_split:
+                entry["unassigned_source_media"] = True
+            merged_images.append(entry)
+            known_img_paths.add(f["path"])
     record["image_descriptions"] = merged_images
 
     # Preserve existing transcripts (don't overwrite with empty)
@@ -564,22 +645,66 @@ def _write_product_record(name: str, seg: dict, data_dir: Path, *, is_create: bo
     if saved_files:
         record["source_file_provenance"] = dict(saved_files)
 
-    # metadata — image_count รวม merged images + source image files
-    source_image_count = sum(1 for f in files_list if f.get("type") == "image")
+    # metadata — image_count = unique associated media (merged_images
+    # already contains every image-type source file, so adding a separate
+    # source count would double-count the same image).
     record["metadata"] = {
         "summary": seg.get("summary", ""),
         "category": seg.get("category", ""),
         "file_count": len(files_list),
-        "has_images": bool(merged_images) or source_image_count > 0,
-        "image_count": len(merged_images) + source_image_count,
+        "has_images": bool(merged_images),
+        "image_count": len(merged_images),
     }
 
+    # URL provenance — when the batch came from URL import, every product
+    # created from it carries the original source attribution.
+    if source_import:
+        record["source_import"] = source_import
+
     product_db.save(name, record)
-    product_db.set_status(name, product_db.STATUS_READY)
-    # สร้าง product profile อัตโนมัติเหมือน flow ingestion เดิม
-    # (จะสร้างเฉพาะครั้งแรก — ไม่ทับของ user ที่แก้ไว้)
+
+    # Product Information enrichment — same seam as ingest_product():
+    # metadata summary/category + derived_facts on THIS product's scoped
+    # evidence (raw_text was set to the segment's scoped text above), then
+    # product profile.  Status becomes ready only after enrichment so a
+    # committed product never looks fully processed while its Product
+    # Information is still missing.  Enrichment failure → honest failed
+    # status with ingest_error, never a silent READY.
+    #
+    # FREE-IMPORT contract: llm is None on every production commit — the
+    # metadata call below is deterministic (file counts + raw_text preview)
+    # and no model/profile enrichment runs during materialization.  AI is a
+    # separate explicit post-import action (src.ai_enrichment proposals).
+    enrich_error: Exception | None = None
     try:
-        _generate_product_profile(name)
-    except Exception:
-        # ถ้า AI สร้าง profile ไม่ได้ ไม่ขัดขวางสินค้าที่สร้างแล้ว
-        pass
+        _generate_metadata_summary(name, llm)
+    except Exception as e:
+        enrich_error = e
+    # Restore fields _generate_metadata_summary can't know about: it counts
+    # only extracted/embedded images, but a staged product may carry raw
+    # image files (e.g. URL page_img_*.jpg); and offline (no model) the
+    # segmentation-derived category is still valid information.
+    rec = product_db.load(name)
+    meta = rec.get("metadata") or {}
+    if not meta.get("category") and seg.get("category"):
+        meta["category"] = seg["category"]
+    meta["has_images"] = bool(merged_images)
+    meta["image_count"] = len(merged_images)
+    rec["metadata"] = meta
+    product_db.save(name, rec)
+
+    # สร้าง product profile — explicit-AI path only (llm is not None).  Never
+    # during free import: _generate_product_profile would construct a model
+    # client internally when passed None.
+    if llm is not None:
+        try:
+            _generate_product_profile(name, llm)
+        except Exception as e:
+            if enrich_error is None:
+                enrich_error = e
+    # ready = deterministic materialization complete.  AI enrichment failure
+    # (explicit path only) is recorded as ai_error and never demotes a
+    # usable product.
+    extra = ({"ai_error": f"enrichment failed: {enrich_error}"}
+             if enrich_error is not None else None)
+    product_db.set_status(name, product_db.STATUS_READY, extra=extra)

@@ -367,34 +367,139 @@ def get_fields_for_agent(product_id: str) -> dict[str, Any]:
     }
 
 
-def _user_facts_text(product_id: str) -> str:
-    """Read user-verified facts from product_profile.json → rendered text.
+def _normalize_label(s: str) -> str:
+    """Normalize a label/key for legacy label-match comparison.
 
-    Returns "" when the product has no profile or no non-empty ``facts`` dict.
-    The facts layer represents explicit user corrections / verified facts
-    that take precedence over AI-derived and raw-extracted information.
+    Safe normalization only: trim + collapse whitespace + lowercase.
+    No fuzzy matching, no synonym dictionaries, no transliteration.
+    """
+    return " ".join(str(s).strip().lower().split())
 
-    Category-agnostic: ``facts`` is a flat ``{key: value}`` dict — no
-    product-category-specific schema is enforced here.
+
+def get_effective_facts(product_id: str) -> dict[str, dict[str, str]]:
+    """Merge derived_facts (product.json) with manual facts (product_profile.json).
+
+    Returns ``{key: {label, value, source}}`` where:
+      - ``source`` is ``"derived"`` (system-extracted, no manual override),
+        ``"manual"`` (user correction overrides a derived value), or
+        ``"manual"`` for manual-only keys (no derived counterpart).
+      - ``label`` is the human-readable label from derived_facts, or the
+        key itself for manual-only facts.
+      - ``value`` is the effective value (manual wins over derived).
+
+    Manual corrections are stored in ``product_profile.json["facts"]`` as a
+    flat ``{machine_key: value}`` dict.  Derived facts are stored in
+    ``product.json["derived_facts"]`` as ``{machine_key: {label, value}}``.
+
+    Legacy compatibility: a manual key that does NOT match any derived
+    machine key but exactly matches (after normalization) exactly one
+    derived fact's label is treated as a correction for that derived fact.
+    Ambiguous matches (one manual key matching multiple derived labels)
+    are preserved as separate manual-only facts — no guessing.
+
+    Returns ``{}`` when the product has no derived_facts and no manual facts.
     """
     if not product_id:
-        return ""
+        return {}
+
+    # 1. Load derived_facts from product.json
+    derived: dict[str, dict[str, str]] = {}
+    try:
+        record = load(product_id)
+        df = record.get("derived_facts")
+        if isinstance(df, dict):
+            for k, v in df.items():
+                if isinstance(v, dict) and v.get("value"):
+                    derived[k] = {
+                        "label": v.get("label") or k,
+                        "value": v["value"],
+                    }
+    except Exception:
+        pass
+
+    # 2. Load manual facts + field-deletion tombstones from product_profile.json
+    manual: dict[str, str] = {}
+    deleted_facts: list = []
     try:
         from .brand_loader import load_product_profile
         profile = load_product_profile(product_id)
+        facts = profile.get("facts")
+        if isinstance(facts, dict):
+            for k, v in facts.items():
+                if v:
+                    manual[k] = str(v)
+        df = profile.get("deleted_facts")
+        if isinstance(df, list):
+            deleted_facts = df
     except Exception:
+        pass
+
+    # 3. Resolve legacy label-match: manual keys that are NOT machine keys
+    #    but exactly match one derived fact's normalized label.
+    #    Build a normalized-label → machine-key index for derived facts.
+    norm_to_machine: dict[str, list[str]] = {}
+    for mk, d in derived.items():
+        norm = _normalize_label(d["label"])
+        if norm:
+            norm_to_machine.setdefault(norm, []).append(mk)
+
+    # Map legacy manual keys to derived machine keys where unambiguous
+    legacy_to_machine: dict[str, str] = {}  # manual_key → derived machine_key
+    for mk in manual:
+        if mk in derived:
+            continue  # already a machine key, no legacy resolution needed
+        norm = _normalize_label(mk)
+        matches = norm_to_machine.get(norm, [])
+        # Only resolve if exactly one derived fact has this label
+        if len(matches) == 1:
+            legacy_to_machine[mk] = matches[0]
+
+    # 4. Merge: manual wins over derived
+    effective: dict[str, dict[str, str]] = {}
+    for k, d in derived.items():
+        if k in manual:
+            effective[k] = {"label": d["label"], "value": manual[k], "source": "manual"}
+        else:
+            effective[k] = {"label": d["label"], "value": d["value"], "source": "derived"}
+    # Manual-only keys (no derived counterpart, no legacy resolution)
+    for k, v in manual.items():
+        if k in effective:
+            continue  # already merged as machine-key match
+        if k in legacy_to_machine:
+            # Legacy label-match: treat as correction for the derived fact
+            mk = legacy_to_machine[k]
+            # The derived fact was already added in the loop above with
+            # source="derived" — override it with the manual value
+            effective[mk] = {"label": derived[mk]["label"], "value": v, "source": "manual"}
+        else:
+            # True manual-only key (no derived counterpart, no label match)
+            effective[k] = {"label": k, "value": v, "source": "manual"}
+
+    # 5. Field deletions — ``deleted_facts`` tombstones drop a field
+    #    entirely (wrong key/title, not just a wrong value).  A key the
+    #    user re-added manually is a correction, not a deletion.
+    for k in deleted_facts:
+        if k not in manual:
+            effective.pop(k, None)
+    return effective
+
+
+def _effective_facts_text(product_id: str) -> str:
+    """Render effective product facts (derived + manual merged) as context text.
+
+    Replaces the former ``_user_facts_text`` — now renders the effective
+    view (manual corrections override derived values) instead of only
+    manual facts.  Returns "" when the product has no effective facts.
+    """
+    effective = get_effective_facts(product_id)
+    if not effective:
         return ""
-    facts = profile.get("facts")
-    if not isinstance(facts, dict) or not facts:
-        return ""
-    lines = [f"  {k}: {v}" for k, v in facts.items() if v]
-    if not lines:
-        return ""
+    lines = [f"  {info['label']}: {info['value']}" for info in effective.values()]
     return (
-        "--- ข้อมูลสินค้าที่แก้ไขแล้ว (User-Verified Product Facts) ---\n"
-        "ค่าเหล่านี้ผู้ใช้ยืนยันแล้ว ให้ใช้แทนข้อมูลที่ AI หรือ extraction สร้างขึ้น\n"
+        "--- ข้อมูลสินค้า (Product Information) ---\n"
+        "ค่าเหล่านี้เป็นข้อมูลสินค้าที่ตรวจสอบแล้ว ให้ใช้แทนข้อมูลที่ AI หรือ extraction สร้างขึ้น\n"
         + "\n".join(lines)
-        + "\n--- สิ้นสุดข้อมูลสินค้าที่แก้ไขแล้ว ---\n"
+        + "\n--- สิ้นสุดข้อมูลสินค้า ---\n"
     )
 
 
@@ -419,7 +524,7 @@ def get_agent_context_text(product_id: str) -> str:
     parts = []
 
     # 1. User-verified facts — สูงสุด ปรากฏก่อน raw evidence
-    facts_text = _user_facts_text(product_id)
+    facts_text = _effective_facts_text(product_id)
     if facts_text:
         parts.append(facts_text)
 
@@ -519,7 +624,7 @@ def get_agent_context(product_id: str) -> dict[str, Any]:
     text_parts = []
 
     # 1. User-verified facts — สูงสุด ปรากฏก่อน raw evidence
-    facts_text = _user_facts_text(product_id)
+    facts_text = _effective_facts_text(product_id)
     if facts_text:
         text_parts.append(facts_text)
 

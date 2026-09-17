@@ -35,7 +35,6 @@ def _ingest(monkeypatch, tmp_path):
     import src.ingestion as ingestion
     importlib.reload(ingestion)
     monkeypatch.setattr(ingestion, "_project_root", lambda: tmp_path)
-    monkeypatch.setattr(ingestion, "_make_llm", lambda: None)
     return ingestion
 
 

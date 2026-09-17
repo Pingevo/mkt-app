@@ -353,16 +353,18 @@ def build_multi_product_profile_context(product_ids: list[str]) -> str:
     parts: list[str] = []
     for pid in product_ids:
         profile = load_product_profile(pid)
-        if not profile:
+        # Effective facts may exist in product.json even without a profile
+        from .product_db import get_effective_facts
+        effective = get_effective_facts(pid)
+        if not profile and not effective:
             continue
         sections: list[str] = []
-        # User-verified facts — สูงสุด ปรากฏก่อน interpretation/positioning
-        facts = profile.get("facts")
-        if isinstance(facts, dict) and facts:
-            fact_lines = [f"  {k}: {v}" for k, v in facts.items() if v]
+        # Effective product facts (derived + manual merged) — สูงสุด
+        if effective:
+            fact_lines = [f"  {info['label']}: {info['value']}" for info in effective.values()]
             if fact_lines:
                 sections.append(
-                    "ข้อมูลสินค้าที่แก้ไขแล้ว (User-Verified Facts):\n"
+                    "ข้อมูลสินค้า (Product Information):\n"
                     + "\n".join(fact_lines)
                 )
         audience = profile.get("audience")

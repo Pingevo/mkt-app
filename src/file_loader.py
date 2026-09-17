@@ -174,6 +174,78 @@ def _load_docx(path: Path) -> str:
     return "\n".join(parts)
 
 
+def iter_structured_tables(path: str | Path) -> list[dict]:
+    """Return positioned tables with provenance — ``[{"page": int|None,
+    "rows": [[cell,...], ...]}]``.
+
+    ``page`` is the 1-based PDF page the table was found on (``None`` for
+    formats without pages).  Flattened text loses cell positions, which
+    makes a hierarchical spec sheet (``section | feature | value`` with a
+    sparse first column) look identical to a comparison table (``spec |
+    model A | model B``) — and erases the row/identity-column structure a
+    multi-product catalog depends on.  Positioned rows keep both
+    distinctions available to deterministic extraction and segmentation.
+    Returns ``[]`` for non-tabular formats or on any parse failure —
+    tables are a best-effort bonus on top of raw text.
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    try:
+        if suffix in {".xlsx", ".xls"} and openpyxl is not None:
+            wb = openpyxl.load_workbook(path, data_only=True)
+            return [
+                {"page": None, "rows": [
+                    ["" if c is None else str(c) for c in row]
+                    for row in ws.iter_rows(values_only=True)
+                ]}
+                for ws in wb.worksheets
+            ]
+        if suffix == ".csv":
+            with open(path, "r", encoding="utf-8", newline="") as f:
+                return [{"page": None, "rows": [
+                    [str(c) for c in row] for row in _csv.reader(f)
+                ]}]
+        if suffix == ".docx" and docx is not None:
+            doc = docx.Document(str(path))
+            return [
+                {"page": None, "rows": [
+                    [cell.text.strip() for cell in row.cells]
+                    for row in t.rows
+                ]}
+                for t in doc.tables
+            ]
+        if suffix == ".pdf" and fitz is not None:
+            tables: list[dict] = []
+            with fitz.open(str(path)) as doc:
+                for page_num, page in enumerate(doc):
+                    found = page.find_tables()
+                    for t in getattr(found, "tables", []) or []:
+                        rows = [
+                            ["" if c is None else str(c) for c in row]
+                            for row in t.extract()
+                        ]
+                        if rows:
+                            tables.append({"page": page_num + 1, "rows": rows})
+            return tables
+    except Exception:
+        return []
+    return []
+
+
+def load_table_rows(path: str | Path) -> list[list[list[str]]]:
+    """Return positioned table rows for tabular formats — one list of rows
+    per table/sheet, cells as strings with ``""`` for empty cells.
+
+    Flattened text loses cell positions, which makes a hierarchical spec
+    sheet (``section | feature | value`` with a sparse first column) look
+    identical to a comparison table (``spec | model A | model B``).
+    Positioned rows keep that distinction available to deterministic fact
+    extraction.  Returns ``[]`` for non-tabular formats or on any parse
+    failure — tables are a best-effort bonus on top of raw text.
+    """
+    return [t["rows"] for t in iter_structured_tables(path)]
+
+
 def get_supported_formats() -> list[str]:
     """Return list of supported file extensions."""
     formats = [".txt", ".md", ".csv", ".pdf", ".xlsx", ".xls"]

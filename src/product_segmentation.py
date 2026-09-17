@@ -325,6 +325,20 @@ def _enrich_page_header_refs(segments: list[dict], text_by_file: dict[str, str])
             info = page_info.setdefault(key, {"page_start": page_start, "page_end": page_end, "row_starts": set()})
             info["row_starts"].add(ls)
 
+    # All line ranges already claimed as product content across segments.
+    # A page "header" must never overlap lines a segment owns — when a
+    # source_ref's line_start is misattributed to an earlier page (off-by-one
+    # across the blank-line page boundary), the computed "header" would
+    # otherwise be another product's entire block, leaking it into this
+    # segment's common_refs as cross-product evidence bleed.
+    claimed: dict[str, list[tuple[int, int]]] = {}
+    for seg in segments:
+        for ref in seg.get("source_refs", []):
+            fn = ref.get("file", "")
+            if fn:
+                claimed.setdefault(fn, []).append(
+                    (ref.get("line_start", 0), ref.get("line_end", 0)))
+
     # For each page, compute the header range and attach it to relevant segments
     for (fname, page_num), info in page_info.items():
         row_starts = sorted(info["row_starts"])
@@ -339,6 +353,11 @@ def _enrich_page_header_refs(segments: list[dict], text_by_file: dict[str, str])
             "line_start": info["page_start"],
             "line_end": header_end,
         }
+        # Skip if the "header" overlaps any segment's claimed product lines —
+        # it is product content, not a shared header.
+        if any(ls <= header_ref["line_end"] and header_ref["line_start"] <= le
+               for ls, le in claimed.get(fname, [])):
+            continue
         for seg in segments:
             # Only enrich segments that have a source_ref on this page
             on_page = False
@@ -433,6 +452,192 @@ def _call_llm(llm, files: list[dict], config: dict) -> dict:
 #  Main interface
 # ------------------------------------------------------------------
 
+# ------------------------------------------------------------------
+#  Deterministic catalog segmentation — structured tables, NO model call
+# ------------------------------------------------------------------
+
+# Header cells that name a BASE product-identity column in a catalog
+# table.  Bare "item"/"name" are deliberately excluded — spec sheets use
+# those for feature rows, which are not product identities.
+_BASE_IDENTITY_HEADERS = {
+    "model", "model no", "model name", "model code", "model/code",
+    "product", "product name", "product model", "product code",
+    "item no", "item code", "code", "id",
+    "p/n", "part no", "part number", "ref", "ref no",
+}
+# Variant-level identifiers — usable as identity ONLY when no base
+# identity column exists (a SKU-only price list still enumerates distinct
+# sellable items); they must never split rows that share a base identity.
+_WEAK_IDENTITY_HEADERS = {"sku", "variant", "variant code"}
+# Variant-attribute and generic field headers — never identity columns;
+# their presence next to an identity header is evidence the row is a real
+# column header rather than a data row that happens to contain e.g. the
+# word "Model" (``General | Model | K2`` in a spec sheet).
+_VARIANT_ATTR_HEADERS = {
+    "color", "colour", "size", "storage", "capacity", "memory",
+    "configuration", "config", "option", "ram", "rom", "spec", "specs",
+}
+_FIELD_HEADERS = {
+    "price", "unit price", "exw price", "description",
+    "function", "function description", "picture", "product picture",
+    "image", "photo", "accessory", "accessories", "qty", "quantity",
+    "moq", "feature", "features", "value", "name", "type", "remark",
+    "remarks", "note", "notes", "warranty", "weight", "dimension",
+    "dimensions", "package", "packing",
+}
+_SEQUENCE_HEADERS = {"no", "#", "seq", "ลำดับ"}
+_OTHER_HEADERS = _VARIANT_ATTR_HEADERS | _FIELD_HEADERS | _SEQUENCE_HEADERS
+
+
+def _norm_header(cell) -> str:
+    return " ".join(str(cell or "").strip().lower().rstrip(".").split())
+
+
+def _page_line_bounds(text: str) -> list[tuple[int, int]]:
+    """1-based global line ranges per ``\\n\\n`` page (mirrors the page
+    inference in ``product_db.get_product_image_paths``)."""
+    bounds: list[tuple[int, int]] = []
+    cur = 1
+    for page_text in (text or "").split("\n\n"):
+        n = len(page_text.split("\n"))
+        bounds.append((cur, cur + n - 1))
+        cur += n + 1
+    return bounds
+
+
+def _locate_line(lines: list[str], lo: int, hi: int, needle: str) -> int | None:
+    """Find the flat-text line holding a row's identity — exact line match
+    (PDF cell-per-line) or a cell in a `` | ``-joined row (xlsx/csv)."""
+    for i in range(lo - 1, hi):
+        line = lines[i].strip()
+        if line == needle or needle in [c.strip() for c in line.split("|")]:
+            return i + 1
+    return None
+
+
+def _table_to_segments(fname: str, text: str, table: dict) -> list[dict]:
+    """One segment per distinct BASE-identity value in a catalog table.
+
+    A row is a catalog header only when it contains an identity column —
+    base identity (Model/Product/…) preferred, variant-level (SKU/…)
+    only when no base column exists — AND at least one sibling cell is a
+    recognised field/variant/sequence header (a spec row like
+    ``General | Model | K2`` fails that check and can't pose as a header).
+    Rows sharing one base identity — different SKU/color/size/storage —
+    merge into a single segment keeping every row's evidence; ≥2 distinct
+    base identities make the table multi-product.
+    """
+    rows = table.get("rows") or []
+    page = table.get("page")
+
+    header_idx = idcol = None
+    for i, row in enumerate(rows):
+        normed = [_norm_header(c) for c in row]
+        base_cols = [j for j, c in enumerate(normed)
+                     if c in _BASE_IDENTITY_HEADERS]
+        weak_cols = [j for j, c in enumerate(normed)
+                     if c in _WEAK_IDENTITY_HEADERS]
+        id_cols = set(base_cols) | set(weak_cols)
+        if not id_cols:
+            continue
+        # Support evidence: ≥1 sibling cell that is a recognised column
+        # header — field/variant-attribute/sequence — or a weak identity
+        # column alongside a stronger base column (``Model | SKU``).
+        support = sum(
+            1 for j, c in enumerate(normed)
+            if c and j not in id_cols and c in _OTHER_HEADERS
+        ) + (len(weak_cols) if base_cols else 0)
+        if support == 0:
+            continue
+        header_idx = i
+        idcol = base_cols[0] if base_cols else weak_cols[0]
+        break
+    if idcol is None:
+        return []
+
+    lines = (text or "").split("\n")
+    bounds = _page_line_bounds(text)
+    if page is not None and 1 <= page <= len(bounds):
+        lo, hi = bounds[page - 1]
+    else:
+        lo, hi = 1, len(lines)
+
+    labels = rows[header_idx]
+    header_line = _locate_line(
+        lines, lo, hi, str(labels[idcol]).strip()) or lo
+    common_ref = {"file": fname, "line_start": header_line, "line_end": header_line}
+    if page is not None:
+        common_ref["page"] = page
+
+    segments: list[dict] = []
+    by_key: dict[str, dict] = {}
+    cursor = header_line
+    for row in rows[header_idx + 1:]:
+        identity = str(row[idcol]).strip() if idcol < len(row) else ""
+        if not identity:
+            continue
+        start = _locate_line(lines, cursor, hi, identity) or cursor
+        ref = {"file": fname, "line_start": start}
+        if page is not None:
+            ref["page"] = page
+        parts = [
+            (f"{str(labels[j]).strip()}: {str(cell).strip()}"
+             if j < len(labels) and str(labels[j]).strip()
+             else str(cell).strip())
+            for j, cell in enumerate(row) if str(cell).strip()
+        ]
+        # Case/whitespace-insensitive merge — one base identity stays one
+        # product regardless of SKU/color/size/storage differences, and
+        # every merged row keeps its ref + labeled text as evidence.
+        seg = by_key.get(" ".join(identity.split()).casefold())
+        if seg is None:
+            seg = {
+                "product_key": identity,
+                "suggested_name": identity,
+                "category": "",
+                "summary": "",
+                "source_refs": [],
+                "common_refs": [common_ref],
+                "text": "\n".join(parts),
+            }
+            by_key[" ".join(identity.split()).casefold()] = seg
+            segments.append(seg)
+        else:
+            seg["text"] += "\n" + "\n".join(parts)
+        seg["source_refs"].append(ref)
+        cursor = start + 1  # next row's identity sits after this one
+
+    for seg in segments:
+        refs = seg["source_refs"]
+        for a, b in zip(refs, refs[1:] + [None]):
+            a["line_end"] = (b["line_start"] - 1) if b else hi
+
+    return segments if len(by_key) >= 2 else []
+
+
+def segment_structured_tables(files: list[dict]) -> dict | None:
+    """Deterministically segment catalog files by table structure — no
+    model call.
+
+    Args:
+        files: ``[{name, text, tables}]`` where ``tables`` comes from
+            ``file_loader.iter_structured_tables`` —
+            ``[{"page": int|None, "rows": [[cell,...]]}]``.
+
+    Returns ``{"mode": "multi", "products": [segments]}`` when ≥2 distinct
+    product identities are found, else ``None`` (caller falls through to
+    the single-product path).
+    """
+    segments: list[dict] = []
+    for f in files:
+        for t in f.get("tables") or []:
+            segments.extend(
+                _table_to_segments(f.get("name", ""), f.get("text", ""), t))
+    if len({s["product_key"] for s in segments}) < 2:
+        return None
+    return {"mode": "multi", "products": segments}
+
+
 def segment_products(
     files: list[dict],
     llm,
@@ -471,8 +676,14 @@ def segment_products(
 
     raw_segments = parsed.get("products", [])
 
+    # LLM ตอบ 0 สินค้า = ตีความหน้านี้ไม่ได้อย่างมั่นใจ — ไม่ใช่
+    # "ตรวจพบสินค้าเดียว" → fallback พร้อม error เพื่อให้ caller แยก
+    # non-detection ออกจาก single detection จริงได้
+    if not raw_segments:
+        return _fallback_single(files, error="LLM detected no products")
+
     # กรณี LLM บอก 1 สินค้า → single mode (ใช้ text รวมเหมือนเดิม)
-    if len(raw_segments) <= 1:
+    if len(raw_segments) == 1:
         all_text = "\n\n".join(f.get("text", "") for f in files if f.get("text"))
         seg = raw_segments[0] if raw_segments else {}
         return {

@@ -112,20 +112,18 @@ def test_production_ingest_worker_sees_authenticated_workspace(tmp_path: Path, m
     import web_viewer
     from src import product_db, staging, ingestion
     from src.workspace_context import user_state_root, get_workspace
-    from tests.conftest import make_authed_client
+    from tests.conftest import make_brand_client
 
-    # Isolate all state modules to tmp_path
-    monkeypatch.setattr(web_viewer, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(product_db, "_project_root", lambda: tmp_path)
-    monkeypatch.setattr(staging, "_project_root", lambda: tmp_path)
-    monkeypatch.setattr(ingestion, "_project_root", lambda: tmp_path)
+    # Ingestion requires an active brand context (MB-02): authenticate,
+    # create + select a brand — PROJECT_ROOT is patched to tmp_path so all
+    # state resolves inside the per-user brand workspace.
     monkeypatch.setattr(ingestion, "_make_llm", lambda: None)
+    client, user_id, brand_id, brand_root = make_brand_client(
+        web_viewer.app, tmp_path, monkeypatch)
+    ws_root = brand_root.parents[1]  # users/<user_id>
 
-    # Authenticated client — sets workspace via AuthMiddleware per request
-    client, user_id, ws_root = make_authed_client(web_viewer.app, tmp_path, monkeypatch)
-
-    # Create a product folder inside the authenticated user's workspace
-    product_dir = ws_root / "data" / "TestProduct"
+    # Create a product folder inside the authenticated brand's workspace
+    product_dir = brand_root / "data" / "TestProduct"
     product_dir.mkdir(parents=True, exist_ok=True)
     (product_dir / "sample.txt").write_text("hello", encoding="utf-8")
 
@@ -154,6 +152,8 @@ def test_production_ingest_worker_sees_authenticated_workspace(tmp_path: Path, m
     assert captured["ws"] is not None, "Worker saw no WorkspaceContext"
     assert captured["user_id"] == user_id, \
         f"Worker saw user_id={captured['user_id']!r}, expected {user_id!r}"
+    assert captured["ws"].brand_id == brand_id, \
+        "Worker lost the active brand context"
     assert captured["root"] == ws_root, \
         f"Worker resolved root={captured['root']!r}, expected {ws_root!r}"
     assert captured["root"] != captured["global_fallback"], \

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -38,7 +39,7 @@ import yaml
 from . import product_db
 from .brand_loader import load_product_profile
 from .config_loader import _project_root
-from .file_loader import load_file
+from .file_loader import load_file, load_table_rows
 from .llm_client import LLMClient
 
 
@@ -401,6 +402,134 @@ PREPROCESSORS = {
 
 
 # ------------------------------------------------------------------
+#  Deterministic source facts (FREE INGEST — no model)
+# ------------------------------------------------------------------
+# The loaders normalize table cells into `label | value` lines (xlsx/csv
+# via cell join, docx via table rows, plus literal pipe/markdown-table
+# rows in plain text).  A line with exactly two non-empty cells is an
+# explicit source fact — verbatim, deterministic, no model.  Anything
+# wider (multi-column spec/compare tables), ragged, or pipe-free stays
+# raw_text evidence: fail closed, never guess.
+_FACT_WORD = re.compile(r"\w")
+_FACT_LABEL_MAX = 80
+_FACT_VALUE_MAX = 300
+
+
+def _fact_key(label: str) -> str:
+    """Deterministic machine key for a fact label — lowercase snake_case."""
+    return re.sub(r"[^\w]+", "_", label.strip().lower()).strip("_")
+
+
+def _add_fact(
+    facts: dict[str, dict[str, str]],
+    label: str,
+    value: str,
+    source_file: str = "",
+) -> None:
+    """Validate + record one verbatim fact.  First row wins on a machine-key
+    collision — a duplicated label in one source is not evidence of two
+    different values."""
+    if not (_FACT_WORD.search(label) and _FACT_WORD.search(value)):
+        return
+    if len(label) > _FACT_LABEL_MAX or len(value) > _FACT_VALUE_MAX:
+        return
+    key = _fact_key(label)
+    if not key or key in facts:
+        return
+    fact = {"label": label, "value": value}
+    if source_file:
+        fact["source_file"] = source_file
+    facts[key] = fact
+
+
+def _facts_from_table(
+    rows: list[list[str]],
+    source_file: str,
+    facts: dict[str, dict[str, str]],
+) -> None:
+    """Extract facts from positioned table rows.
+
+    A hierarchical spec sheet puts the section in a SPARSE first column
+    (``Display | Type | AMOLED``, then `` | Size | 1.78inch``).  A
+    comparison table fills every column (``Spec | Model A | Model B``).
+    The col-0 fill rate separates them deterministically: sparse → every
+    row's last cell is the value and the preceding cells are the label
+    path; dense → only a leading two-cell pair is a fact, wider rows are
+    ambiguous and stay evidence (fail closed).
+    """
+    data: list[list[str]] = []
+    for row in rows:
+        cells = [str(c).strip() for c in row]
+        while cells and not cells[-1]:
+            cells.pop()
+        if any(cells):
+            data.append(cells)
+    if not data:
+        return
+    col0_filled = sum(1 for r in data if r[0])
+    hierarchical = len(data) >= 4 and col0_filled * 2 < len(data)
+    for cells in data:
+        nonempty = [c for c in cells if c]
+        if hierarchical:
+            ok = len(nonempty) >= 2
+        else:
+            ok = len(nonempty) == 2 and bool(cells[0]) and bool(cells[1])
+        if not ok:
+            continue
+        _add_fact(facts, " ".join(nonempty[:-1]), nonempty[-1], source_file)
+
+
+def extract_source_facts(
+    raw_text: str,
+    text_extracts: list[dict] | None = None,
+) -> dict[str, dict[str, str]]:
+    """Extract verbatim source facts → derived_facts-shaped dict.
+
+    Two deterministic passes, no model:
+      1. positioned table rows attached to a text_extract (``tables``) —
+         where cell structure still exists;
+      2. literal ``label | value`` lines in ``raw_text`` — two-cell rows
+         only, since flattened text cannot prove wider rows aren't
+         comparison tables.
+
+    Returns ``{machine_key: {label, value, source_file}}``; ``source_file``
+    links every structured fact back to its imported evidence ("" when the
+    row cannot be traced — e.g. legacy raw_text without extracts).
+
+    ponytail: a two-cell HEADER row (e.g. ``Spec | Value``) also extracts
+    verbatim — distinguishing headers from data is semantic, and a keyword
+    list is a hard-stop.  Ceiling: occasional junk fact, user-correctable,
+    traced to source; upgrade path is a per-format table model if needed.
+    """
+    facts: dict[str, dict[str, str]] = {}
+    extracts = [t for t in (text_extracts or []) if isinstance(t, dict)]
+    for t in extracts:
+        for table in (t.get("tables") or []):
+            _facts_from_table(table, t.get("file", ""), facts)
+    if not raw_text or "|" not in raw_text:
+        return facts
+    texts = [(t.get("file", ""), t.get("text", "")) for t in extracts]
+    for line in raw_text.splitlines():
+        if "|" not in line:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        cells = [c for c in cells if c]
+        if len(cells) != 2:
+            continue
+        label, value = cells
+        key = _fact_key(label)
+        if not key or key in facts:
+            continue
+        source_file = ""
+        for fname, ftext in texts:
+            if line in ftext:
+                source_file = fname
+                break
+        _add_fact(facts, label, value, source_file)
+    return facts
+
+
+# ------------------------------------------------------------------
 #  Main pipeline
 # ------------------------------------------------------------------
 
@@ -417,7 +546,7 @@ def _generate_product_profile(product_id: str, llm=None) -> None:
         return
 
     try:
-        suggested = analyze_product_positioning(spec_text, client)
+        suggested = analyze_product_positioning(spec_text, client, strict=True)
         if suggested:
             from .workspace_context import contain_path
             profile_dir = contain_path(product_id, _project_root() / "cache")
@@ -426,9 +555,6 @@ def _generate_product_profile(product_id: str, llm=None) -> None:
             # สร้างเฉพาะครั้งแรก — ไม่ทับของ user ทีแก้ไว้ใน modal
             if not profile_path.exists():
                 profile_path.write_text(json.dumps(suggested, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        # ถ้า AI สร้าง product profile ไม่ได้ ไม่ขัดขวาง status ready
-        pass
     finally:
         if client is not llm and client is not None:
             client.close()
@@ -632,6 +758,22 @@ def _materialize_split_products(
                     dest = new_img_dir / old_path.name
                     shutil.copy2(str(old_path), str(dest))
                     new_img["path"] = str(dest)
+                elif old_path.exists() and str(temp_data_dir) in str(old_path):
+                    # Raw source file — the same file was hard-linked/copied
+                    # into this product's data dir above; re-point to the
+                    # surviving location so no record keeps a path that dies
+                    # when the temp product is deleted.
+                    new_img["path"] = str(data_dir / old_path.name)
+                elif not old_path.exists():
+                    # Dead path — keep provenance (file name, source_url)
+                    # but never persist a filesystem path claiming a live file.
+                    new_img.pop("path", None)
+                # Multi-product split: an image without deterministic
+                # association metadata (page/y0 from embedded PDF extraction)
+                # cannot be claimed as this product's media — same
+                # unassigned_source_media contract as the staged path.
+                if new_img.get("page") is None:
+                    new_img["unassigned_source_media"] = True
                 copied_images.append(new_img)
 
             record["image_descriptions"] = copied_images
@@ -671,23 +813,66 @@ def _materialize_split_products(
                 "split_from": temp_product_id,
             }
 
+            # Preserve URL provenance — the temp product may carry
+            # source_import from URL import; split products inherit it.
+            if temp_record.get("source_import"):
+                record["source_import"] = temp_record["source_import"]
+
             # metadata จาก segmentation (ไม่เรียก LLM ซ้ำ — ประหยัด token)
+            # image_count = unique associated media paths — copied_images and
+            # image-type files_list entries can describe the same file, so
+            # count unique paths, never len()+len() which double-counts.
+            unique_image_paths = {
+                im["path"] for im in copied_images if im.get("path")
+            } | {
+                f["path"] for f in files_list if f.get("type") == "image"
+            }
             record["metadata"] = {
                 "summary": seg.get("summary", ""),
                 "category": seg.get("category", ""),
                 "file_count": len(files_list),
-                "has_images": len(copied_images) > 0 or any(f.get("type") == "image" for f in files_list),
-                "image_count": len(copied_images) + sum(1 for f in files_list if f.get("type") == "image"),
+                "has_images": bool(unique_image_paths),
+                "image_count": len(unique_image_paths),
             }
 
             product_db.save(name, record)
 
+            # Product Information enrichment — explicit-AI path only (this
+            # split machinery is unreachable without a caller-supplied llm).
+            # AI failure → ai_error recorded, product stays usable; it must
+            # never demote a successfully materialized product.
+            enrich_error: Exception | None = None
             if not text_unchanged:
-                # สร้าง product profile ของรุ่นนี้ (ใช้ text เฉพาะรุ่น)
-                _generate_product_profile(name, llm)
+                try:
+                    _generate_metadata_summary(name, llm)
+                except Exception as e:
+                    enrich_error = e
+                # Restore fields _generate_metadata_summary cannot know:
+                # segmentation-derived category/summary stay valid offline,
+                # and image_count must stay the unique-path count above.
+                rec = product_db.load(name)
+                meta = rec.get("metadata") or {}
+                if not meta.get("category") and seg.get("category"):
+                    meta["category"] = seg["category"]
+                if not meta.get("summary") and seg.get("summary"):
+                    meta["summary"] = seg["summary"]
+                meta["has_images"] = bool(unique_image_paths)
+                meta["image_count"] = len(unique_image_paths)
+                rec["metadata"] = meta
+                product_db.save(name, rec)
 
-            # ตั้ง status ready
-            product_db.set_status(name, product_db.STATUS_READY)
+                # สร้าง product profile ของรุ่นนี้ (ใช้ text เฉพาะรุ่น)
+                try:
+                    _generate_product_profile(name, llm)
+                except Exception as e:
+                    if enrich_error is None:
+                        enrich_error = e
+
+            # ตั้ง status ready — deterministic materialization succeeded;
+            # AI failure is recorded as ai_error, never a product failure.
+            extra = ({"ai_error": f"enrichment failed: {enrich_error}"}
+                     if enrich_error is not None else None)
+            product_db.set_status(name, product_db.STATUS_READY, extra=extra)
 
     except Exception as e:
         # rollback — ลบเฉพาะที่รอบนี้สร้างใหม่ (update ไม่ลบ เพราะมีอยู่ก่อน)
@@ -721,6 +906,7 @@ def ingest_product(
     force: bool = False,
     *,
     is_new_upload: bool = False,
+    llm=None,
 ) -> dict[str, Any]:
     """รัน ingestion pipeline สำหรับสินค้านี้.
 
@@ -730,6 +916,11 @@ def ingest_product(
         is_new_upload: True เฉพาะตอนอัปโหลดสินค้าใหม่ — เปิดใช้ catalog
             segmentation (แยกหลายสินค้าจากไฟล์เดียว). re-ingest ของสินค้า
             เดิมไม่ส่ง True เพราะจะทำให้แตกโฟลเดอร์โดยไม่คาดคิด.
+        llm: LLM client เฉพาะ explicit opt-in เท่านั้น (dormant catalog-split
+            machinery / tests).  FREE-IMPORT contract: production callers
+            never pass one — ingest never constructs a model client, so
+            import is always free and ``ready`` means "deterministic
+            parse/materialization complete", not "AI enrichment succeeded".
 
     Returns:
         dict สรุปผล: {status, files_total, files_ingested, files_unsupported, errors}
@@ -787,10 +978,10 @@ def ingest_product(
     # สถาปัตยกรรมใหม่: LLM ใช้แค่ video (vision) + metadata summary — ไม่ใช้กับ image แล้ว
     #   - image: เก็บ path จริง (lossless, ไม่เสีย token)
     #   - text: deterministic parser (ไม่เสีย token)
-    #   - video: ดึง frames → ส่ง LLM (จำเป็น ไม่มีทางอื่น)
-    #   - metadata summary: LLM สรุปสั้นๆ 1 ครั้ง (ถูกมาก — text only, 512 max tokens)
-    needs_llm = any(f["type"] == "video" for f in to_ingest) or any(f["type"] == "text" for f in to_ingest)
-    llm = _make_llm() if needs_llm else None
+    #   - video: ดึง frames → ส่ง LLM เฉพาะตอนมี client เท่านั้น — ไม่มี → placeholder
+    #   - metadata summary: deterministic preview; AI summary is an explicit
+    #     post-import action now (FREE-IMPORT contract — no model client is
+    #     ever constructed here)
     total_steps = len(to_ingest)
     current_step = 0
     start_time = time.time()
@@ -898,10 +1089,17 @@ def ingest_product(
             elif ftype == "text":
                 # text เก็บเป็นรายไฟล์ใน text_extracts (เหมือน video_transcripts)
                 # raw_text จะถูก rebuild จาก text_extracts ทั้งหมดหลังลูป
-                product_db.append_extracted(product_id, "text_extracts", {
+                # tables เก็บแถวตารางแบบมีตำแหน่งคอลัมน์ (xlsx/csv/docx) —
+                # text ที่ flatten แล้วเสีย position ทำให้ spec table กับ
+                # comparison table แยกกันไม่ได้ (ใช้โดย extract_source_facts)
+                extract_entry = {
                     "file": f["name"],
                     "text": extracted_text,
-                })
+                }
+                tables = load_table_rows(f["path"])
+                if tables:
+                    extract_entry["tables"] = tables
+                product_db.append_extracted(product_id, "text_extracts", extract_entry)
 
                 # รูปที่ดึงจาก document (xlsx/docx/pdf) → เก็บ path ใน image_descriptions
                 global _extracted_images
@@ -960,9 +1158,6 @@ def ingest_product(
                 llm.close()
             return split_result
 
-    # 4. สร้าง metadata summary (LLM สรุปสั้นๆ ครั้งเดียว — สำหรับ automate discovery)
-    _generate_metadata_summary(product_id, llm)
-
     # 4.5 Rebuild raw_text จาก text_extracts ทั้งหมด (รวมของเดิมที่ไม่ได้ re-ingest)
     # ถ้าสินค้ามี scope (เคยแยกจาก catalog) → ใช้ scope เพื่อคัดเฉพาะส่วนของรุ่นนี้
     # ไม่กลับไปรวมทั้ง catalog อีก
@@ -987,15 +1182,37 @@ def ingest_product(
         record["raw_text"] = "\n\n".join(text_parts).strip()
     product_db.save(product_id, record)
 
+    # 4.6 สร้าง metadata summary + derived_facts (explicit-AI path only —
+    # llm is None on every normal import, so this stays deterministic).
+    # ต้องเรียกหลัง rebuild raw_text เพื่อให้ LLM เห็น text จริง
+    enrich_error: Exception | None = None
+    try:
+        _generate_metadata_summary(product_id, llm)
+    except Exception as e:
+        enrich_error = e
+
     # 5. ตั้งสถานะ — ถ้าไม่มีไฟล์ ingested สักไฟล์ → no_usable_data ไม่ใช่ ready
     record = product_db.load(product_id)
     ingested_count = sum(1 for f in record.get("files", []) if f.get("status") == "ingested")
+    if ingested_count > 0 and llm is not None:
+        # Explicit-AI path only (dormant split machinery / tests).  Normal
+        # import never reaches this — AI enrichment is a separate explicit
+        # post-import action that writes proposals, not canonical data.
+        try:
+            _generate_product_profile(product_id, llm)
+        except Exception as e:
+            if enrich_error is None:
+                enrich_error = e
+
+    # ready = deterministic ingest complete.  AI enrichment failure (explicit
+    # path only) is recorded as ai_error and never demotes a usable product;
+    # real deterministic failures stay no_usable_data.
     if ingested_count == 0:
         product_db.set_status(product_id, product_db.STATUS_NO_USABLE)
     else:
-        # สร้าง product profile ก่อนเปลี่ยน status เป็น ready
-        _generate_product_profile(product_id, llm)
-        product_db.set_status(product_id, product_db.STATUS_READY)
+        extra = ({"ai_error": f"enrichment failed: {enrich_error}"}
+                 if enrich_error is not None else None)
+        product_db.set_status(product_id, product_db.STATUS_READY, extra=extra)
 
     if llm is not None:
         llm.close()
@@ -1031,49 +1248,223 @@ def _generate_metadata_summary(product_id: str, llm: LLMClient | None = None) ->
         "image_count": image_count,
     }
 
-    # category จาก product_profile.json ที่ user/config ระบุชัดเจน (ไม่ใช่การเดา)
+    # category/summary จาก product_profile.json ที่ user ระบุชัดเจน
+    # (manual save หรือ AI proposal ที่ user รับแล้ว — ไม่ใช่การเดา)
     try:
         profile = load_product_profile(product_id) or {}
         profile_category = (profile.get("category") or "").strip()
         if profile_category:
             metadata["category"] = profile_category
+        profile_summary = (profile.get("summary") or "").strip()
+        if profile_summary:
+            metadata["summary"] = profile_summary
     except Exception:
         pass
 
-    # ถ้ามี LLM และมี raw_text → สรุปสั้นๆ
+    # FREE INGEST: explicit `label | value` rows in the current source are
+    # usable product facts WITHOUT a model — deterministic, verbatim, with
+    # source-file provenance.  This base layer always reflects the current
+    # source; the explicit-AI path below may overlay richer derived values.
+    det_facts = extract_source_facts(raw_text, record.get("text_extracts"))
+
+    # ถ้ามี LLM และมี raw_text → สรุปสั้นๆ + สกัด derived_facts ในครั้งเดียวกัน
+    # (ONE model call — extends the existing metadata_summary contract to
+    #  also return generic structured factual attributes as derived_facts)
+    derived_facts: dict[str, dict[str, str]] = {}
+    extracted = False      # True only when the LLM extraction ran to completion
+    extract_error: Exception | None = None
     if llm is not None and raw_text.strip():
         try:
-            ing_cfg = _ingestion_cfg()
-            raw_len = ing_cfg.get("raw_text_length", 3000)
-            messages = [
-                {
-                    "role": "user",
-                    "content": (
-                        "สรุปสินค้านี้เป็นภาษาไทย กระชับ ไม่เกิน 100 คำ จากข้อมูลต่อไปนี้:\n"
-                        f"{raw_text[:raw_len]}\n\n"
-                        "ระบุ: ชื่อสินค้า, ประเภท, ลักษณะเด่น"
-                    ),
-                }
-            ]
-            summary = llm.chat(
-                messages,
-                model=ing_cfg.get("model", "google/gemini-3.8-flash"),
-                temperature=ing_cfg.get("temperature", 0.3),
-                max_tokens=ing_cfg.get("max_tokens_summary", 512),
-                stream=False,
-                source="ingestion.metadata_summary",
+            comp = compute_metadata_facts(
+                product_id, llm, raw_text=raw_text,
+                existing_keys=list((record.get("derived_facts") or {}).keys()),
             )
-            metadata["summary"] = summary.strip()
-        except Exception:
-            pass  # ไม่สำคัญ — metadata พื้นฐานยังเก็บได้
+            metadata["summary"] = comp["summary"]
+            if comp["category"]:
+                metadata["category"] = comp["category"]
+            derived_facts = comp["derived_facts"]
+            extracted = True
+        except Exception as e:
+            # Keep the deterministic fallback summary, but DO NOT swallow
+            # the failure — callers must surface it (a product whose
+            # enrichment failed must not end up silently READY).
+            import logging as _logging
+            _logging.getLogger("ingestion").warning(
+                "ingestion.metadata_summary: structured extraction failed for "
+                "product_id=%s — using fallback summary (raw_text preview). "
+                "derived_facts unchanged. error=%r",
+                product_id, e,
+            )
+            extract_error = e
 
-    # ถ้าไม่มี LLM → ใช้ text preview เป็น summary
+    # ถ้าไม่มี LLM หรือ LLM ล้มเหลว → ใช้ text preview เป็น summary
     if not metadata["summary"] and raw_text:
         ing_cfg = _ingestion_cfg()
         metadata["summary"] = raw_text[:ing_cfg.get("summary_length", 200)].replace("\n", " ")
 
     record["metadata"] = metadata
+    if extracted:
+        # Authority contract: explicit deterministic SOURCE facts outrank
+        # model output — the AI may FILL keys the source does not state,
+        # but must not override verbatim source truth.
+        merged = dict(derived_facts)
+        merged.update(det_facts)
+        record["derived_facts"] = merged
+    elif llm is not None:
+        # AI was attempted and failed — never erase prior facts on failure:
+        # keep them and overlay the current source's deterministic truth.
+        merged = dict(record.get("derived_facts") or {})
+        merged.update(det_facts)
+        record["derived_facts"] = merged
+    else:
+        # Free/deterministic path: derived_facts mirror what the CURRENT
+        # source explicitly states — stale rows never survive re-ingest.
+        record["derived_facts"] = det_facts
     product_db.save(product_id, record)
+    if extract_error is not None:
+        raise RuntimeError(
+            f"metadata enrichment failed for {product_id}: {extract_error}"
+        ) from extract_error
+
+
+def compute_metadata_facts(
+    product_id: str,
+    llm,
+    *,
+    raw_text: str = "",
+    existing_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    """AI compute only — ONE model call, no persistence.
+
+    Returns ``{"summary": str, "category": str, "derived_facts": {k: {label,
+    value}}}``.  The caller decides where the result lands: canonical
+    metadata (``_generate_metadata_summary``) or a pending AI proposal
+    (``src.ai_enrichment``).  Raises ValueError when the product has no
+    source text to analyze.
+
+    Uses response_format (OpenRouter Structured Outputs) to enforce JSON,
+    matching the pattern already used by product_segmentation and
+    voice_learner.  Without this, the real model (Gemini Flash) does not
+    reliably return valid JSON.
+    """
+    record = product_db.load(product_id)
+    raw_text = raw_text or (record or {}).get("raw_text", "")
+    if not raw_text.strip():
+        raise ValueError(f"ไม่มีข้อมูลต้นฉบับให้ AI วิเคราะห์ ({product_id})")
+    if existing_keys is None:
+        existing_keys = list(((record or {}).get("derived_facts") or {}).keys())
+
+    ing_cfg = _ingestion_cfg()
+    raw_len = ing_cfg.get("raw_text_length", 3000)
+    # Supply existing derived_facts keys so the model can reuse the same
+    # machine keys for unchanged attributes.
+    key_reuse_hint = ""
+    if existing_keys:
+        key_reuse_hint = (
+            f"\n\nคีย์ที่มีอยู่แล้ว (reuse คีย์เดิมสำหรับ attribute เดิม): "
+            f"{', '.join(existing_keys)}\n"
+            "ถ้า attribute ใหม่ใช้คีย์ใหม่ และถ้า attribute หายไปให้ไม่ต้องส่งคีย์นั้น"
+        )
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "วิเคราะห์สินค้านี้จากข้อมูลต่อไปนี้ แล้วคืนเป็น JSON เท่านั้น:\n"
+                f"{raw_text[:raw_len]}\n\n"
+                "JSON schema:\n"
+                '{\n'
+                '  "summary": "สรุปสินค้าเป็นภาษาไทย กระชับ ไม่เกิน 100 คำ ระบุ ชื่อสินค้า ประเภท ลักษณะเด่น",\n'
+                '  "category": "ประเภทสินค้า เช่น Kids Smartwatch หรือ empty string",\n'
+                '  "derived_facts": {\n'
+                '    "machine_key": {"label": "ชื่อฟิลด์ภาษาไทย", "value": "ค่าจริงจากข้อมูล"}\n'
+                '  }\n'
+                '}\n\n'
+                "กฎสำหรับ derived_facts:\n"
+                "- สกัดเฉพาะข้อมูลที่มีอยู่จริงในข้อมูลต้นฉบับ ห้ามเดา\n"
+                "- machine_key: lowercase snake_case ภาษาอังกฤษ เช่น price, battery_capacity, display_size\n"
+                "- label: ชื่อฟิลด์ภาษาไทยที่ผู้ใช้อ่าน เช่น ราคา, แบตเตอรี่, หน้าจอ\n"
+                "- value: ค่าจริง เช่น 3,990 บาท, 800 mAh, 1.4 inch\n"
+                "- ไม่ต้องมี field ทุกอย่าง — เฉพาะที่พบจริงในข้อมูล\n"
+                "- ไม่จำกัดหมวดหมู่สินค้า — สกัดอะไรก็ได้ที่เป็นข้อเท็จจริงของสินค้า"
+                + key_reuse_hint
+            ),
+        }
+    ]
+    # Strict structured-output schema — enforces valid JSON from the real
+    # model (Gemini Flash via OpenRouter).  Same pattern as
+    # product_segmentation._SEGMENT_SCHEMA and voice_learner._run_llm_json.
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "metadata_summary",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "สรุปสินค้าเป็นภาษาไทย กระชับ ไม่เกิน 100 คำ",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "ประเภทสินค้า หรือ empty string",
+                    },
+                    "derived_facts": {
+                        "type": "object",
+                        "description": "ข้อเท็จจริงของสินค้าที่สกัดจากข้อมูลต้นฉบับ",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                                "label": {
+                                    "type": "string",
+                                    "description": "ชื่อฟิลด์ภาษาไทยที่ผู้ใช้อ่าน",
+                                },
+                                "value": {
+                                    "type": "string",
+                                    "description": "ค่าจริงจากข้อมูลต้นฉบับ",
+                                },
+                            },
+                            "required": ["label", "value"],
+                        },
+                    },
+                },
+                "required": ["summary", "category", "derived_facts"],
+            },
+        },
+    }
+    response = llm.chat(
+        messages,
+        model=ing_cfg.get("model", "google/gemini-3.8-flash"),
+        temperature=ing_cfg.get("temperature", 0.3),
+        max_tokens=ing_cfg.get("max_tokens_summary", 512),
+        stream=False,
+        response_format=response_format,
+        source="ingestion.metadata_summary",
+    )
+    # Parse JSON response (with markdown fence stripping — some models wrap
+    # even with response_format, per product_segmentation comment)
+    import json as _json
+    import re as _re
+    clean = response.strip()
+    if clean.startswith("```"):
+        clean = _re.sub(r"^```(?:json)?\s*", "", clean)
+        clean = _re.sub(r"\s*```$", "", clean)
+    parsed = _json.loads(clean)
+
+    derived_facts: dict[str, dict[str, str]] = {}
+    df = parsed.get("derived_facts")
+    if isinstance(df, dict):
+        for k, v in df.items():
+            if isinstance(v, dict) and v.get("value"):
+                derived_facts[k] = {
+                    "label": v.get("label") or k,
+                    "value": str(v["value"]),
+                }
+    return {
+        "summary": (parsed.get("summary") or "").strip(),
+        "category": (parsed.get("category") or "").strip(),
+        "derived_facts": derived_facts,
+    }
 
 
 def check_and_mark_stale(product_id: str) -> bool:

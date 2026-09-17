@@ -89,6 +89,12 @@ PRODUCT_HTML = b"""<!DOCTYPE html>
 <meta property="og:title" content="ACME Turbo Blender 9000 Official">
 <meta property="og:image" content="https://shop.example.com/img/blender.png">
 <link rel="canonical" href="https://shop.example.com/products/acme-blender">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Product",
+ "@id":"https://shop.example.com/products/acme-blender",
+ "name":"ACME Turbo Blender 9000",
+ "image":"https://shop.example.com/img/blender.png"}
+</script>
 </head><body>
 <h1>ACME Turbo Blender</h1>
 <p>Price: 2,590 THB</p>
