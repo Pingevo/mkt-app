@@ -135,8 +135,17 @@ def _name_from_filename(filename: str) -> str:
     return clean or _DEFAULT_PRODUCT_NAME_PREFIX + datetime.now().strftime("%Y%m%d%H%M%S")
 
 
-def _extract_text_from_source(source_dir: Path) -> list[dict]:
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def _extract_text_from_source(source_dir: Path, *, include_images: bool = True) -> list[dict]:
     """extract text จากไฟล์ใน source/ — คืน [{name, text, tables}] (skip ที่ extract ไม่ได้).
+
+    Documents come first, image OCR last: the segment text (→ raw_text →
+    summary / derived_facts) must lead with the authoritative source, not
+    with whatever OCR happens to sort first alphabetically.  ``include_images``
+    False drops image OCR entirely (URL imports: gallery photos are
+    evidence for the agents' vision, not product text).
 
     ``tables`` keeps positioned rows (``iter_structured_tables``) so the
     deterministic catalog detector can see identity-column structure that
@@ -144,9 +153,11 @@ def _extract_text_from_source(source_dir: Path) -> list[dict]:
     from .file_loader import load_file, iter_structured_tables
 
     extracted: list[dict] = []
-    for f in sorted(source_dir.iterdir()):
-        if not f.is_file() or f.name.startswith(".") or f.name == ".DS_Store":
-            continue
+    files = [f for f in sorted(source_dir.iterdir())
+             if f.is_file() and not f.name.startswith(".") and f.name != ".DS_Store"]
+    docs = [f for f in files if f.suffix.lower() not in _IMAGE_SUFFIXES]
+    images = [f for f in files if f.suffix.lower() in _IMAGE_SUFFIXES] if include_images else []
+    for f in docs + images:
         try:
             text = load_file(f)
             if text and text.strip():
@@ -178,7 +189,9 @@ def run_segmentation(batch_id: str, llm=None) -> dict:
     if not source_dir.exists():
         raise FileNotFoundError(f"Batch {batch_id} ไม่มี source/")
 
-    extracted = _extract_text_from_source(source_dir)
+    # URL import: source_page.txt is the page; page_img_* are gallery photos.
+    is_url_import = bool(_load_batch(batch_id).get("source_import"))
+    extracted = _extract_text_from_source(source_dir, include_images=not is_url_import)
 
     # Deterministic multi-product detection first — a catalog table with a
     # stable identity column (Model/SKU/…) and ≥2 distinct values is

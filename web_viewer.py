@@ -1737,12 +1737,14 @@ async def api_product_from_url(request: Request) -> JSONResponse:
             }, status_code=409)
 
     # URL artifacts → ordinary uploaded-source payloads [(name, bytes)]
-    header = (
-        f"Source URL: {result['original_url']}\n"
+    # Provenance goes at the END: the deterministic summary is the head of
+    # the text, and that must be the product (Title/Description), not URLs.
+    footer = (
+        f"\n\nSource URL: {result['original_url']}\n"
         f"Final URL: {result['final_url']}\n"
-        f"Fetched: {result['fetched_at']}\n\n"
+        f"Fetched: {result['fetched_at']}\n"
     )
-    files_to_save = [("source_page.txt", (header + result["text"]).encode("utf-8"))]
+    files_to_save = [("source_page.txt", (result["text"] + footer).encode("utf-8"))]
     files_to_save += [(img["name"], img["content"]) for img in result["images"]]
 
     # Route through the same staging/review flow as file upload — the user
@@ -1788,8 +1790,12 @@ async def api_product_from_url(request: Request) -> JSONResponse:
     # A validated explicit product_name becomes the preview's proposed name
     # for the first detected product — still only a default; the human
     # reviews/edits in the staging preview before anything is committed.
-    if product_name and seg_result.get("segments"):
-        seg_result["segments"][0]["suggested_name"] = product_name
+    # Without one, the page title beats the file-derived "source_page".
+    default_name = product_name or " ".join(
+        re.sub(r"[^฀-๺\w\s.-]", " ", result.get("page_title") or "").split()
+    )[:80].strip(" .-")
+    if default_name and seg_result.get("segments"):
+        seg_result["segments"][0]["suggested_name"] = default_name
         batch = staging._load_batch(batch_id)
         batch["segments"] = seg_result["segments"]
         staging._save_batch(batch_id, batch)

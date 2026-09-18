@@ -171,21 +171,45 @@ def test_shopee_import_maps_actor_record_to_result_contract(monkeypatch, apify_e
 
     text = result["text"]
     assert text.startswith("Title: (NewArrival) BLACK SHARK RUN")
-    assert "\nDescription: " in text
+    desc_line = next(l for l in text.splitlines() if l.startswith("Description: "))
+    assert "=====" not in desc_line and "รบกวนลูกค้า" in desc_line
     assert "Source: https://shopee.co.th/product/1191420560/43332033245" in text
-    assert "Brand: Black Shark" in text
-    assert "Shop: Black Shark Thailand (rating 4.89/5, 21182 ratings, 48646 followers, official shop)" in text
-    assert "Category: มือถือและอุปกรณ์เสริม > อุปกรณ์สวมใส่ > สมาร์ทวอทช์และอุปกรณ์ฟิตเนส" in text
-    assert "Variants (9):" in text and "- ตัวเลือกสินค้า: Orange, Black, Yellow" in text
-    assert "Specifications:" in text and "- Item Type: Smartwatch" in text
+    # facts are two-cell `label | value` lines — what extract_source_facts reads
+    assert "Brand | Black Shark(แบล็ค ชาร์ค)" in text
+    assert "Shop | Black Shark Thailand (rating 4.89/5, 21182 ratings, 48646 followers, official shop)" in text
+    assert "Ships from | จังหวัดสมุทรปราการ" in text
+    assert "Category | มือถือและอุปกรณ์เสริม > อุปกรณ์สวมใส่ > สมาร์ทวอทช์และอุปกรณ์ฟิตเนส" in text
+    assert "Condition | new" in text and "Availability | in stock" in text
+    assert "Variants (9):" in text and "ตัวเลือกสินค้า | Orange, Black, Yellow" in text
+    assert "Specifications:" in text and "Item Type | Smartwatch" in text
+    # promotions expire → bullets (evidence), never pipe facts
     assert "Vouchers:" in text and "- BLAC09RUN: 400 off (min spend 2990)" in text
     assert "Product description:" in text and "[[ จุดเด่นสินค้า ]]" in text
     assert len(text) <= url_import.MAX_TEXT_CHARS
+
+    # The deterministic fact extractor turns those lines into derived_facts.
+    from src.ingestion import extract_source_facts, _fact_key
+    facts = extract_source_facts(text, [{"file": "source_page.txt", "text": text}])
+    assert facts["brand"] == {"label": "Brand", "value": "Black Shark(แบล็ค ชาร์ค)",
+                              "source_file": "source_page.txt"}
+    assert facts["item_type"]["value"] == "Smartwatch"
+    assert facts[_fact_key("ตัวเลือกสินค้า")]["value"].startswith("Orange, Black, Yellow")
+    assert not any("BLAC09RUN" in f["value"] for f in facts.values())
 
     # main image + gallery, deduped, same naming as the HTML path
     assert [i["name"] for i in result["images"]] == ["page_img_001.jpg", "page_img_002.jpg", "page_img_003.jpg"]
     assert all(i["content"] == JPEG for i in result["images"])
     assert result["images"][0]["source_url"] == _item()["mainImageUrl"]
+
+
+def test_pipe_in_actor_values_cannot_forge_extra_fact_cells():
+    item = _item()
+    item["attributes"] = [{"name": "Weight | Net", "value": "30 g | approx"}]
+    text = url_import._shopee_item_text(item, SHOPEE_URL)
+    assert "Weight / Net | 30 g / approx" in text
+    from src.ingestion import extract_source_facts
+    facts = extract_source_facts(text, [])
+    assert facts["weight_net"]["value"] == "30 g / approx"
 
 
 def test_shopee_import_records_real_apify_cost(monkeypatch, apify_env):

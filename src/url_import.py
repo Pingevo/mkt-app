@@ -787,15 +787,24 @@ def _log_apify_usage(actor: str, *, status: str, cost_usd: float, started: float
     record_ai_usage(entry)
 
 
+_DESC_DECOR = re.compile(r"[=\-_*~#]{3,}")
+
+
 def _shopee_item_text(item: dict, url: str) -> str:
     """Render one actor product record as the source_page.txt body.
 
     Same header shape as the HTML path (Title/Description/Source) so
-    downstream ingestion treats both sources identically, followed by the
-    structured facts the actor exposes (the page's own JS-rendered content).
+    downstream ingestion treats both sources identically.  Structured
+    facts are written as ``label | value`` lines — the two-cell form the
+    deterministic fact extractor (ingestion.extract_source_facts) turns
+    into derived_facts without a model.  Promotions stay plain bullets:
+    they expire, so they are evidence, not product facts.
     """
     def _s(v) -> str:
         return " ".join(str(v).split()) if v is not None else ""
+
+    def _fact(label: str, value) -> str:
+        return f"{_s(label).replace('|', '/')} | {_s(value).replace('|', '/')}"
 
     title = _s(item.get("title"))
     description = str(item.get("description") or "").strip()
@@ -810,15 +819,15 @@ def _shopee_item_text(item: dict, url: str) -> str:
     if title:
         lines.append(f"Title: {title}")
     if description:
-        lines.append(f"Description: {_s(description)[:300]}")
+        lines.append(f"Description: {_s(_DESC_DECOR.sub(' ', description))[:300]}")
     lines.append(f"Source: {item.get('url') or url}")
     lines.append("")
 
     if item.get("brand"):
-        lines.append(f"Brand: {_s(item['brand'])}")
+        lines.append(_fact("Brand", item["brand"]))
     shop = item.get("shop") if isinstance(item.get("shop"), dict) else {}
     if shop.get("name"):
-        shop_line = f"Shop: {_s(shop['name'])}"
+        shop_value = _s(shop["name"])
         extras = []
         if shop.get("ratingStar") is not None:
             extras.append(f"rating {float(shop['ratingStar']):.2f}/5")
@@ -829,33 +838,33 @@ def _shopee_item_text(item: dict, url: str) -> str:
         if shop.get("isOfficialShop"):
             extras.append("official shop")
         if extras:
-            shop_line += " (" + ", ".join(extras) + ")"
-        lines.append(shop_line)
+            shop_value += " (" + ", ".join(extras) + ")"
+        lines.append(_fact("Shop", shop_value))
     if item.get("shopLocation"):
-        lines.append(f"Ships from: {_s(item['shopLocation'])}")
+        lines.append(_fact("Ships from", item["shopLocation"]))
     cats = [_s(c.get("name")) for c in (item.get("categories") or [])
             if isinstance(c, dict) and c.get("name")]
     if cats:
-        lines.append("Category: " + " > ".join(cats))
+        lines.append(_fact("Category", " > ".join(cats)))
     if item.get("condition"):
-        lines.append(f"Condition: {_s(item['condition'])}")
+        lines.append(_fact("Condition", item["condition"]))
     if item.get("isAvailable") is not None:
-        lines.append("Availability: " + ("in stock" if item["isAvailable"] else "unavailable"))
+        lines.append(_fact("Availability", "in stock" if item["isAvailable"] else "unavailable"))
 
-    variations = item.get("variations") or []
+    variations = [v for v in (item.get("variations") or [])
+                  if isinstance(v, dict) and v.get("options")]
     if variations:
         lines.append("")
         lines.append(f"Variants ({item.get('variantCount') or len(item.get('variants') or [])}):")
         for v in variations:
-            if isinstance(v, dict) and v.get("options"):
-                lines.append(f"- {_s(v.get('name'))}: " + ", ".join(_s(o) for o in v["options"]))
+            lines.append(_fact(v.get("name") or "Variant", ", ".join(_s(o) for o in v["options"])))
 
     attrs = [(a.get("name"), a.get("value")) for a in (item.get("attributes") or [])
              if isinstance(a, dict) and a.get("name") and a.get("value")]
     if attrs:
         lines.append("")
         lines.append("Specifications:")
-        lines.extend(f"- {_s(n)}: {_s(v)}" for n, v in attrs)
+        lines.extend(_fact(n, v) for n, v in attrs)
 
     vouchers = [v for v in (item.get("vouchers") or []) if isinstance(v, dict) and v.get("code")]
     if vouchers:
