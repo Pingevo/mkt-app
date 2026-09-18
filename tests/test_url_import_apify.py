@@ -52,10 +52,13 @@ def _run(status="SUCCEEDED", *, run_id="run1", cost=0.00005, message=None) -> di
     return d
 
 
-def _apify_transport(*, start_run, poll_runs=(), items=None, calls=None):
-    """MockTransport for api.apify.com. ``poll_runs`` are consumed in order."""
+def _apify_transport(*, start_run, poll_runs=(), items=None, calls=None, final_run=None):
+    """MockTransport for api.apify.com. ``poll_runs`` are consumed in order;
+    once exhausted, GET actor-runs answers ``final_run`` (default: the last
+    known run) — that is the post-dataset cost re-read."""
     polls = list(poll_runs)
     calls = calls if calls is not None else []
+    last = {"run": start_run}
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append((request.method, str(request.url), request.headers.get("authorization")))
@@ -63,7 +66,10 @@ def _apify_transport(*, start_run, poll_runs=(), items=None, calls=None):
         if request.method == "POST" and path == f"/v2/acts/{ACTOR}/runs":
             return httpx.Response(201, json={"data": start_run})
         if request.method == "GET" and path.startswith("/v2/actor-runs/"):
-            return httpx.Response(200, json={"data": polls.pop(0)})
+            if polls:
+                last["run"] = polls.pop(0)
+                return httpx.Response(200, json={"data": last["run"]})
+            return httpx.Response(200, json={"data": final_run or last["run"]})
         if request.method == "GET" and path == "/v2/datasets/ds1/items":
             return httpx.Response(200, json=items if items is not None else [])
         return httpx.Response(404, content=b"nope")
@@ -83,6 +89,7 @@ def _image_client(calls: list[str], *, status=200, ctype="image/jpeg") -> httpx.
 def apify_env(monkeypatch):
     monkeypatch.setenv("APIFY_TOKEN", "test-token")
     monkeypatch.delenv("APIFY_SHOPEE_ACTOR", raising=False)
+    monkeypatch.delenv("APIFY_SHOPEE_PROXY_GROUP", raising=False)
     monkeypatch.setattr(url_import, "APIFY_RETRY_SLEEP_S", 0)
     monkeypatch.setattr(socket, "getaddrinfo", _dns_map({
         "shopee.co.th": PUBLIC_IP,
@@ -151,9 +158,9 @@ def test_shopee_import_maps_actor_record_to_result_contract(monkeypatch, apify_e
 
     result = url_import.fetch_product_page(SHOPEE_URL)
 
-    # Actor was called exactly as sellcenter does, with a bearer token, and the
-    # page itself was never fetched by us.
-    assert [m for m, _u, _a in api_calls] == ["POST", "GET"]
+    # Actor was called exactly as sellcenter does (+ one final cost re-read),
+    # with a bearer token, and the page itself was never fetched by us.
+    assert [m for m, _u, _a in api_calls] == ["POST", "GET", "GET"]
     assert all(a == "Bearer test-token" for _m, _u, a in api_calls)
     assert all("token=" not in u for _m, u, _a in api_calls)
     assert all(u.startswith("https://down-sg.img.susercontent.com/") for u in img_calls)
@@ -242,8 +249,13 @@ def test_actor_override_via_env(monkeypatch, apify_env):
 
     def fake_run(actor, payload, *, timeout_s):
         seen.append(actor)
-        assert payload == {"products": [SHOPEE_URL], "region": "th", "includeShop": True,
-                           "includeDescription": True, "maxItems": 1}
+        assert payload == {
+            "products": [SHOPEE_URL], "region": "th", "includeShop": True,
+            "includeDescription": True, "maxItems": 1,
+            # residential exit in the storefront's country by default
+            "proxyConfiguration": {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"],
+                                   "apifyProxyCountry": "TH"},
+        }
         return apify_client.ApifyRunResult(items=[_item()], cost_usd=0.0, run_id="r", run=_run())
 
     monkeypatch.setattr(apify_client, "run_actor_and_get_items", fake_run)
@@ -251,6 +263,26 @@ def test_actor_override_via_env(monkeypatch, apify_env):
     result = url_import.fetch_product_page(SHOPEE_URL)
     assert seen == ["someone~other-shopee-actor"]
     assert result["page_signals"]["actor"] == "someone~other-shopee-actor"
+
+
+def test_proxy_group_env_overrides_and_empty_disables(monkeypatch, apify_env):
+    payloads: list[dict] = []
+
+    def fake_run(actor, payload, *, timeout_s):
+        payloads.append(payload)
+        return apify_client.ApifyRunResult(items=[_item()], cost_usd=0.0, run_id="r", run=_run())
+
+    monkeypatch.setattr(apify_client, "run_actor_and_get_items", fake_run)
+    monkeypatch.setattr(url_import, "_make_client", lambda: _image_client([]))
+
+    monkeypatch.setenv("APIFY_SHOPEE_PROXY_GROUP", "SHADER")
+    url_import.fetch_product_page("https://shopee.sg/product/1/2")
+    assert payloads[-1]["proxyConfiguration"] == {
+        "useApifyProxy": True, "apifyProxyGroups": ["SHADER"], "apifyProxyCountry": "SG"}
+
+    monkeypatch.setenv("APIFY_SHOPEE_PROXY_GROUP", "")
+    url_import.fetch_product_page(SHOPEE_URL)
+    assert "proxyConfiguration" not in payloads[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -391,9 +423,40 @@ def test_client_polls_until_terminal_then_reads_dataset(monkeypatch):
     assert res.run_id == "run1"
     paths = [httpx.URL(u).path for _m, u, _a in calls]
     assert paths == [f"/v2/acts/{ACTOR}/runs", "/v2/actor-runs/run1", "/v2/actor-runs/run1",
-                     "/v2/datasets/ds1/items"]
+                     "/v2/datasets/ds1/items", "/v2/actor-runs/run1"]
     assert all("waitForFinish=60" in u for _m, u, _a in calls[:3])
     assert "clean=true" in calls[3][1]
+    assert "waitForFinish" not in calls[4][1]  # final cost re-read, no wait
+
+
+def test_client_reports_finalized_cost_after_dataset_read(monkeypatch):
+    """Observed live: usageTotalUsd is $0.00005 when the run turns SUCCEEDED
+    and $0.00405 a moment later once residential proxy bandwidth is billed."""
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    monkeypatch.setattr(apify_client, "_make_client", lambda: _apify_transport(
+        start_run=_run(cost=0.00005), items=[{"a": 1}], final_run=_run(cost=0.00405)))
+    res = apify_client.run_actor_and_get_items(ACTOR, {}, timeout_s=30)
+    assert res.cost_usd == pytest.approx(0.00405)
+    assert res.run["usageTotalUsd"] == pytest.approx(0.00405)
+
+
+def test_client_final_cost_reread_failure_is_not_fatal(monkeypatch):
+    monkeypatch.setenv("APIFY_TOKEN", "t")
+    state = {"gets": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(201, json={"data": _run(cost=0.001)})
+        if request.url.path == "/v2/datasets/ds1/items":
+            return httpx.Response(200, json=[{"a": 1}])
+        state["gets"] += 1
+        return httpx.Response(500, content=b"boom")
+
+    monkeypatch.setattr(apify_client, "_make_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    res = apify_client.run_actor_and_get_items(ACTOR, {}, timeout_s=30)
+    assert res.items == [{"a": 1}] and res.cost_usd == pytest.approx(0.001)
+    assert state["gets"] == 1
 
 
 def test_client_timeout_carries_partial_cost(monkeypatch):

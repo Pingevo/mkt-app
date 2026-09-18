@@ -107,8 +107,12 @@ _SHOPEE_HOSTS = {
     "shopee.com.co": "co", "shopee.cl": "cl",
 }
 APIFY_SHOPEE_ACTOR_DEFAULT = "incognito_mode~shopee-product-catalog-scraper"
+# Shopee blocks datacenter egress (live listings come back as "not found");
+# residential exit in the storefront's country was 3/3 vs 0/6 when tested.
+# ~$0.004/product incl. proxy bandwidth.  Empty env value disables it.
+APIFY_SHOPEE_PROXY_GROUP_DEFAULT = "RESIDENTIAL"
 APIFY_TIMEOUT_S = 180
-APIFY_SHOPEE_ATTEMPTS = 3           # actor intermittently misses live listings
+APIFY_SHOPEE_ATTEMPTS = 3           # actor still intermittently misses live listings
 APIFY_RETRY_SLEEP_S = 2.0
 
 
@@ -915,6 +919,13 @@ def _fetch_shopee_via_apify(url: str, region: str) -> dict:
         "includeDescription": True,
         "maxItems": 1,
     }
+    proxy_group = get_env("APIFY_SHOPEE_PROXY_GROUP", APIFY_SHOPEE_PROXY_GROUP_DEFAULT)
+    if proxy_group:
+        payload["proxyConfiguration"] = {
+            "useApifyProxy": True,
+            "apifyProxyGroups": [proxy_group],
+            "apifyProxyCountry": region.upper(),
+        }
     # The actor's Shopee fetch is flaky: the same live listing intermittently
     # comes back as an error row ("no product data ... removed or ID wrong")
     # and succeeds seconds later.  A run costs ~$0.00005, so retry before

@@ -107,6 +107,16 @@ def run_actor_and_get_items(actor_id: str, actor_input: dict,
             )
             resp.raise_for_status()
             data = resp.json()
+            # usageTotalUsd at the moment the status turns terminal can still
+            # miss proxy bandwidth — re-read once so accounting is the final
+            # figure Apify bills (observed $0.00005 -> $0.00405 with residential).
+            try:
+                final = client.get(f"{APIFY_BASE}/actor-runs/{run['id']}",
+                                   headers=headers, timeout=30).json().get("data") or {}
+                if float(final.get("usageTotalUsd") or 0.0) > float(run.get("usageTotalUsd") or 0.0):
+                    run = final
+            except Exception:
+                pass
         except httpx.HTTPStatusError as e:
             raise ApifyError(
                 "http_error", f"Apify API {e.response.status_code} for {actor_id}",
