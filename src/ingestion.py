@@ -1441,7 +1441,7 @@ def compute_metadata_facts(
         messages,
         model=ing_cfg.get("model", "google/gemini-3.8-flash"),
         temperature=ing_cfg.get("temperature", 0.3),
-        max_tokens=ing_cfg.get("max_tokens_summary", 2048),
+        max_tokens=ing_cfg.get("max_tokens_summary", 4096),
         stream=False,
         response_format=response_format,
         reasoning={"max_tokens": _reasoning_budget} if _reasoning_budget else None,
@@ -1457,7 +1457,10 @@ def compute_metadata_facts(
     if clean.startswith("```"):
         clean = _re.sub(r"^```(?:json)?\s*", "", clean)
         clean = _re.sub(r"\s*```$", "", clean)
-    parsed = _json.loads(clean)
+    try:
+        parsed = _json.loads(clean)
+    except _json.JSONDecodeError as exc:
+        raise ValueError("AI ส่งข้อมูลในรูปแบบที่ไม่สมบูรณ์ กรุณากดลองใหม่") from exc
 
     derived_facts: dict[str, dict[str, str]] = {}
     df = parsed.get("derived_facts")

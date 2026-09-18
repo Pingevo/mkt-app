@@ -54,7 +54,7 @@ status_labels:
 model: google/gemini-3.8-flash
 temperature: 0.3
 max_tokens_description: 1024      # max tokens สำหรับ description generation
-max_tokens_summary: 2048          # max tokens สำหรับ summary generation (reasoning + structured facts)
+max_tokens_summary: 4096          # max tokens สำหรับ summary generation (reasoning + structured facts) — fact-rich sources can emit ~2k output tokens
 reasoning_max_tokens_summary: 512 # เพดาน reasoning tokens ของ summary call — กัน thinking model กิน output budget จน JSON ขาด
 timeout_seconds: 180              # timeout สำหรับ LLM ingestion (วินาที)
 video_description_words: 200      # จำกัดคำใน description วิดีโอ

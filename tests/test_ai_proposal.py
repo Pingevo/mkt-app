@@ -161,9 +161,47 @@ class TestGenerate:
         assert rec["derived_facts"]["battery"]["value"] == "770mAh"
         # Configured ceiling reaches the single summary call — no retry
         assert llm.calls.count("ingestion.metadata_summary") == 1
-        assert llm.kw_by_source["ingestion.metadata_summary"]["max_tokens"] == 2048
+        assert llm.kw_by_source["ingestion.metadata_summary"]["max_tokens"] == 4096
         # Reasoning budget is bounded so thinking cannot starve the JSON output
         assert llm.kw_by_source["ingestion.metadata_summary"]["reasoning"] == {"max_tokens": 512}
+
+    def test_malformed_json_fails_controlled_not_truncated(self, brand_ws):
+        """finish_reason=stop but unparseable body → controlled malformed-data
+        error (not the truncation message, not a raw JSONDecodeError), status
+        failed, canonical untouched, exactly one model call — no retry."""
+        name = _mk_product(brand_ws)
+        llm = _FakeLLM(
+            responses={"ingestion.metadata_summary": "not json at all"},
+            last_truncated=False,
+        )
+        with pytest.raises(Exception) as exc_info:
+            ai_enrichment.generate_proposal(name, ["facts"], llm)
+        err_msg = str(exc_info.value)
+        assert "Expecting value" not in err_msg and "JSONDecodeError" not in err_msg
+        assert "ไม่ครบ" not in err_msg, "malformed ≠ truncated — wrong error surfaced"
+        rec = product_db.load(name)
+        assert rec["ai_enrichment"]["status"] == "failed"
+        assert "ai_proposal" not in rec
+        assert rec["derived_facts"]["battery"]["value"] == "770mAh"
+        assert llm.calls.count("ingestion.metadata_summary") == 1
+
+    def test_summary_output_budget_exceeds_reasoning_budget(self):
+        """Contract: the configured completion budget must leave real headroom
+        for the structured output above the reasoning cap — reasoning ≤ half
+        of max_tokens (the bounded_reasoning clamp rule).  A fact-rich
+        product needs ~2k output tokens; an inverted/saturated budget is the
+        observed live failure (finish_reason=length at 2033/2048)."""
+        from src.ingestion import _ingestion_cfg
+        cfg = _ingestion_cfg()
+        total = cfg.get("max_tokens_summary", 4096)
+        reasoning = cfg.get("reasoning_max_tokens_summary") or 0
+        assert reasoning * 2 <= total, (
+            f"reasoning budget ({reasoning}) must not exceed half the "
+            f"completion budget ({total}) — output would starve"
+        )
+        # Output channel (total - reasoning) must cover a fact-rich product —
+        # measured need ≈1.9k tokens for ~47 derived facts.
+        assert total - reasoning >= 2048
 
     def test_no_source_text_rejected_before_model(self, brand_ws):
         brand_root = brand_ws["brand_root"]
