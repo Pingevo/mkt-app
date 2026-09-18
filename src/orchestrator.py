@@ -30,7 +30,7 @@ from .brand_loader import load_brand_rules, load_brand_reference, load_brand_vis
 from .brand_priority import load_brand_priority
 from .config_loader import get_agent_config, load_config
 from .data_loader import get_agent_data
-from .llm_client import LLMClient
+from .llm_client import LLMClient, bounded_reasoning
 from .run_context import StepRunContext, build_multimodal_content
 from .flow_context import set_usage_reference, set_usage_metadata, clear_usage_context
 from .ai_usage import HubReceiptCollector, flush_usage_log, reconcile_hub_receipts, usage_log_path
@@ -173,6 +173,9 @@ class Orchestrator:
         # Runtime multi-brand contract.
         # StepRunContext (when provided) overrides brand_dir in agent.run().
         agent.brand_dir = getattr(self, "brand_dir", "brand")
+        # Selected product's own source URLs are legitimate citation evidence —
+        # scoped to the product(s) of this run only (isolation preserved).
+        agent._product_source_urls = self._selected_product_source_urls()
         return agent
 
     def _load_agent_instructions(self, agent_name: str) -> dict:
@@ -308,6 +311,27 @@ class Orchestrator:
         elif product_db.is_ready(self.product_id):
             paths = product_db.get_product_image_paths(self.product_id)
         return paths
+
+    def _selected_product_source_urls(self) -> set[str]:
+        """Source URLs of the selected product(s) — authorized citation evidence.
+
+        URL-imported products carry ``source_import`` provenance; the product's
+        own source page is legitimate evidence for grounding checks. Scoped to
+        this run's product_ids only — never a global or cross-product set.
+        """
+        if not self.product_id:
+            return set()
+        urls: set[str] = set()
+        for pid in self.product_id.split(" + "):
+            pid = pid.strip()
+            if not pid:
+                continue
+            try:
+                urls |= product_db.get_product_source_urls(pid)
+            except ValueError:
+                # No active brand context (CLI/standalone) → no provenance.
+                continue
+        return urls
 
     def _build_configured_pillars_text(self) -> str:
         """Build a compact text representation of configured Content Pillars.
@@ -771,6 +795,7 @@ class Orchestrator:
                     max_tokens=auto_cfg.get("max_tokens", 4096),
                     max_retry_limit=auto_cfg.get("max_retry_limit", 3),
                     max_iterations=auto_cfg.get("max_iterations", 10),
+                    reasoning=bounded_reasoning(auto_cfg, auto_cfg.get("max_tokens", 4096)),
                     source="orchestrator.select_assets",
                 )
                 text = _strip_code_fence(response)
@@ -950,6 +975,7 @@ class Orchestrator:
                              {"role": "user", "content": vp_user}],
                             temperature=cc_cfg.get("temperature", 0.9),
                             max_tokens=cc_cfg.get("max_tokens", 4096),
+                            reasoning=bounded_reasoning(cc_cfg, cc_cfg.get("max_tokens", 4096)),
                             stream=False,
                             response_format={
                                 "type": "json_schema",
@@ -1083,10 +1109,20 @@ class Orchestrator:
         """
         runtime_context = runtime_context or {}
 
+        # Product images are legitimate visual evidence — give the grounder
+        # the same product-scoped image set the generator/reviewer saw.
+        # Same resolution seam as generation → identical, isolated set.
+        if getattr(self, "product_id", None):
+            product_image_paths = self._get_product_image_paths()
+            if product_image_paths:
+                runtime_context.setdefault(
+                    "product_image_paths", product_image_paths)
+
         # Build a grounding agent instance
         from .agents.base_agent import BaseAgent
         grounding_agent = BaseAgent.__new__(BaseAgent)
         grounding_agent.agent_name = agent_key
+        grounding_agent.display_name = agent_key
         grounding_agent.config = {"model": "grounding-check"}
         grounding_agent.instructions = {}
         grounding_agent.llm = llm
@@ -1313,7 +1349,7 @@ class Orchestrator:
             ready_count = sum(
                 1 for p in all_products
                 if p.get("product_id") and not p.get("product_id", "").startswith(".")
-                and p.get("status") == product_db.STATUS_READY
+                and product_db.is_ready(p.get("product_id", ""))
             )
             if ready_count == 0:
                 return {"error": "ไม่มีสินค้าที่พร้อมในระบบ — กรุณาอัปโหลดและ ingest สินค้าก่อน", "step_context": step_context}
@@ -1391,7 +1427,7 @@ class Orchestrator:
                     pid = p.get("product_id", "")
                     if not pid or pid.startswith("."):
                         continue
-                    if p.get("status") != product_db.STATUS_READY:
+                    if not product_db.is_ready(pid):
                         continue
                     meta = product_db.get_product_metadata(pid)
                     if category and category.lower() not in (meta.get("category", "") or "").lower():
@@ -1531,6 +1567,7 @@ class Orchestrator:
                 max_tokens=auto_cfg.get("max_tokens", 4096),
                 max_retry_limit=auto_cfg.get("max_retry_limit", 3),
                 max_iterations=auto_cfg.get("max_iterations", 10),
+                reasoning=bounded_reasoning(auto_cfg, auto_cfg.get("max_tokens", 4096)),
                 source="orchestrator.select_product_auto",
             )
 
@@ -1552,7 +1589,7 @@ class Orchestrator:
             # ตรวจทุกสินค้าที่เลือก — ต้องมีจริงในระบบ
             all_ready = [
                 p["product_id"] for p in product_db.get_all_products()
-                if p.get("status") == product_db.STATUS_READY
+                if product_db.is_ready(p.get("product_id", ""))
                 and not p.get("product_id", "").startswith(".")
             ]
             validated = []
@@ -1636,7 +1673,6 @@ class Orchestrator:
             llm = self.make_client()
         try:
             # อ่าน config
-            auto_cfg = get_section(self.config, "auto_mode")
             ch_cfg = get_section(self.config, "content_history")
 
             # --- Phase 1: เลือกสินค้า ---
@@ -1670,18 +1706,12 @@ class Orchestrator:
             )
 
             # --- Phase 2: สร้างคอนเทนต์ ---
-            multi_text_len = auto_cfg.get("multi_product_text_length", 2000)
-            if len(chosen_pids) == 1:
-                self.product_id = chosen_pids[0]
-            else:
-                self.product_id = chosen_pids[0]
-                multi_context = "\n\n--- สินค้าเพิ่มเติมสำหรับทำคอนเทนต์รวม ---\n"
-                for i, pid in enumerate(chosen_pids[1:], start=2):
-                    ctx = product_db.get_agent_context(pid)
-                    multi_context += f"\n=== สินค้าที่ {i}: {pid} ===\n"
-                    multi_context += ctx.get("text", "")[:multi_text_len]
-                    multi_context += f"\n--- สิ้นสุดสินค้าที่ {i} ---\n"
-                quick_brief = (quick_brief or "") + multi_context
+            # Bind every selected product through the canonical combined-label
+            # contract — the same seam the manual flow uses — so product
+            # identity, scoped data, images, and provenance cover ALL selected
+            # products (single pid → product profile; "A + B" → brand-level
+            # context + per-product data/image/URL iteration downstream).
+            self.bind_product(" + ".join(chosen_pids))
 
             # ส่งแนวคิดที่เลือกเป็น quick_brief เพิ่ม
             base_auto_brief = f"แนวคิดที่ต้องใช้: {chosen_concept}"

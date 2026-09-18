@@ -5,6 +5,38 @@ from __future__ import annotations
 import json
 import threading
 import time
+
+
+def bounded_reasoning(config: dict | None, max_tokens: int) -> dict | None:
+    """Reasoning-budget payload for a chat call, or None when disabled.
+
+    Config key ``reasoning_max_tokens`` bounds thinking tokens — they count
+    inside ``max_tokens`` on thinking models, so an unbounded budget can starve
+    the actual output (observed live: finish_reason=length with 3928 reasoning
+    tokens inside a 4096 cap). Clamped at half the call budget so output
+    always keeps ≥50%.
+
+    Resolution order — one canonical contract, no per-site constants:
+      1. ``config["reasoning_max_tokens"]`` — the call site's own section
+         (per-agent override, e.g. a larger reviewer budget).
+      2. ``agents.yaml → defaults.reasoning_max_tokens`` — the canonical
+         product default, so any reasoning-capable call is bounded even when
+         its local config dict omits the key (ad-hoc grounding configs,
+         inline evidence-review configs, standalone helpers).
+      3. Explicit ``reasoning_max_tokens: 0``/``null`` at either level →
+         ``None`` — the mechanical way to mark a call intentionally
+         non-reasoning.
+    """
+    cfg = (config or {}).get("reasoning_max_tokens")
+    if cfg is None:
+        try:
+            from .config_loader import load_config
+            cfg = load_config().get("defaults", {}).get("reasoning_max_tokens")
+        except Exception:
+            cfg = None
+    if not cfg:
+        return None
+    return {"max_tokens": min(int(cfg), max(1, int(max_tokens) // 2))}
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -129,6 +161,7 @@ class LLMClient:
         plugins: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
         provider: dict[str, Any] | None = None,
+        reasoning: dict[str, Any] | None = None,
         source: str = "llm_client.chat",
         return_annotations: bool = False,
     ) -> str | tuple[str, list[dict[str, Any]]]:
@@ -146,6 +179,10 @@ class LLMClient:
         If response_format is provided (e.g. {"type": "json_schema", "json_schema": {...}}),
         enables OpenRouter Structured Outputs — model returns JSON conforming to schema.
         Note: when response_format is set, stream is forced to False (OpenRouter limitation).
+
+        If reasoning is provided (e.g. {"max_tokens": 512} or {"effort": "low"}),
+        bounds the reasoning budget — for thinking models reasoning tokens count
+        inside max_tokens, so an unbounded budget can starve the actual output.
 
         If return_annotations=True, returns (text, annotations) where annotations
         is a list of {url, title, content} dicts extracted from OpenRouter
@@ -184,6 +221,8 @@ class LLMClient:
             payload["response_format"] = response_format
         if provider:
             payload["provider"] = provider
+        if reasoning:
+            payload["reasoning"] = reasoning
 
         last_error: Exception | None = None
         last_error_message: str | None = None
@@ -644,6 +683,7 @@ class LLMClient:
         max_tokens: int = 4096,
         max_retry_limit: int = 3,
         max_iterations: int = 10,
+        reasoning: dict[str, Any] | None = None,
         source: str = "llm_client.chat_with_tools",
         pre_model_hook: Callable[[int], None] | None = None,
         pre_tool_hook: Callable[[str, dict[str, Any]], None] | None = None,
@@ -658,6 +698,9 @@ class LLMClient:
             tools: tool definitions แบบ OpenAI schema
             tool_handlers: dict {tool_name: callable} — function จริงที่จะ execute
             max_iterations: จำกัดรอบ tool calling (กัน LLM วนไม่จบ)
+            reasoning: bounded reasoning payload (e.g. {"max_tokens": 512}) —
+                same wire contract as chat(); forwarded via extra_body.
+                None = no reasoning field emitted.
             source: label สำหรับ log
             pre_model_hook: optional callback invoked before each model turn
                 with the iteration index.  May raise to abort the loop (e.g.
@@ -691,6 +734,7 @@ class LLMClient:
                     tools=tools,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    reasoning=reasoning,
                     timeout=self._timeout,
                     source=source,
                     attempt=iteration + 1,

@@ -62,6 +62,7 @@ def _make_orch():
     orch = Orchestrator.__new__(Orchestrator)
     orch.config = {}
     orch.results = {}
+    orch.brand_dir = "brand"
     orch.brand_context = None
     orch.brand_reference = None
     orch.brand_rules = None
@@ -1093,6 +1094,7 @@ def _make_auto_orch():
     orch = Orchestrator.__new__(Orchestrator)
     orch.config = {}
     orch.results = {}
+    orch.brand_dir = "brand"
     orch.brand_context = None
     orch.brand_reference = None
     orch.brand_rules = None

@@ -431,6 +431,7 @@ def chat_completions_create(
     tools: list[dict[str, Any]] | None = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
+    reasoning: dict[str, Any] | None = None,
     timeout: float = 120,
     source: str = "llm_client.chat_with_tools",
     attempt: int = 1,
@@ -458,6 +459,11 @@ def chat_completions_create(
         )
         if tools:
             kwargs["tools"] = tools
+        if reasoning:
+            # OpenRouter's reasoning field is a top-level body param — the SDK
+            # carries non-standard top-level params via extra_body (same wire
+            # shape as chat_post's payload["reasoning"]).
+            kwargs["extra_body"] = {"reasoning": reasoning}
         response = client.chat.completions.create(**kwargs)
         usage = response.usage.model_dump() if response.usage else None
         finish_reason = None
