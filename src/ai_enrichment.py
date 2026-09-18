@@ -147,6 +147,135 @@ def _source_stale(product_id: str, record: dict, baseline: dict) -> bool:
     return bool(product_db.find_stale_files(product_id))
 
 
+# --- Deterministic unchanged-suppression -----------------------------------
+# The review surface exists to approve CHANGES.  Before a proposal is
+# stored, each proposed value is compared against the canonical baseline
+# snapshot — deterministically: no model call, no semantic matching
+# ("กันน้ำ" ≠ "กันน้ำระดับ IP68").  Equality is FIELD-AWARE and declared
+# below — never inferred from how persistence happens to store bytes:
+#
+#   * scalars normalize trim + repeated whitespace (+ the shared URL
+#     normalization); case is significant;
+#   * collections compare ORDER-SENSITIVELY — only fields declared
+#     set-like in _UNORDERED_PROFILE_FIELDS ignore member order;
+#   * missing ≡ empty only where the field's canonical schema has a single
+#     "absent" state — and only at field level.  Inside a value an
+#     explicit "" member or empty-valued key stays significant;
+#   * facts are never missing-equivalent: a fact's presence is itself
+#     information — an empty proposed fact still creates a fact row (and
+#     shadows a same-keyed derived fact).
+
+# Profile fields whose members carry no positional meaning — parallel
+# attribute lists where the same items in another order are the same
+# profile.  ``audience`` is a structured dict; the flag propagates into
+# its nested attribute lists (lifestyle, pain_points, channels, ...).
+# ``visual_override`` and fact values stay order-sensitive: if order ever
+# encodes priority there, an unordered compare would hide a real diff.
+_UNORDERED_PROFILE_FIELDS = frozenset({
+    "audience", "competitors", "differentiators", "use_cases",
+})
+
+
+def _canon_text(v) -> str:
+    """Scalar comparison form — trim + collapse whitespace runs; URL values
+    go through the shared URL normalization helper (same rule validators
+    use).  Case is significant for non-URL text."""
+    s = " ".join(str(v).split())
+    if s.lower().startswith(("http://", "https://")):
+        from .output_validators import _normalize_url
+        return _normalize_url(s)
+    return s
+
+
+def _cmp_form(v, *, unordered: bool):
+    """Strict structural comparison form: NO empty collapse — None, "",
+    [], {} stay distinct — and member order is preserved unless the field
+    was declared set-like (``unordered`` propagates to nested collections
+    of that field).  Dict keys compare sorted (JSON object order is never
+    meaningful).  Returns a deterministically sortable form."""
+    if v is None:
+        return ("none",)
+    if isinstance(v, bool):
+        return ("scalar", str(v))
+    if isinstance(v, (int, float)):
+        return ("scalar", str(v))
+    if isinstance(v, str):
+        return ("scalar", _canon_text(v))
+    if isinstance(v, dict):
+        return ("dict", tuple(sorted(
+            (str(k), _cmp_form(x, unordered=unordered))
+            for k, x in v.items())))
+    if isinstance(v, (list, tuple)):
+        items = tuple(_cmp_form(x, unordered=unordered) for x in v)
+        if unordered:
+            items = tuple(sorted(items, key=repr))
+        return ("list", items)
+    return ("scalar", _canon_text(v))
+
+
+def _is_empty(v) -> bool:
+    """Canonical 'no value' shapes — consulted only for fields whose schema
+    treats every empty representation as 'absent'.  A dict/list holding
+    any content (even an empty string member) is not empty."""
+    if v is None:
+        return True
+    if isinstance(v, str):
+        return _canon_text(v) == ""
+    return isinstance(v, (list, tuple, dict)) and not v
+
+
+def _unchanged(proposed, baseline, *, unordered: bool,
+               missing_equiv: bool) -> bool:
+    """Field-level equality: empty-collapse applies only where the field's
+    schema declares all empty shapes equivalent to 'absent'; everything
+    inside a value compares strictly per _cmp_form."""
+    if missing_equiv and _is_empty(proposed) and _is_empty(baseline):
+        return True
+    return (_cmp_form(proposed, unordered=unordered)
+            == _cmp_form(baseline, unordered=unordered))
+
+
+def _suppress_unchanged(proposal: dict) -> None:
+    """Drop proposed fields identical to the canonical baseline (in place).
+
+    facts/profile: per-key compare — a key absent from the baseline is a
+    new value and always kept.  summary/category: scalar compare.  Fields
+    the AI simply did not propose are never touched (silence ≠ deletion).
+    """
+    baseline = proposal.get("baseline") or {}
+    bf = baseline.get("facts") or {}
+    facts = proposal.get("facts") or {}
+    for key in [k for k, e in facts.items()
+                if _unchanged(e.get("value") if isinstance(e, dict) else e,
+                              bf.get(k),
+                              unordered=False, missing_equiv=False)]:
+        facts.pop(key, None)
+    bp = baseline.get("profile") or {}
+    prof = proposal.get("profile") or {}
+    for key in [k for k, v in prof.items()
+                if _unchanged(v, bp.get(k),
+                              unordered=k in _UNORDERED_PROFILE_FIELDS,
+                              missing_equiv=True)]:
+        prof.pop(key, None)
+    for kind in ("summary", "category"):
+        if kind in proposal and _unchanged(
+                proposal[kind], baseline.get(kind),
+                unordered=False, missing_equiv=True):
+            proposal.pop(kind, None)
+
+
+def _has_proposed_changes(proposal: dict) -> bool:
+    """True when any reviewable diff remains after suppression.  Key
+    presence — not truthiness — decides: suppression pops unchanged keys,
+    so a surviving 'summary': '' is a real diff (canonical non-empty)
+    that the user must be able to reject, not a silent no-op."""
+    return bool(
+        (proposal.get("facts") or {})
+        or (proposal.get("profile") or {})
+        or "summary" in proposal
+        or "category" in proposal)
+
+
 def _baseline(product_id: str, record: dict) -> dict:
     """Canonical + evidence snapshot the proposal is generated against.
 
@@ -241,15 +370,28 @@ def generate_proposal(
                 k: v for k, v in suggested.items() if k in PROFILE_FIELDS
             }
 
+        # Changed-only proposal — suggestions identical to canonical are
+        # not reviewable changes; the user approves diffs, not echoes.
+        _suppress_unchanged(proposal)
+
         record = product_db.load(product_id) or record
-        record["ai_proposal"] = proposal
+        if _has_proposed_changes(proposal):
+            record["ai_proposal"] = proposal
+            status = "proposal_ready"
+        else:
+            # Successful enrichment with nothing new — a consented rerun
+            # also consumes the stale review it replaced.  Never an error,
+            # never an empty approval checklist.
+            record.pop("ai_proposal", None)
+            status = "no_changes"
         enrichment = dict(record.get("ai_enrichment") or {})
         enrichment.update({
-            "status": "proposal_ready",
+            "status": status,
             "updated_at": _now(),
             "error": None,
-            "last_proposal_id": proposal["proposal_id"],
         })
+        if status == "proposal_ready":
+            enrichment["last_proposal_id"] = proposal["proposal_id"]
         record["ai_enrichment"] = enrichment
         product_db.save(product_id, record)
         return proposal

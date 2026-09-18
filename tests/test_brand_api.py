@@ -265,3 +265,92 @@ def test_archived_brand_get_via_management_endpoint(_web_viewer, tmp_path, monke
     # But select still fails
     resp = client_a.post(f"/api/brands/{bid}/select")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Delete Brand (ลบแบรนด์) — user-facing delete lands on the canonical
+# archive lifecycle.  No physical deletion: the brand_id is never reused
+# and the brand workspace stays on disk but unreachable.
+# ---------------------------------------------------------------------------
+
+def test_delete_unknown_brand_404(_web_viewer, tmp_path, monkeypatch):
+    """DELETE on a missing/invalid brand id fails closed — never creates
+    state, never touches the filesystem."""
+    client_a, _, _, _ = _make_two_authed_clients(_web_viewer, tmp_path, monkeypatch)
+    resp = client_a.delete("/api/brands/nonexistent")
+    assert resp.status_code == 404
+    resp = client_a.delete("/api/brands/..%2F..%2Fetc")
+    assert resp.status_code == 404
+
+
+def test_delete_active_brand_clears_session_state(_web_viewer, tmp_path, monkeypatch):
+    """Deleting the ACTIVE brand must drop the mktapp_brand cookie — the
+    session returns to the canonical no-brand state (blocking picker)."""
+    client_a, _, _, _ = _make_two_authed_clients(_web_viewer, tmp_path, monkeypatch)
+    resp = client_a.post("/api/brands", json={"name": "Active"})
+    bid = resp.json()["brand_id"]
+    resp = client_a.post(f"/api/brands/{bid}/select")
+    assert resp.status_code == 200
+    assert client_a.cookies.get("mktapp_brand") == bid
+    assert client_a.get("/api/brands/active").json()["active"] is True
+
+    resp = client_a.delete(f"/api/brands/{bid}")
+    assert resp.status_code == 200
+    # Server instructs the browser to drop the selection cookie.
+    assert client_a.cookies.get("mktapp_brand") is None, \
+        "deleting the active brand must clear the mktapp_brand cookie"
+    # Current-brand state is empty — the picker reopens on next load.
+    resp = client_a.get("/api/brands/active")
+    assert resp.json()["active"] is False
+
+
+def test_delete_inactive_brand_keeps_active_selection(_web_viewer, tmp_path, monkeypatch):
+    """Deleting a NON-active brand must not disturb the current selection."""
+    client_a, _, _, _ = _make_two_authed_clients(_web_viewer, tmp_path, monkeypatch)
+    keep = client_a.post("/api/brands", json={"name": "Keep"}).json()["brand_id"]
+    drop = client_a.post("/api/brands", json={"name": "Drop"}).json()["brand_id"]
+    client_a.post(f"/api/brands/{keep}/select")
+
+    resp = client_a.delete(f"/api/brands/{drop}")
+    assert resp.status_code == 200
+    assert client_a.cookies.get("mktapp_brand") == keep
+    data = client_a.get("/api/brands/active").json()
+    assert data["active"] is True and data["brand"]["brand_id"] == keep
+    # Only the deleted brand left the list.
+    names = {b["name"] for b in client_a.get("/api/brands").json()["brands"]}
+    assert names == {"Keep"}
+
+
+def test_repeated_delete_returns_not_found(_web_viewer, tmp_path, monkeypatch):
+    """Second DELETE on the same id is a clean 404 — controlled, not an
+    error path that could touch shared state."""
+    client_a, _, _, _ = _make_two_authed_clients(_web_viewer, tmp_path, monkeypatch)
+    bid = client_a.post("/api/brands", json={"name": "Once"}).json()["brand_id"]
+    assert client_a.delete(f"/api/brands/{bid}").status_code == 200
+    assert client_a.delete(f"/api/brands/{bid}").status_code == 404
+
+
+def test_delete_never_touches_other_users_workspace(_web_viewer, tmp_path, monkeypatch):
+    """User A supplying User B's brand_id must get 404 and leave B's
+    registry entry AND on-disk workspace byte-identical."""
+    client_a, _, client_b, uid_b = _make_two_authed_clients(
+        _web_viewer, tmp_path, monkeypatch)
+    bid_b = client_b.post("/api/brands", json={"name": "B Brand"}).json()["brand_id"]
+    # Seed B's brand workspace on disk.
+    b_root = tmp_path / "users" / uid_b / "brands" / bid_b
+    (b_root / "data").mkdir(parents=True)
+    sentinel = b_root / "data" / "sentinel.txt"
+    sentinel.write_text("B workspace data", encoding="utf-8")
+
+    resp = client_a.delete(f"/api/brands/{bid_b}")
+    assert resp.status_code == 404
+    assert sentinel.read_text(encoding="utf-8") == "B workspace data"
+    assert client_b.get(f"/api/brands/{bid_b}").json()["status"] == "active"
+
+
+def test_delete_requires_authentication(_web_viewer, tmp_path, monkeypatch):
+    """No session → the endpoint is unreachable (middleware 401)."""
+    from starlette.testclient import TestClient
+    anon = TestClient(_web_viewer.app)
+    resp = anon.delete("/api/brands/whatever")
+    assert resp.status_code == 401

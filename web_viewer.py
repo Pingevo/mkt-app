@@ -5148,10 +5148,21 @@ async def api_rename_brand(brand_id: str, request: Request) -> JSONResponse:
 
 @app.delete("/api/brands/{brand_id}")
 def api_archive_brand(brand_id: str) -> JSONResponse:
-    """Archive a brand owned by the authenticated user (not delete)."""
+    """Archive a brand owned by the authenticated user (not delete).
+
+    The ลบแบรนด์ UI lands here — archive is the canonical lifecycle: the
+    brand_id is never reused and the brand workspace stays on disk but
+    unreachable (``get()`` is active-only).  When the deleted brand was the
+    active selection, clear the brand cookie so the session returns to the
+    canonical no-brand state (the blocking picker)."""
     if not _brand_registry().archive(brand_id):
         return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({"ok": True, "brand_id": brand_id, "status": "archived"})
+    resp = JSONResponse({"ok": True, "brand_id": brand_id, "status": "archived"})
+    from src.workspace_context import get_workspace
+    ws = get_workspace()
+    if ws is not None and ws.brand_id == brand_id:
+        resp.delete_cookie(key=BRAND_COOKIE_NAME, path="/")
+    return resp
 
 
 @app.post("/api/brands/{brand_id}/select")
@@ -6302,7 +6313,15 @@ async function mktappLogout() {
   .brand-gate-select-btn { background: #7c8aff; color: #0f1117; border: none; border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; }
   .brand-gate-select-btn:hover { background: #6470ff; }
   .brand-gate-select-btn:disabled { background: #3a3d5a; color: #888; cursor: not-allowed; }
+  .brand-gate-delete-btn { background: none; color: #666; border: 1px solid #2a2d3a; border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+  .brand-gate-delete-btn:hover { color: #f87171; border-color: #f87171; }
+  .brand-gate-delete-btn:disabled { color: #3a3d5a; border-color: #2a2d3a; cursor: not-allowed; }
   .brand-gate-empty { font-size: 12px; color: #888; padding: 8px 0; }
+  #brand-delete-overlay { z-index: 20001; }
+  .brand-delete-confirm-btn { background: #dc2626; color: #fff; border: none; border-radius: 8px; padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer; flex: 1; }
+  .brand-delete-confirm-btn:disabled { background: #3a3d5a; color: #888; cursor: not-allowed; }
+  .brand-delete-cancel-btn { background: none; color: #aaa; border: 1px solid #3a3d4a; border-radius: 8px; padding: 10px 20px; font-size: 14px; cursor: pointer; flex: 1; }
+  .brand-delete-cancel-btn:disabled { color: #555; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -8414,6 +8433,8 @@ function _pdRenderAiSection(ai) {
     h += '<div style="margin-top:8px;font-size:12px;color:#facc15">มีข้อเสนอจาก AI รอตรวจสอบ — <span onclick="pdAiOpen()" style="color:#7c8aff;cursor:pointer">เปิดดูข้อเสนอ ›</span></div>';
   } else if (status === 'failed') {
     h += '<div style="margin-top:8px;font-size:12px;color:#f87171">AI วิเคราะห์ไม่สำเร็จครั้งล่าสุด — สินค้ายังใช้งานได้ปกติ กดปุ่มเพื่อลองใหม่</div>';
+  } else if (status === 'no_changes') {
+    h += '<div style="margin-top:8px;font-size:12px;color:#555">AI ตรวจสอบแล้ว — ไม่พบข้อมูลใหม่ที่แตกต่างจากข้อมูลปัจจุบัน</div>';
   } else {
     h += '<div style="margin-top:8px;font-size:12px;color:#555">สินค้าใช้งานได้เต็มที่โดยไม่ต้องใช้ AI — กดปุ่มเมื่อต้องการให้ AI เสนอข้อมูลเพิ่ม (ใช้เครดิต)</div>';
   }
@@ -8457,6 +8478,10 @@ function _pdAiRender() {
   // Setup phase — scope selection; the confirm button is the cost boundary.
   const enrich = view.ai_enrichment || {};
   let h = '';
+  if (enrich.status === 'no_changes') {
+    // Successful enrichment with an empty diff — never an empty checklist.
+    h += '<div style="font-size:13px;color:#4ade80;margin-bottom:14px;line-height:1.6">AI ตรวจสอบแล้ว ไม่พบข้อมูลใหม่ที่แตกต่างจากข้อมูลปัจจุบัน</div>';
+  }
   h += '<div style="font-size:13px;color:#aaa;margin-bottom:14px;line-height:1.6">AI จะอ่านไฟล์ต้นทางของสินค้าแล้วเสนอข้อมูลให้ตรวจสอบ — ข้อมูลเดิมของคุณจะไม่ถูกเปลี่ยนจนกว่าจะเลือกรับทีละฟิลด์</div>';
   h += '<label style="display:flex;gap:8px;align-items:center;font-size:13px;color:#e0e0e0;margin-bottom:8px"><input type="checkbox" id="pd-ai-scope-facts" checked> ข้อมูลสินค้า (สรุป / หมวด / คุณสมบัติ)</label>';
   h += '<label style="display:flex;gap:8px;align-items:center;font-size:13px;color:#e0e0e0;margin-bottom:14px"><input type="checkbox" id="pd-ai-scope-marketing" checked> Marketing (กลุ่มเป้าหมาย / จุดขาย / โทน)</label>';
@@ -12706,8 +12731,10 @@ function _brandGateError(msg) {
 
 function _setBrandBusy(b) {
   _brandBusy = b;
-  const ov = _bgEl('brand-gate-overlay');
-  if (ov) ov.querySelectorAll('button, input').forEach(c => { c.disabled = b; });
+  ['brand-gate-overlay', 'brand-delete-overlay'].forEach(id => {
+    const ov = _bgEl(id);
+    if (ov) ov.querySelectorAll('button, input').forEach(c => { c.disabled = b; });
+  });
 }
 
 async function initBrandGate() {
@@ -12816,6 +12843,13 @@ async function _renderBrandGateList() {
     btn.disabled = _brandBusy;
     btn.onclick = () => selectBrand(b.brand_id);
     row.appendChild(btn);
+    const del = document.createElement('button');
+    del.className = 'brand-gate-delete-btn';
+    del.textContent = 'ลบ';
+    del.title = 'ลบแบรนด์';
+    del.disabled = _brandBusy;
+    del.onclick = () => confirmBrandDelete(b.brand_id, b.name || '');
+    row.appendChild(del);
     list.appendChild(row);
   }
 }
@@ -12869,6 +12903,63 @@ async function createBrandFromGate() {
     location.reload();
   } catch (e) {
     _brandGateError('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้');
+    _setBrandBusy(false);
+  }
+}
+
+// ---- Delete brand (ลบแบรนด์) ----
+// Destructive action is always two-step: the row button only opens the
+// confirmation dialog; the DELETE call fires exclusively from the
+// dialog's ลบแบรนด์ button.  Delete = the canonical archive lifecycle —
+// the brand_id is never reused and the workspace stays unreachable.
+let _brandDeleteId = null;
+
+function confirmBrandDelete(brandId, name) {
+  if (_brandBusy) return;
+  _brandDeleteId = brandId;
+  const msg = _bgEl('brand-delete-msg');
+  if (msg) {
+    // textContent only — brand names are user-controlled.
+    msg.textContent = 'ต้องการลบแบรนด์ “' + (name || '') + '” หรือไม่? ข้อมูลของแบรนด์นี้จะถูกลบและไม่สามารถย้อนกลับได้';
+  }
+  const st = _bgEl('brand-delete-status');
+  if (st) { st.textContent = ''; st.className = 'upload-status'; }
+  const ov = _bgEl('brand-delete-overlay');
+  if (ov) ov.className = 'settings-modal-overlay visible';
+}
+
+function closeBrandDelete() {
+  _brandDeleteId = null;
+  const ov = _bgEl('brand-delete-overlay');
+  if (ov) ov.className = 'settings-modal-overlay';
+}
+
+async function deleteBrandConfirmed() {
+  if (_brandBusy || !_brandDeleteId) return;
+  _setBrandBusy(true);
+  const st = _bgEl('brand-delete-status');
+  if (st) { st.textContent = ''; st.className = 'upload-status'; }
+  try {
+    const r = await fetch('/api/brands/' + encodeURIComponent(_brandDeleteId), { method: 'DELETE' });
+    if (!r.ok) {
+      if (st) { st.textContent = 'ลบแบรนด์ไม่สำเร็จ — ลองอีกครั้ง'; st.className = 'upload-status err'; }
+      _setBrandBusy(false);
+      return;
+    }
+    // Safe post-delete state: if the deleted brand was active the server
+    // cleared the brand cookie — reload drops into the blocking picker
+    // (canonical no-brand state).  Otherwise just refresh the list.
+    const ar = await fetch('/api/brands/active');
+    const adata = ar.ok ? await ar.json() : {};
+    if (!adata.active) {
+      location.reload();
+      return;
+    }
+    closeBrandDelete();
+    _setBrandBusy(false);
+    await _renderBrandGateList();
+  } catch (e) {
+    if (st) { st.textContent = 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้'; st.className = 'upload-status err'; }
     _setBrandBusy(false);
   }
 }
@@ -13072,6 +13163,20 @@ function loadCredits() {
       <button id="brand-gate-create" class="settings-save" style="flex:none;padding:8px 16px" onclick="createBrandFromGate()">สร้างแบรนด์</button>
     </div>
     <div class="upload-status" id="brand-gate-status"></div>
+  </div>
+</div>
+
+<!-- Delete-brand confirmation (ลบแบรนด์): explicit two-step destructive
+     dialog — the only path that issues DELETE /api/brands/{id}. -->
+<div class="settings-modal-overlay" id="brand-delete-overlay">
+  <div class="settings-modal" style="width:420px">
+    <h3 style="margin:0 0 12px">ลบแบรนด์</h3>
+    <div id="brand-delete-msg" style="font-size:13px;color:#ccc;line-height:1.6;margin-bottom:16px"></div>
+    <div class="settings-actions" style="display:flex;gap:8px;margin-top:0">
+      <button class="brand-delete-cancel-btn" onclick="closeBrandDelete()">ยกเลิก</button>
+      <button class="brand-delete-confirm-btn" id="brand-delete-confirm" onclick="deleteBrandConfirmed()">ลบแบรนด์</button>
+    </div>
+    <div class="upload-status" id="brand-delete-status"></div>
   </div>
 </div>
 

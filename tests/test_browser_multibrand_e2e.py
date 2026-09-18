@@ -450,3 +450,89 @@ class TestMultiBrandUI:
                 _assert_no_fatal_console_errors(env_b["console_errors"])
             finally:
                 _close(env_b)
+
+
+class TestDeleteBrandUI:
+    """ลบแบรนด์ — destructive action is gated by the explicit confirmation
+    dialog; deleting the active brand returns to the canonical no-brand
+    picker state."""
+
+    def test_delete_requires_confirmation_and_resets_active_state(self, _mb_server):
+        server = _mb_server
+        with sync_playwright() as p:
+            env = _launch(p, server)
+            page = env["page"]
+            delete_requests: list = []
+            page.on("request", lambda r: delete_requests.append(r)
+                    if r.method == "DELETE" else None)
+            try:
+                page.goto(f"{server['url']}/", wait_until="networkidle", timeout=15000)
+                page.wait_for_selector("#brand-gate-overlay.visible", timeout=10000)
+
+                # Two brands through the real UI — TargetBrand ends active.
+                _create_brand_ui(page, "KeepBrand")
+                _wait_workspace_ready(page)
+                _open_picker(page)
+                _create_brand_ui(page, "TargetBrand")
+                _wait_workspace_ready(page)
+                target_id = _browser_active_brand_id(env)
+
+                # Locate TargetBrand's row + delete button in the picker.
+                _open_picker(page)
+                target_row = page.wait_for_selector(
+                    f".brand-gate-item[data-brand-id='{target_id}']",
+                    timeout=10000)
+                assert target_row is not None, "TargetBrand row must be listed"
+                assert "TargetBrand" in target_row.inner_text()
+                del_btn = target_row.query_selector(".brand-gate-delete-btn")
+                assert del_btn is not None, "brand row must offer a ลบ action"
+
+                # Step 1: ลบ opens the confirmation dialog — NO request yet.
+                del_btn.click()
+                page.wait_for_selector("#brand-delete-overlay.visible", timeout=5000)
+                msg = page.inner_text("#brand-delete-msg")
+                assert "TargetBrand" in msg, "dialog must name the brand being deleted"
+                assert "ลบ" in msg and "ไม่สามารถย้อนกลับ" in msg
+                assert page.query_selector(
+                    "#brand-delete-overlay .brand-delete-cancel-btn") is not None
+                assert page.query_selector(
+                    "#brand-delete-overlay .brand-delete-confirm-btn") is not None
+                assert delete_requests == [], \
+                    "opening the dialog must not issue the destructive request"
+
+                # Step 2: ยกเลิก closes without deleting.
+                page.click("#brand-delete-overlay .brand-delete-cancel-btn")
+                page.wait_for_selector(
+                    "#brand-delete-overlay", state="hidden", timeout=5000)
+                assert delete_requests == [], "ยกเลิก must not issue DELETE"
+                assert any("TargetBrand" in r.inner_text()
+                           for r in page.query_selector_all(".brand-gate-item")), \
+                    "cancelled delete must leave the brand listed"
+
+                # Step 3: confirm — the ONLY path that fires DELETE.
+                target_row.query_selector(".brand-gate-delete-btn").click()
+                page.wait_for_selector("#brand-delete-overlay.visible", timeout=5000)
+                with page.expect_navigation(wait_until="load", timeout=15000):
+                    page.click("#brand-delete-overlay .brand-delete-confirm-btn")
+                page.wait_for_load_state("networkidle")
+                assert len(delete_requests) == 1, \
+                    f"exactly one DELETE expected, got {len(delete_requests)}"
+                assert "/api/brands/" in delete_requests[0].url
+
+                # Deleted brand was active → cookie cleared → blocking
+                # picker with the surviving brand listed.
+                gate = page.wait_for_selector(
+                    "#brand-gate-overlay.visible", timeout=15000)
+                assert "blocking" in (gate.get_attribute("class") or "")
+                page.wait_for_selector(".brand-gate-item", timeout=10000)
+                names = [r.inner_text() for r in
+                         page.query_selector_all(".brand-gate-item")]
+                assert any("KeepBrand" in n for n in names)
+                assert not any("TargetBrand" in n for n in names)
+
+                # No brand context is active — the workspace never came up.
+                assert not page.query_selector("#brand-switcher-btn").is_visible()
+
+                _assert_no_fatal_console_errors(env["console_errors"])
+            finally:
+                _close(env)

@@ -714,6 +714,375 @@ class TestSourceRevision:
         self._assert_stale_blocks_accept(name, p, llm, before)
 
 
+class TestUnchangedSuppression:
+    """Changed-only proposals — a proposed value identical to the canonical
+    baseline is suppressed before storage, so the user reviews diffs, not
+    echoes.  The comparison is deterministic (no model call) and
+    FIELD-AWARE: whitespace/URL formatting never count; member order
+    counts unless the field is declared set-like; missing≡empty only for
+    fields whose schema treats every empty shape as 'absent'.
+
+    Canonical facts under test: ``battery`` = 770mAh (derived),
+    ``summary`` = "seed summary" (metadata), ``category`` = "".
+    """
+
+    def _gen(self, brand_ws, name="P1", facts=None, profile=None,
+             scopes=("facts", "marketing")):
+        _mk_product(brand_ws, name)
+        return ai_enrichment.generate_proposal(
+            name, list(scopes),
+            _llm(facts or _SUMMARY_JSON, profile or _PROFILE_JSON))
+
+    def _stored(self, name):
+        return product_db.load(name).get("ai_proposal") or {}
+
+    # --- scalar facts -------------------------------------------------
+
+    def test_identical_fact_suppressed(self, brand_ws):
+        facts = json.dumps({"summary": "", "category": "", "derived_facts": {
+            "battery": {"label": "แบตเตอรี่", "value": "770mAh"}}})
+        self._gen(brand_ws, facts=facts)
+        assert "battery" not in (self._stored("P1").get("facts") or {})
+
+    def test_whitespace_only_difference_suppressed(self, brand_ws):
+        facts = json.dumps({"summary": "", "category": "", "derived_facts": {
+            "battery": {"label": "แบตเตอรี่", "value": "  770mAh \n"}}})
+        self._gen(brand_ws, facts=facts)
+        assert "battery" not in (self._stored("P1").get("facts") or {})
+
+    def test_repeated_inner_whitespace_suppressed(self, brand_ws):
+        name = _mk_product(brand_ws)
+        # Canonical fact with inner whitespace; AI returns collapsed runs.
+        rec = product_db.load(name)
+        rec["derived_facts"]["dim"] = {"label": "ขนาด", "value": "10  20  cm"}
+        product_db.save(name, rec)
+        facts = json.dumps({"summary": "", "category": "", "derived_facts": {
+            "dim": {"label": "ขนาด", "value": "10 20 cm"}}})
+        ai_enrichment.generate_proposal(name, ["facts"], _llm(facts))
+        assert "dim" not in (self._stored(name).get("facts") or {})
+
+    def test_genuinely_changed_fact_shown(self, brand_ws):
+        self._gen(brand_ws)  # proposes 750mAh vs canonical 770mAh
+        assert self._stored("P1")["facts"]["battery"]["value"] == "750mAh"
+
+    def test_semantic_difference_never_suppressed(self, brand_ws):
+        """กันน้ำ ≠ กันน้ำระดับ IP68 — a real information change stays."""
+        name = _mk_product(brand_ws)
+        rec = product_db.load(name)
+        rec["derived_facts"]["water"] = {"label": "กันน้ำ", "value": "กันน้ำ"}
+        product_db.save(name, rec)
+        facts = json.dumps({"summary": "", "category": "", "derived_facts": {
+            "water": {"label": "กันน้ำ", "value": "กันน้ำระดับ IP68"}}})
+        ai_enrichment.generate_proposal(name, ["facts"], _llm(facts))
+        assert self._stored(name)["facts"]["water"]["value"] == "กันน้ำระดับ IP68"
+
+    def test_case_difference_is_a_real_change(self, brand_ws):
+        """Normalization is representation-level only — case is significant."""
+        facts = json.dumps({"summary": "", "category": "", "derived_facts": {
+            "battery": {"label": "แบตเตอรี่", "value": "770MAH"}}})
+        self._gen(brand_ws, facts=facts)
+        assert "battery" in (self._stored("P1").get("facts") or {})
+
+    # --- URL values -----------------------------------------------------
+
+    def _url_fact(self, name, value):
+        rec = product_db.load(name)
+        rec["derived_facts"]["site"] = {"label": "เว็บไซต์", "value": value}
+        product_db.save(name, rec)
+
+    def test_equivalent_url_suppressed(self, brand_ws):
+        name = _mk_product(brand_ws)
+        self._url_fact(name, "https://shop.example.com/A%20B/")
+        facts = json.dumps({"summary": "", "category": "", "derived_facts": {
+            "site": {"label": "เว็บไซต์", "value": "https://SHOP.example.com/a b"}}})
+        ai_enrichment.generate_proposal(name, ["facts"], _llm(facts))
+        assert "site" not in (self._stored(name).get("facts") or {})
+
+    def test_different_url_shown(self, brand_ws):
+        name = _mk_product(brand_ws)
+        self._url_fact(name, "https://shop.example.com/a")
+        facts = json.dumps({"summary": "", "category": "", "derived_facts": {
+            "site": {"label": "เว็บไซต์", "value": "https://shop.example.com/b"}}})
+        ai_enrichment.generate_proposal(name, ["facts"], _llm(facts))
+        assert self._stored(name)["facts"]["site"]["value"] == \
+            "https://shop.example.com/b"
+
+    # --- collections (profile list fields — order is presentational) ---
+
+    def _profile_canonical(self, name, **fields):
+        profile = load_product_profile(name) or {}
+        profile.update(fields)
+        ai_enrichment._save_profile(name, profile)
+
+    def test_unordered_collection_suppressed(self, brand_ws):
+        name = _mk_product(brand_ws)
+        self._profile_canonical(name, differentiators=["GPS", "กันน้ำ"])
+        profile = json.dumps({"differentiators": ["กันน้ำ", "GPS"]})
+        ai_enrichment.generate_proposal(
+            name, ["marketing"], _llm(profile=profile))
+        assert "differentiators" not in (
+            self._stored(name).get("profile") or {})
+
+    def test_collection_with_new_item_shown(self, brand_ws):
+        name = _mk_product(brand_ws)
+        self._profile_canonical(name, differentiators=["GPS"])
+        profile = json.dumps({"differentiators": ["GPS", "กันน้ำ"]})
+        ai_enrichment.generate_proposal(
+            name, ["marketing"], _llm(profile=profile))
+        assert self._stored(name)["profile"]["differentiators"] == \
+            ["GPS", "กันน้ำ"]
+
+    def test_collection_missing_item_shown(self, brand_ws):
+        """A shorter proposed list is a real change — accepting it would
+        drop a member, so it must stay reviewable."""
+        name = _mk_product(brand_ws)
+        self._profile_canonical(name, differentiators=["GPS", "กันน้ำ"])
+        profile = json.dumps({"differentiators": ["GPS"]})
+        ai_enrichment.generate_proposal(
+            name, ["marketing"], _llm(profile=profile))
+        assert "differentiators" in (self._stored(name).get("profile") or {})
+
+    # --- structured values (nested dict profile fields) -----------------
+
+    def test_identical_nested_value_suppressed(self, brand_ws):
+        name = _mk_product(brand_ws)
+        aud = {"primary": {"age": "25-35", "role": "ผู้ปกครอง"},
+               "end_user": {"age": "8-12", "desc": "เด็ก"}}
+        self._profile_canonical(name, audience=aud)
+        # Same content, different key order + stray whitespace.
+        profile = json.dumps({"audience": {
+            "end_user": {"desc": " เด็ก ", "age": "8-12"},
+            "primary": {"role": "ผู้ปกครอง", "age": "25-35"}}})
+        ai_enrichment.generate_proposal(
+            name, ["marketing"], _llm(profile=profile))
+        assert "audience" not in (self._stored(name).get("profile") or {})
+
+    def test_changed_nested_value_shown(self, brand_ws):
+        name = _mk_product(brand_ws)
+        self._profile_canonical(name, audience={
+            "primary": {"age": "25-35", "role": "ผู้ปกครอง"},
+            "end_user": {"age": "8-12", "desc": "เด็ก"}})
+        profile = json.dumps({"audience": {
+            "primary": {"age": "25-35", "role": "ผู้ปกครอง"},
+            "end_user": {"age": "8-12", "desc": "วัยรุ่น"}}})
+        ai_enrichment.generate_proposal(
+            name, ["marketing"], _llm(profile=profile))
+        assert "audience" in (self._stored(name).get("profile") or {})
+
+    def test_nested_value_with_dropped_key_shown(self, brand_ws):
+        """Omitting a populated sub-key inside a proposed object is a real
+        change — accept replaces the whole field."""
+        name = _mk_product(brand_ws)
+        self._profile_canonical(name, audience={
+            "primary": {"age": "25-35", "role": "ผู้ปกครอง"},
+            "end_user": {"age": "8-12", "desc": "เด็ก"}})
+        profile = json.dumps({"audience": {
+            "primary": {"age": "25-35", "role": "ผู้ปกครอง"}}})
+        ai_enrichment.generate_proposal(
+            name, ["marketing"], _llm(profile=profile))
+        assert "audience" in (self._stored(name).get("profile") or {})
+
+    def test_new_structured_value_shown(self, brand_ws):
+        name = _mk_product(brand_ws)  # no canonical audience
+        profile = json.dumps({"audience": {
+            "primary": {"age": "25-35", "role": "ผู้ปกครอง"},
+            "end_user": {"age": "8-12", "desc": "เด็ก"}}})
+        ai_enrichment.generate_proposal(
+            name, ["marketing"], _llm(profile=profile))
+        assert "audience" in (self._stored(name).get("profile") or {})
+
+    def test_nested_lists_of_set_like_field_also_unordered(self, brand_ws):
+        """`audience` is declared set-like — the flag propagates into its
+        nested attribute lists (lifestyle, pain_points, channels, ...)."""
+        name = _mk_product(brand_ws)
+        self._profile_canonical(name, audience={
+            "primary": {"age": "25-35"},
+            "lifestyle": ["active", "outdoor"]})
+        profile = json.dumps({"audience": {
+            "primary": {"age": "25-35"},
+            "lifestyle": ["outdoor", "active"]}})
+        ai_enrichment.generate_proposal(
+            name, ["marketing"], _llm(profile=profile))
+        assert "audience" not in (self._stored(name).get("profile") or {})
+
+    def test_ordered_field_same_members_different_order_shown(self, brand_ws):
+        """`visual_override` is NOT declared set-like — member order is
+        part of the value, so a pure reorder stays a reviewable diff."""
+        name = _mk_product(brand_ws)
+        self._profile_canonical(
+            name, visual_override={"avoid": ["red", "blue"]})
+        profile = json.dumps(
+            {"visual_override": {"avoid": ["blue", "red"]}})
+        ai_enrichment.generate_proposal(
+            name, ["marketing"], _llm(profile=profile))
+        assert "visual_override" in (self._stored(name).get("profile") or {})
+
+    def test_missing_vs_empty_only_for_missing_equiv_fields(self, brand_ws):
+        """Empty-collapse is field-scoped, not universal: an optional
+        profile field treats absent and [] as the same 'not set' (e2e),
+        while facts compare with missing_equiv=False — a fact's presence
+        is information (an empty proposed fact would still create a row
+        and shadow a same-keyed derived fact).  '' facts can't reach this
+        code e2e anyway — compute_metadata_facts drops empty values — so
+        the fact side is asserted at the contract level."""
+        name = _mk_product(brand_ws)  # no canonical competitors
+        # A real diff alongside forces storage — 'competitors' absent from
+        # the stored profile then proves suppression, not an empty run.
+        profile = json.dumps(
+            {"competitors": [], "differentiators": ["GPS"]})
+        ai_enrichment.generate_proposal(
+            name, ["marketing"], _llm(profile=profile))
+        stored = self._stored(name)
+        assert stored["profile"] == {"differentiators": ["GPS"]}
+        # Field contract: same proposed '' vs absent baseline — outcome is
+        # decided by the field's declared semantics, not a global rule.
+        assert not ai_enrichment._unchanged(
+            "", None, unordered=False, missing_equiv=False)
+        assert ai_enrichment._unchanged(
+            "", None, unordered=False, missing_equiv=True)
+        assert ai_enrichment._unchanged(
+            [], None, unordered=True, missing_equiv=True)
+
+    def test_explicit_empty_against_non_empty_is_reviewable(self, brand_ws):
+        """Proposing to clear a populated field is a real diff — never a
+        silent no-op."""
+        name = _mk_product(brand_ws)
+        self._profile_canonical(name, differentiators=["GPS"])
+        profile = json.dumps({"differentiators": []})
+        facts = json.dumps({"summary": "", "category": "",
+                            "derived_facts": {}})
+        ai_enrichment.generate_proposal(
+            name, ["facts", "marketing"], _llm(facts=facts, profile=profile))
+        stored = self._stored(name)
+        assert "differentiators" in (stored.get("profile") or {})
+        assert "summary" in stored  # 'seed summary' vs proposed ''
+
+    def test_nested_empty_key_is_significant(self, brand_ws):
+        """Inside a structured value, an empty-valued key is real content —
+        {"avoid": [...], "style": ""} is not the same as {"avoid": [...]}."""
+        name = _mk_product(brand_ws)
+        self._profile_canonical(name, visual_override={"avoid": ["red"]})
+        profile = json.dumps(
+            {"visual_override": {"avoid": ["red"], "style": ""}})
+        ai_enrichment.generate_proposal(
+            name, ["marketing"], _llm(profile=profile))
+        assert "visual_override" in (self._stored(name).get("profile") or {})
+
+    # --- summary / category scalars --------------------------------------
+
+    def test_identical_summary_category_suppressed(self, brand_ws):
+        facts = json.dumps({"summary": "seed summary", "category": "",
+                            "derived_facts": {}})
+        self._gen(brand_ws, facts=facts)
+        stored = self._stored("P1")
+        assert "summary" not in stored and "category" not in stored
+
+    def test_empty_proposal_vs_missing_canonical_suppressed(self, brand_ws):
+        """Proposed '' against canonical '' is not a change."""
+        name = _mk_product(brand_ws)
+        rec = product_db.load(name)
+        rec["metadata"]["summary"] = ""
+        product_db.save(name, rec)
+        # A real diff elsewhere keeps the proposal stored — the empty-vs-
+        # empty fields must still be suppressed from it.
+        facts = json.dumps({"summary": "", "category": "", "derived_facts": {
+            "battery": {"label": "แบตเตอรี่", "value": "999mAh"}}})
+        ai_enrichment.generate_proposal(name, ["facts"], _llm(facts))
+        stored = self._stored(name)
+        assert stored["facts"]["battery"]["value"] == "999mAh"
+        assert "summary" not in stored and "category" not in stored
+
+    # --- AI omitting an existing field is never a deletion ----------------
+
+    def test_omitted_canonical_field_is_not_deleted(self, brand_ws):
+        name = _mk_product(brand_ws)
+        self._profile_canonical(name, facts={"warranty": "2 ปี"})
+        # AI proposes nothing for 'warranty' — silence ≠ delete.
+        facts = json.dumps({"summary": "", "category": "", "derived_facts": {
+            "battery": {"label": "แบตเตอรี่", "value": "750mAh"}}})
+        p = ai_enrichment.generate_proposal(name, ["facts"], _llm(facts))
+        assert "warranty" not in (p.get("facts") or {})
+        # Resolve everything proposed — warranty survives untouched.
+        out = ai_enrichment.resolve_proposal(name, p["proposal_id"], [
+            {"kind": "fact", "key": "battery", "action": "keep"}])
+        assert out["remaining"] == 0
+        eff = product_db.get_effective_facts(name)
+        assert eff["warranty"]["value"] == "2 ปี"
+
+    # --- the empty-diff outcome: successful no_changes -------------------
+
+    def test_all_unchanged_yields_no_changes_not_proposal(self, brand_ws):
+        facts = json.dumps({
+            "summary": "seed summary", "category": "",
+            "derived_facts": {
+                "battery": {"label": "แบตเตอรี่", "value": "770mAh"}}})
+        name = _mk_product(brand_ws)
+        ai_enrichment.generate_proposal(name, ["facts"], _llm(facts))
+        rec = product_db.load(name)
+        assert "ai_proposal" not in rec, "an empty diff must not pend review"
+        assert rec["ai_enrichment"]["status"] == "no_changes"
+        # The view-model agrees — no empty checklist reaches the UI.
+        view = ai_enrichment.get_proposal_view(name)
+        assert view["proposal"] is None
+        assert view["ai_enrichment"]["status"] == "no_changes"
+        # Canonical byte-identical — generation never wrote anything.
+        assert rec["derived_facts"]["battery"]["value"] == "770mAh"
+        assert rec["metadata"]["summary"] == "seed summary"
+        # No pending proposal → a rerun needs no replace=True.
+        ai_enrichment.generate_proposal(name, ["facts"], _llm(facts))
+
+    def test_no_changes_replaces_prior_pending_proposal(self, brand_ws):
+        """A consented rerun that finds nothing new consumes the stale
+        pending review it replaced — it cannot resurrect it."""
+        name = _mk_product(brand_ws)
+        p1 = self._gen(brand_ws)
+        assert p1["proposal_id"]
+        same = json.dumps({
+            "summary": "seed summary", "category": "",
+            "derived_facts": {
+                "battery": {"label": "แบตเตอรี่", "value": "770mAh"}}})
+        ai_enrichment.generate_proposal(
+            name, ["facts"], _llm(facts=same), replace=True)
+        rec = product_db.load(name)
+        assert "ai_proposal" not in rec
+        assert rec["ai_enrichment"]["status"] == "no_changes"
+
+    def test_proposal_state_isolated_between_brands(self, brand_ws, tmp_path):
+        """ai_proposal lives under the brand state root — a different brand
+        (same user) with the same product id sees no proposal."""
+        from src.brand_registry import BrandRegistry
+        from src.workspace_context import (
+            WorkspaceContext, reset_workspace, set_workspace)
+        name = _mk_product(brand_ws)
+        self._gen(brand_ws)
+        assert self._stored(name).get("proposal_id")
+        uid, root = brand_ws["user_id"], brand_ws["project_root"]
+        brand_b = BrandRegistry(user_id=uid, project_root=root).create("BrandB")
+        token = set_workspace(WorkspaceContext.for_brand(
+            uid, brand_b["brand_id"], root))
+        try:
+            other = product_db.load(name)
+            assert other is None or not other.get("ai_proposal")
+        finally:
+            reset_workspace(token)
+
+    def test_suppression_preserves_baseline_for_drift_checks(self, brand_ws):
+        """Baseline still snapshots every canonical field — suppression only
+        trims what the user is asked to review."""
+        name = _mk_product(brand_ws)
+        facts = json.dumps({
+            "summary": "seed summary", "category": "",
+            "derived_facts": {
+                "battery": {"label": "แบตเตอรี่", "value": "750mAh"},
+                "screen": {"label": "หน้าจอ", "value": "1.4 inch"}}})
+        p = ai_enrichment.generate_proposal(name, ["facts"], _llm(facts))
+        assert p["baseline"]["summary"] == "seed summary"
+        assert p["baseline"]["facts"]["battery"] == "770mAh"
+        # 'screen' is a new fact — it lands under its label key, the only
+        # reviewable diff alongside the changed battery.
+        assert set(self._stored(name)["facts"]) == {"battery", "หน้าจอ"}
+
+
 class TestViewModel:
     def test_proposal_view_has_current_for_diff(self, brand_ws):
         name = _mk_product(brand_ws)

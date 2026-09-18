@@ -535,3 +535,84 @@ def test_fact_field_relabel_rekeys_effective(_ctx):
     # tombstones accumulate, they are not overwritten by the next edit.
     assert "bad_field" not in eff, (
         "a prior field deletion must persist across later saves")
+
+
+# ---------------------------------------------------------------------------
+# 4. AI enrichment — changed-only proposals (deterministic suppression)
+# ---------------------------------------------------------------------------
+# The fixture FakeLLM returns {"summary": "s", "category": "c",
+# "derived_facts": {}} for every call — facts scope proposes exactly those
+# two scalars.  Seeding canonical metadata lets each test control which
+# fields land as real diffs without any model involvement.
+
+def _seed_product_record(env, product, metadata, raw_text="spec text"):
+    """Seed a product record + data dir inside the fixture brand workspace."""
+    brand_root = env["brand_root"]
+    pdir = brand_root / "data" / product
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "spec.txt").write_text(raw_text, encoding="utf-8")
+    from src import product_db
+    from src.workspace_context import WorkspaceContext, set_workspace
+    set_workspace(WorkspaceContext.for_brand(
+        env["server"]["user_id"], env["bid"], env["server"]["tmp"]))
+    try:
+        product_db.save(product, {
+            "files": [{"name": "spec.txt", "path": "spec.txt",
+                       "type": "text", "status": "ready"}],
+            "raw_text": raw_text,
+            "metadata": metadata,
+            "derived_facts": {},
+        })
+    finally:
+        set_workspace(None)
+
+
+def _run_ai_enrich(page, product):
+    """Open PD → AI dialog → facts scope only → เริ่มใช้ AI."""
+    _open_pd(page, product)
+    page.evaluate("() => { if (typeof pdAiClose === 'function') pdAiClose(); }")
+    page.locator("#pd-body button", has_text="เติมข้อมูลด้วย AI").click()
+    page.wait_for_selector("#pd-ai-overlay.visible #pd-ai-scope-facts")
+    page.uncheck("#pd-ai-scope-marketing")
+    page.locator("#pd-ai-body button", has_text="เริ่มใช้ AI").click()
+
+
+def test_enrich_all_unchanged_shows_no_changes_not_checklist(_ctx):
+    """FakeLLM echoes canonical summary/category verbatim — the result is a
+    successful no_changes state, never an empty approval checklist."""
+    page = _ctx["page"]
+    prod = "AIEchoAll"
+    _seed_product_record(_ctx, prod, {"summary": "s", "category": "c"})
+    _run_ai_enrich(page, prod)
+    page.wait_for_selector(
+        "#pd-ai-body >> text=ไม่พบข้อมูลใหม่", timeout=10000)
+    assert page.query_selector_all("#pd-ai-body .pd-ai-row") == []
+    view = page.evaluate(
+        "p => fetch('/api/product_ai/' + encodeURIComponent(p) + '/proposal')"
+        ".then(r => r.json())", prod)
+    assert view["proposal"] is None
+    assert view["ai_enrichment"]["status"] == "no_changes"
+    # Canonical untouched by the run.
+    info = page.evaluate(
+        "p => fetch('/api/product_info/' + encodeURIComponent(p))"
+        ".then(r => r.json())", prod)
+    assert info["summary"] == "s"
+
+
+def test_enrich_shows_only_changed_fields(_ctx):
+    """summary identical → suppressed; category different → the only row
+    the user is asked to approve."""
+    page = _ctx["page"]
+    prod = "AIEchoPartial"
+    _seed_product_record(_ctx, prod, {"summary": "s", "category": ""})
+    _run_ai_enrich(page, prod)
+    page.wait_for_selector("#pd-ai-body .pd-ai-row", timeout=10000)
+    rows = page.query_selector_all("#pd-ai-body .pd-ai-row")
+    assert len(rows) == 1, (
+        f"expected only the changed field, got {len(rows)} rows")
+    labels = page.evaluate("""() =>
+      [...document.querySelectorAll('#pd-ai-body [data-kind]')]
+        .map(h => h.getAttribute('data-kind') + ':' + h.getAttribute('data-key'))""")
+    assert labels == ["category:category"]
+    # The suppressed identical summary never reaches the DOM.
+    assert not page.query_selector("#pd-ai-body [data-kind='summary']")
