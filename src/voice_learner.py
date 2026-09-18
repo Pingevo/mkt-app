@@ -24,6 +24,8 @@ from typing import Any
 
 import httpx
 
+from .llm_client import bounded_reasoning
+
 
 # จำกัดขนาด content จาก URL (ป้องกัน abuse + token เยอะ)
 MAX_URL_CONTENT_LENGTH = 5000
@@ -104,6 +106,7 @@ def _run_llm_json(
                 max_tokens=4096,
                 stream=False,
                 response_format=response_format,
+                reasoning=bounded_reasoning(None, 4096),
                 source=source,
             )
             clean = raw.strip()
@@ -395,6 +398,7 @@ def analyze_video_style(
             max_tokens=2048,
             stream=False,
             response_format=response_format,
+            reasoning=bounded_reasoning(None, 2048),
             source="voice_learner.analyze_video_style",
         )
         clean = raw.strip()

@@ -26,6 +26,8 @@ from typing import Any, Callable
 
 import yaml
 
+from .llm_client import bounded_reasoning
+
 
 # ------------------------------------------------------------------
 #  Paths & config
@@ -345,6 +347,7 @@ def _default_tagger(file_path: Path, ftype: str, config: dict, llm) -> dict:
             temperature=tag_cfg.get("temperature", 0.2),
             max_tokens=tag_cfg.get("max_tokens", 1024),
             stream=False,
+            reasoning=bounded_reasoning(tag_cfg, tag_cfg.get("max_tokens", 1024)),
             source="asset_library.tag",
         )
         # parse JSON — strip markdown code blocks ถ้ามี (แบบเดียวกับ select_product_auto)
@@ -418,6 +421,7 @@ def _summarize_text(file_path: Path, config: dict, llm) -> dict:
             temperature=tag_cfg.get("temperature", 0.2),
             max_tokens=tag_cfg.get("max_tokens", 1024),
             stream=False,
+            reasoning=bounded_reasoning(tag_cfg, tag_cfg.get("max_tokens", 1024)),
             source="asset_library.tag",
         )
         text_resp = resp.strip() if isinstance(resp, str) else str(resp)

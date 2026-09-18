@@ -40,7 +40,7 @@ from . import product_db
 from .brand_loader import load_product_profile
 from .config_loader import _project_root
 from .file_loader import load_file, load_table_rows
-from .llm_client import LLMClient
+from .llm_client import LLMClient, bounded_reasoning
 
 
 def _project_root() -> Path:
@@ -374,6 +374,7 @@ def extract_video_frames(file_path: Path, config: dict, llm: LLMClient | None = 
                     temperature=ing_cfg.get("temperature", 0.3),
                     max_tokens=ing_cfg.get("max_tokens_description", 1024),
                     stream=False,
+                    reasoning=bounded_reasoning(ing_cfg, ing_cfg.get("max_tokens_description", 1024)),
                     source="ingestion.describe_video_frames",
                 )
             except Exception as e:
@@ -1432,15 +1433,22 @@ def compute_metadata_facts(
             },
         },
     }
+    # Bound reasoning budget — on thinking models reasoning tokens count inside
+    # max_tokens; unbounded reasoning starves the structured output (observed:
+    # finish_reason=length with 1893/2033 tokens spent on reasoning).
+    _reasoning_budget = ing_cfg.get("reasoning_max_tokens_summary")
     response = llm.chat(
         messages,
         model=ing_cfg.get("model", "google/gemini-3.8-flash"),
         temperature=ing_cfg.get("temperature", 0.3),
-        max_tokens=ing_cfg.get("max_tokens_summary", 512),
+        max_tokens=ing_cfg.get("max_tokens_summary", 2048),
         stream=False,
         response_format=response_format,
+        reasoning={"max_tokens": _reasoning_budget} if _reasoning_budget else None,
         source="ingestion.metadata_summary",
     )
+    if getattr(llm, "last_truncated", False) is True:
+        raise ValueError("AI ตอบกลับไม่ครบถ้วนเนื่องจากข้อความยาวเกินกำหนด กรุณากดลองใหม่")
     # Parse JSON response (with markdown fence stripping — some models wrap
     # even with response_format, per product_segmentation comment)
     import json as _json

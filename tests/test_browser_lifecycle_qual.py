@@ -1436,14 +1436,21 @@ class TestJourneyD:
                 # --- facts: manual only (free import has no AI facts) -------
                 page.locator(".pd-section").first.locator(
                     "text=แก้ไข").click()
-                page.wait_for_selector("#pd-body >> text=+ เพิ่มข้อมูล",
-                                       timeout=10000)
-                page.click("#pd-body >> text=+ เพิ่มข้อมูล")
-                page.wait_for_selector("#pd-facts-container .pd-fact-row",
-                                       timeout=10000)
+                add_input = page.locator("#pd-body .pillar-keyword-add input")
+                add_input.wait_for(state="visible", timeout=10000)
+                rows_before = page.evaluate(
+                    "document.querySelectorAll("
+                    "'#pd-facts-container .pd-fact-row').length")
+                add_input.fill("color")
+                add_input.press("Enter")
+                page.wait_for_function(
+                    "document.querySelectorAll("
+                    "'#pd-facts-container .pd-fact-row').length"
+                    f" === {rows_before + 1}", timeout=10000)
                 last = page.locator(
                     "#pd-facts-container .pd-fact-row").last
-                last.locator(".pd-fact-label").fill("color")
+                if last.locator(".pd-fact-label").input_value() != "color":
+                    failures.append("chip add did not prefill label 'color'")
                 last.locator(".pd-fact-val").fill("purple")
                 page.click("#pd-body >> button:text-is('บันทึก')")
                 page.wait_for_selector("#pd-facts-container", state="detached",
@@ -1644,6 +1651,11 @@ class TestJourneyD:
                     failures.append("no source file ⋯ menu in PD")
 
                 # --- delete product through PD ⋯ menu ------------------------
+                # Sentinel sibling proves delete removes only the chosen
+                # product — seeded here so D stands alone (QualWatch Alpha
+                # is created by Journey B and is absent in subset runs).
+                sentinel = server.brand_data(uid, a1) / "D Sibling Sentinel"
+                sentinel.mkdir(parents=True, exist_ok=True)
                 page.click("button[onclick='_pdToggleMenu()']")
                 page.click("#pd-menu >> text=ลบสินค้า")
                 page.wait_for_selector("#product-detail-view",

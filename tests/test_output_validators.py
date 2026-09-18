@@ -427,3 +427,35 @@ def test_citation_provenance_normalizes_allowed_set():
     allowed = {"https://Example.com/Page/"}
     ok, err = validate_citation_provenance(output, allowed)
     assert ok is True, f"allowed set normalization failed: {err}"
+
+
+def test_citation_provenance_percent_encoded_url_matches():
+    """Percent-encoded citation ≡ raw UTF-8 evidence URL — same resource.
+
+    Live defect: the model cited the product's own source page in
+    percent-encoded form (``%E0%B8%99...``) while provenance stored the raw
+    UTF-8 form → exact-string match rejected a legitimate citation.
+    """
+    raw = "https://www.thaisuperphone.com/product/44672/นาฬิกาเด็ก-lagenio-watch-phone-k5"
+    encoded = "https://www.thaisuperphone.com/product/44672/%E0%B8%99%E0%B8%B2%E0%B8%AC%E0%B8%B4%E0%B8%81%E0%B8%B2%E0%B9%80%E0%B8%94%E0%B9%87%E0%B8%81-lagenio-watch-phone-k5"
+    output = f"See [source]({encoded})."
+    ok, err = validate_citation_provenance(output, {raw})
+    assert ok is True, f"percent-encoding equivalence failed: {err}"
+
+
+def test_citation_provenance_bare_url_trailing_punctuation():
+    """A bare URL followed by ')' or '.' is still the same URL — the sibling
+    extractor in campaign_validator already rstrips these; parity required."""
+    output = "แหล่งอ้างอิง (https://example.com/product/44672)."
+    allowed = {"https://example.com/product/44672"}
+    ok, err = validate_citation_provenance(output, allowed)
+    assert ok is True, f"trailing-punctuation normalization failed: {err}"
+
+
+def test_citation_provenance_fabricated_url_still_rejected():
+    """Normalization must not weaken grounding — fabricated URLs still fail."""
+    output = "See [fake](https://evil.com/product/99999) and [real](https://example.com/a)."
+    allowed = {"https://example.com/a"}
+    ok, err = validate_citation_provenance(output, allowed)
+    assert ok is False
+    assert "evil.com" in err

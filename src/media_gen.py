@@ -99,6 +99,7 @@ def _paths_to_input_references(paths: list[str]) -> list[dict]:
 
 
 from .config_loader import get_env
+from .llm_client import bounded_reasoning
 
 
 # ---------------------------------------------------------------------------
@@ -976,6 +977,7 @@ def _rewrite_prompt_with_llm(
             temperature=float(mcfg.get("retry_temperature", 0.3)),
             max_tokens=int(mcfg.get("retry_max_tokens", 1024)),
             stream=False,
+            reasoning=bounded_reasoning(mcfg, int(mcfg.get("retry_max_tokens", 1024))),
             source="media_gen.rewrite_prompt",
         )
         new_prompt = new_prompt.strip().strip('"').strip("'").strip()

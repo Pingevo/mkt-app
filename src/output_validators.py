@@ -416,14 +416,17 @@ def validate_brand_hard(output: str, brand_rules: BrandRules) -> tuple[bool, str
 
 
 def _normalize_url(url: str) -> str:
-    """Normalize a URL for provenance comparison: lowercase + strip trailing slash.
+    """Normalize a URL for provenance comparison.
 
     This is the single source of truth for URL normalization in citation
     provenance checks. Both the output URLs and the allowed set are
-    normalized through this function so trailing slashes and case
-    differences do not cause false positives.
+    normalized through this function so equivalent forms of the same resource
+    do not cause false positives: percent-encoding (``%E0%B8%99`` ≡ raw UTF-8),
+    Unicode normalization (NFC), case, and trailing slash.
     """
-    return url.lower().rstrip("/")
+    import unicodedata
+    from urllib.parse import unquote
+    return unicodedata.normalize("NFC", unquote(url)).lower().rstrip("/")
 
 
 def validate_citation_provenance(output: str, allowed_urls: set[str]) -> tuple[bool, str]:
@@ -459,7 +462,7 @@ def validate_citation_provenance(output: str, allowed_urls: set[str]) -> tuple[b
     # Extract bare URLs from text with markdown links removed, so bare URL
     # regex does not match URLs inside markdown link parentheses.
     text_without_md_links = _MD_LINK_RE.sub("", output)
-    bare_urls = {m.group(0) for m in _BARE_URL_RE.finditer(text_without_md_links)}
+    bare_urls = {m.group(0).rstrip(".,;:!?()[]{}\"'") for m in _BARE_URL_RE.finditer(text_without_md_links)}
 
     cited_urls = md_urls | bare_urls
 

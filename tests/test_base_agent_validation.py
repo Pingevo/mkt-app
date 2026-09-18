@@ -354,3 +354,49 @@ def test_citation_provenance_is_soft_accept():
     remaining violation after 1 repair is soft-accepted, not raised."""
     from src.agents.base_agent import _SOFT_ACCEPT_CATEGORIES
     assert "grounding" in _SOFT_ACCEPT_CATEGORIES
+
+
+# ---------------------------------------------------------------------------
+# Product-source provenance in citation grounding (live defect 2026-09-17:
+# campaign_strategy rejected the product's own source URL as unknown evidence)
+# ---------------------------------------------------------------------------
+
+def _web_search_agent(source_urls):
+    cfg = _config()
+    cfg["web_search"] = True
+    cfg["strict_output_sections"] = False
+    agent = DummyAgent(cfg, FakeLLM(["unused"]))
+    agent._product_source_urls = set(source_urls)
+    return agent
+
+
+def test_product_source_url_accepted_in_citation_check():
+    """A citation to the selected product's own source URL is legitimate
+    provenance → must pass grounding."""
+    agent = _web_search_agent({"https://shop.example.com/product/1"})
+    ok, err = agent.validate_output("ข้อมูลจาก [แหล่งสินค้า](https://shop.example.com/product/1)")
+    assert ok is True, f"product source URL rejected: {err}"
+
+
+def test_fabricated_url_still_rejected_with_source_urls_present():
+    """Fabricated/unseen URLs still fail even when product provenance exists."""
+    agent = _web_search_agent({"https://shop.example.com/product/1"})
+    ok, err = agent.validate_output("ข้อมูลจาก [ปลอม](https://evil.example/fake)")
+    assert ok is False
+    assert "grounding" in err
+
+
+def test_web_search_evidence_url_still_accepted():
+    """Web-search annotations continue to be authorized alongside provenance."""
+    agent = _web_search_agent({"https://shop.example.com/product/1"})
+    agent._last_annotations = [{"url": "https://news.example/article"}]
+    ok, err = agent.validate_output("ข้อมูลจาก [ข่าว](https://news.example/article)")
+    assert ok is True, f"web-search evidence rejected: {err}"
+
+
+def test_other_product_source_url_not_authorized():
+    """Cross-product isolation: product B's source URL is not authorized
+    when only product A's provenance is in scope."""
+    agent = _web_search_agent({"https://shop.example.com/product/A"})
+    ok, err = agent.validate_output("ข้อมูลจาก [อื่น](https://shop.example.com/product/B)")
+    assert ok is False

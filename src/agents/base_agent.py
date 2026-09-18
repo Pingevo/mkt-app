@@ -402,6 +402,9 @@ class BaseAgent:
             lines.append(f"- {label}")
         lines.extend([
             "ห้ามสร้างข้อเท็จจริงที่ไม่มีในข้อมูลที่ให้มาหรือไม่ได้ค้นคว้าพร้อมหลักฐาน",
+            "หลักฐานจากภาพสินค้า (ถ้ามีภาพแนบ) รองรับเฉพาะสิ่งที่มองเห็นได้โดยตรงจากภาพ "
+            "— ห้ามอนุมานความสามารถหรือฟังก์ชันจากภาพเพียงอย่างเดียว "
+            "ถ้าไม่มีหลักฐานข้อความยืนยัน ให้เขียนเฉพาะสิ่งที่เห็นในภาพจริง",
             "ถ้าไม่มีข้อมูล ให้ระบุว่า 'ไม่มีข้อมูลระบุ'",
             "--- สิ้นสุดนโยบายข้อมูลต้นทาง ---",
         ])
@@ -532,9 +535,11 @@ class BaseAgent:
                 tools=tools,
                 response_format=response_format,
                 provider=provider,
+                reasoning=self._reasoning(self.config.get("max_tokens", 4096)),
                 source=f"{self.agent_name}.generate",
                 return_annotations=True,
             )
+            generate_truncated = getattr(self.llm, "last_truncated", False) is True
             # Preserve raw web-search evidence for downstream review.
             self._last_annotations = list(annotations or [])
             # แปะ URL จริงจาก citations + verify ถ้าเปิด
@@ -556,8 +561,10 @@ class BaseAgent:
                 stream=self.config.get("stream", True),
                 response_format=response_format,
                 provider=provider,
+                reasoning=self._reasoning(self.config.get("max_tokens", 4096)),
                 source=f"{self.agent_name}.generate",
             )
+            generate_truncated = getattr(self.llm, "last_truncated", False) is True
 
         # --- Phase 2: Blank check — ตรวจ generate ว่างก่อนเรียก reviewer ---
         # ถ้า generate คืนว่าง → ไม่เรียก reviewer เลย เพราะ reviewer ไม่มี source
@@ -578,8 +585,10 @@ class BaseAgent:
         # --- Phase 3: Review & Refine (optional) ---
         # ถ้า max_review_iterations > 0 → สั่ง LLM ตรวจงานตัวเองรอบที่ 2
         # ถ้า = 0 → agent ตรวจเองในการเรียกครั้งเดียว (self-check ใน system_prompt)
+        # generate ที่ถูกตัด (finish_reason=length) ไม่เข้า review — draft ไม่ครบ
+        # ตรวจต่อเปลือง tokens แล้วยังเสี่ยง reviewer เติมของปลอม ให้เข้า repair แทน
         max_review = self.config.get("max_review_iterations", 1)
-        if max_review and max_review > 0:
+        if max_review and max_review > 0 and not generate_truncated:
             instruction_block = self._format_instructions()
             try:
                 reviewed = self._review_and_refine(
@@ -626,6 +635,11 @@ class BaseAgent:
         # get 1 repair then accept; format errors keep existing max_retry_limit.
         max_repair = self.config.get("max_retry_limit", 3)
         ok, error = self.validate_output(output)
+        # generate ถูกตัด (finish_reason=length) → ไม่นับเป็น output สำเร็จแม้ผ่าน validator
+        # บังคับเข้า bounded repair loop — ถ้าซ่อมไม่ได้จะ raise ตาม budget เดิม
+        if generate_truncated:
+            ok = False
+            error = "model ตอบกลับไม่ครบ (finish_reason=length) — output ถูกตัดกลางทาง"
         # บันทึก draft ก่อน repair เพื่อ acceptance diagnostics
         self._last_draft_output = output
         self._last_first_validation_error = error if not ok else ""
@@ -651,6 +665,12 @@ class BaseAgent:
             console.print(f"[yellow]output ไม่ผ่าน validation: {error}[/yellow]")
             repair_error = error
             repaired = self._repair_output(output, error, messages, response_format)
+            # repair ที่ถูกตัด → ไม่รับ output ไม่ครบ — ล้มเหลวแบบอ่านได้ พร้อม error เดิม
+            if getattr(self.llm, "last_truncated", False) is True:
+                raise ValueError(
+                    f"Agent {self.agent_name} ซ่อม output ไม่สำเร็จ: "
+                    f"model ตอบกลับไม่ครบ (finish_reason=length) — error เดิม: {repair_error}"
+                )
             if _output_is_blank(repaired):
                 raise ValueError(
                     f"Agent {self.agent_name} ซ่อม output ไม่สำเร็จ: "
@@ -670,6 +690,11 @@ class BaseAgent:
         if isinstance(content, list):
             console.print(f"[dim]ส่งรูปจริง {len(content) - 1} รูปให้ LLM vision ({self.display_name})[/dim]")
         return content
+
+    def _reasoning(self, max_tokens: int) -> dict | None:
+        """Bounded thinking budget for an Agent LLM call — see bounded_reasoning."""
+        from ..llm_client import bounded_reasoning
+        return bounded_reasoning(self.config, max_tokens)
 
 
 
@@ -696,6 +721,7 @@ class BaseAgent:
                     max_retry_limit=self.config.get("max_retry_limit", 3),
                     stream=False,
                     tools=fetch_tools,
+                    reasoning=self._reasoning(int(cfg.get("execution_max_tokens", 1500))),
                     source=f"{self.agent_name}.fetch",
                 )
                 if page_text and len(page_text.strip()) > 20:
@@ -975,8 +1001,14 @@ class BaseAgent:
                 max_retry_limit=self.config.get("max_retry_limit", 3),
                 stream=self.config.get("stream", True),
                 response_format=response_format,
+                reasoning=self._reasoning(self.config.get("max_tokens", 4096)),
                 source=f"{self.agent_name}.review",
             )
+
+            # review ที่ถูกตัด (finish_reason=length) ไม่ใช่การตรวจสำเร็จ —
+            # raise เพื่อให้ caller คืน draft พร้อม warning แทนการรับ output ไม่ครบ
+            if getattr(self.llm, "last_truncated", False) is True:
+                raise ValueError("reviewer ตอบกลับไม่ครบ (finish_reason=length)")
 
             # Early termination: ถ้า LLM คืนของเดิม (ไม่มีการแก้) → ผ่านแล้ว หยุด
             if refined.strip() == output.strip():
@@ -1037,6 +1069,9 @@ class BaseAgent:
                 if url:
                     allowed_urls.add(url)
             allowed_urls |= getattr(self, "_selected_evidence_urls", set()) or set()
+            # Selected product's own source URLs (from source_import provenance)
+            # are legitimate evidence — set by the orchestrator for this run only.
+            allowed_urls |= getattr(self, "_product_source_urls", set()) or set()
             ok, error = validate_citation_provenance(output, allowed_urls)
             if not ok:
                 return ok, error
@@ -1087,6 +1122,7 @@ class BaseAgent:
             max_retry_limit=self.config.get("max_retry_limit", 3),
             stream=self.config.get("stream", True),
             response_format=response_format,
+            reasoning=self._reasoning(self.config.get("max_tokens", 4096)),
             source=f"{self.agent_name}.repair",
         )
 
@@ -1205,6 +1241,25 @@ class BaseAgent:
                 f"--- สิ้นสุด UI Options ---"
             )
 
+        # Product images are legitimate evidence — but only for claims they
+        # can directly establish (observable-vs-inferred contract).  They ride
+        # inside THIS grounding call as multimodal content — no extra call.
+        product_image_paths = list(
+            runtime_context.get("product_image_paths") or [])
+        image_rules = ""
+        if product_image_paths:
+            image_rules = (
+                "\nกฎหลักฐานภาพ (product images แนบในข้อความ user — "
+                "ภาพจริงของสินค้าที่เลือกเท่านั้น):\n"
+                "- ภาพรองรับเฉพาะ claim ที่มองเห็นได้โดยตรงจากภาพ: "
+                "สี ปุ่ม/ปุ่มกด พอร์ต เลย์เอาต์หน้าจอ ไอคอนที่ปรากฏ "
+                "บรรจุภัณฑ์/อุปกรณ์ หรือข้อความที่พิมพ์อยู่ในภาพ\n"
+                "- ห้ามอนุมานความสามารถ/ฟังก์ชัน/ประสิทธิภาพจากภาพเพียงอย่างเดียว — "
+                "สิ่งที่เห็นในภาพรองรับ claim ว่า 'เห็น X ในภาพ' เท่านั้น "
+                "ไม่ใช่ 'มีฟังก์ชัน X' เว้นแต่หลักฐานข้อความ/structured ยืนยัน\n"
+                "- การมีภาพแนบไม่ได้ทำให้ claim มีฐานโดยอัตโนมัติ\n"
+            )
+
         context_block = "\n\n".join(sections)
 
         system_prompt = (
@@ -1220,16 +1275,26 @@ class BaseAgent:
             "4. Quick Brief ควบคุมงานที่ขอ — ไม่สามารถสร้าง fact หรือ offer ได้\n"
             "5. ถ้าไม่แน่ใจว่า claim มีฐานหรือไม่ → ถือว่าไม่มีฐาน\n"
             "6. CTA ที่อ้างถึง offer/โปรโมชั่นที่ user ไม่ได้ระบุ = unsupported claim\n"
-            "7. inference/recommendation ที่ไม่อ้างเป็น fact = ผ่าน\n\n"
+            "7. inference/recommendation ที่ไม่อ้างเป็น fact = ผ่าน\n"
+            f"{image_rules}\n"
             f"{context_block}\n\n"
             "คืน JSON ตาม schema"
         )
 
         user_prompt = f"ตรวจงานสุดท้ายนี้:\n\n{final_text}"
+        if product_image_paths:
+            user_prompt += (
+                "\n\n(แนบภาพสินค้าจริงของสินค้าที่เลือก — "
+                "ใช้เป็นหลักฐานได้เฉพาะสิ่งที่มองเห็นได้โดยตรงจากภาพตามกฎข้างต้น)"
+            )
+        user_content = (
+            self._build_multimodal_content(user_prompt, product_image_paths)
+            if product_image_paths else user_prompt
+        )
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "user", "content": user_content},
         ]
 
         response_format = {
@@ -1251,6 +1316,7 @@ class BaseAgent:
                 max_tokens=2048,
                 stream=False,
                 response_format=response_format,
+                reasoning=self._reasoning(2048),
                 source=f"{self.agent_name}.final_grounding_check",
             )
         except Exception:
@@ -1265,7 +1331,7 @@ class BaseAgent:
             return {"grounded": False, "unsupported_claims": [], "error": "empty_response"}
 
         # Truncated response → fail closed.
-        if getattr(self.llm, "last_truncated", False):
+        if getattr(self.llm, "last_truncated", False) is True:
             return {"grounded": False, "unsupported_claims": [], "error": "truncated"}
 
         # Strip code fences if present

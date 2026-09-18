@@ -148,3 +148,85 @@ def test_save_uploaded_files_skips_dotfiles(_pdb, tmp_path):
     ])
 
     assert saved == ["real.txt"]
+
+
+# ------------------------------------------------------------------
+#  is_ready / get_ready_products — รองรับทั้ง STATUS_READY และ STATUS_STALE
+# ------------------------------------------------------------------
+
+def test_is_ready_and_get_ready_products_accept_stale_product(_pdb, tmp_path):
+    """สินค้าสถานะ stale (มีข้อมูลเดิม รอ re-ingest) ต้องถือว่าพร้อมใช้สำหรับ Agents."""
+    product_db = _pdb
+
+    # 1. Product ready
+    p1 = "ProdReady"
+    (tmp_path / "data" / p1).mkdir(parents=True)
+    rec1 = product_db.load(p1)
+    rec1["status"] = product_db.STATUS_READY
+    rec1["raw_text"] = "Ready specs"
+    product_db.save(p1, rec1)
+
+    # 2. Product stale
+    p2 = "ProdStale"
+    (tmp_path / "data" / p2).mkdir(parents=True)
+    rec2 = product_db.load(p2)
+    rec2["status"] = product_db.STATUS_STALE
+    rec2["raw_text"] = "Stale specs but usable"
+    product_db.save(p2, rec2)
+
+    # 3. Product pending / empty
+    p3 = "ProdPending"
+    (tmp_path / "data" / p3).mkdir(parents=True)
+    rec3 = product_db.load(p3)
+    rec3["status"] = product_db.STATUS_PENDING
+    product_db.save(p3, rec3)
+
+    assert product_db.is_ready(p1) is True
+    assert product_db.is_ready(p2) is True
+    assert product_db.is_ready(p3) is False
+
+    ready_list = product_db.get_ready_products()
+    assert p1 in ready_list
+    assert p2 in ready_list
+    assert p3 not in ready_list
+
+
+# ------------------------------------------------------------------
+#  get_product_source_urls — URL provenance for grounding validation
+# ------------------------------------------------------------------
+
+def test_get_product_source_urls_reads_source_import(_pdb, tmp_path):
+    """URL-imported product → its source_import URLs are returned."""
+    product_db = _pdb
+    pid = "source_page"
+    rec = product_db.load(pid)
+    rec["source_import"] = {
+        "original_url": "https://shop.example.com/product/1",
+        "final_url": "https://shop.example.com/product/1-slug",
+        "canonical_url": "https://shop.example.com/product/1-slug",
+        "fetched_via": "static",
+    }
+    product_db.save(pid, rec)
+
+    urls = product_db.get_product_source_urls(pid)
+    assert "https://shop.example.com/product/1" in urls
+    assert "https://shop.example.com/product/1-slug" in urls
+
+
+def test_get_product_source_urls_empty_for_file_import(_pdb, tmp_path):
+    """File-imported product (no source_import) → empty set, no error."""
+    product_db = _pdb
+    product_db.load("file_product")
+    assert product_db.get_product_source_urls("file_product") == set()
+
+
+def test_get_product_source_urls_isolation(_pdb, tmp_path):
+    """Product A's source URL must never appear in product B's set —
+    provenance is per-product, no global fallback."""
+    product_db = _pdb
+    rec_a = product_db.load("prod_a")
+    rec_a["source_import"] = {"original_url": "https://a.example/p/1"}
+    product_db.save("prod_a", rec_a)
+    product_db.load("prod_b")
+
+    assert "https://a.example/p/1" not in product_db.get_product_source_urls("prod_b")

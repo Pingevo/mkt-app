@@ -220,6 +220,90 @@ def test_orchestrator_wires_product_images_to_all_agents(monkeypatch, tmp_path):
     assert "ไม่มีรูปภาพสินค้าส่งมาในรอบนี้" not in product_prompt
 
 
+def test_orchestrator_resolves_stale_product_data_and_images(tmp_path, monkeypatch):
+    """Orchestrator ต้องโหลดข้อมูลและรูปภาพของสินค้าที่สถานะ stale ได้ (stale ใช้ของเก่าได้)."""
+    import src.product_db as product_db
+
+    prod_id = "StaleLagenio"
+    prod_dir = tmp_path / "data" / prod_id
+    prod_dir.mkdir(parents=True)
+    img_file = prod_dir / "watch.jpg"
+    img_file.write_bytes(b"image")
+
+    monkeypatch.setattr(product_db, "_project_root", lambda: tmp_path)
+
+    rec = product_db.load(prod_id)
+    rec["status"] = product_db.STATUS_STALE
+    rec["raw_text"] = "Lagenio K5 Child Smartwatch Specs"
+    rec["files"] = [{"name": "watch.jpg", "path": str(img_file), "type": "image"}]
+    rec["image_descriptions"] = [{"path": str(img_file), "description": "Front view"}]
+    product_db.save(prod_id, rec)
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.config = load_config()
+    orch.product_id = prod_id
+    orch.product_images = []
+
+    data = orch._get_product_data("FALLBACK")
+    assert "Lagenio K5 Child Smartwatch Specs" in data
+    assert data != "FALLBACK"
+
+    images = orch._get_product_image_paths()
+    assert str(img_file) in images
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_orchestrator_wires_selected_product_source_urls(brand_ws):
+    """_make_agent authorizes the selected product's source_import URLs —
+    the grounding contract for URL-imported products."""
+    import src.product_db as product_db
+    from src.agents.product_spec import ProductSpecAgent
+
+    rec = product_db.load("prod_a")
+    rec["source_import"] = {"original_url": "https://a.example/p/1"}
+    product_db.save("prod_a", rec)
+    rec_b = product_db.load("prod_b")
+    rec_b["source_import"] = {"original_url": "https://b.example/p/9"}
+    product_db.save("prod_b", rec_b)
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.config = load_config()
+    orch.brand_dir = "brand"
+    orch.brand_context = None
+    orch.brand_reference = None
+    orch.brand_visual = None
+    orch.brand_rules = None
+    orch.product_id = "prod_a"
+
+    agent = orch._make_agent("product_spec", ProductSpecAgent, FakeLLM())
+    assert "https://a.example/p/1" in agent._product_source_urls
+    # Cross-product isolation: prod_b's source URL is not authorized here
+    assert "https://b.example/p/9" not in agent._product_source_urls
+
+
+def test_orchestrator_multi_product_source_urls_union(brand_ws):
+    """Multi-product run unions each selected product's provenance — still
+    scoped to the run's products only."""
+    import src.product_db as product_db
+    from src.agents.product_spec import ProductSpecAgent
+
+    for pid, url in (("pa", "https://a.example/1"), ("pb", "https://b.example/2"), ("pc", "https://c.example/3")):
+        rec = product_db.load(pid)
+        rec["source_import"] = {"original_url": url}
+        product_db.save(pid, rec)
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.config = load_config()
+    orch.brand_dir = "brand"
+    orch.brand_context = None
+    orch.brand_reference = None
+    orch.brand_visual = None
+    orch.brand_rules = None
+    orch.product_id = "pa + pb"
+
+    agent = orch._make_agent("product_spec", ProductSpecAgent, FakeLLM())
+    assert agent._product_source_urls == {"https://a.example/1", "https://b.example/2"}

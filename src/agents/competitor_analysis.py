@@ -548,6 +548,7 @@ class CompetitorAnalysisAgent(BaseAgent):
             max_retry_limit=1,
             response_format=response_format,
             provider={"require_parameters": True},
+            reasoning=self._reasoning(self.config.get("max_tokens", 4096)),
             source=f"{self.agent_name}.revise",
         )
         return output

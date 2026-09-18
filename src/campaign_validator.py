@@ -155,7 +155,11 @@ def _looks_like_search_or_tag_source(url_or_title: str, non_direct: list[str]) -
 
 
 def _normalize_url(url: str) -> str:
-    return url.lower().rstrip("/")
+    """Canonical form for evidence comparison — percent-decoding and Unicode
+    NFC make encoded/normalized spellings of the same resource equivalent."""
+    import unicodedata
+    from urllib.parse import unquote
+    return unicodedata.normalize("NFC", unquote(url)).lower().rstrip("/")
 
 
 _BASELINE_KEYWORDS = ["baseline", "ค่าฐาน", "ย้อนหลัง", "historical", "actual"]

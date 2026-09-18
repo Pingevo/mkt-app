@@ -203,14 +203,17 @@ def get_all_products() -> list[dict[str, Any]]:
     return products
 
 
+USABLE_STATUSES = (STATUS_READY, STATUS_STALE)
+
+
 def get_ready_products() -> list[str]:
-    """ดึงเฉพาะสินค้าที่พร้อมใช้ (status=ready)."""
-    return [p["product_id"] for p in get_all_products() if p.get("status") == STATUS_READY]
+    """ดึงเฉพาะสินค้าที่พร้อมใช้ (status=ready หรือ stale ที่มีข้อมูลเดิม)."""
+    return [p["product_id"] for p in get_all_products() if p.get("status") in USABLE_STATUSES]
 
 
 def is_ready(product_id: str) -> bool:
-    """เช็คว่าสินค้าพร้อมใช้หรือไม่."""
-    return load(product_id).get("status") == STATUS_READY
+    """เช็คว่าสินค้าพร้อมใช้หรือไม่ (ready หรือ stale ที่มีข้อมูลเดิม)."""
+    return load(product_id).get("status") in USABLE_STATUSES
 
 
 def get_status(product_id: str) -> str:
@@ -698,6 +701,21 @@ def get_product_metadata(product_id: str) -> dict[str, Any]:
         "has_images": meta.get("has_images", False),
         "image_count": meta.get("image_count", 0),
         "status": record.get("status", STATUS_EMPTY),
+    }
+
+
+def get_product_source_urls(product_id: str) -> set[str]:
+    """URL ต้นทางของสินค้าจาก ``source_import`` provenance (URL-imported products).
+
+    คืน set ของ original_url / final_url / canonical_url ที่บันทึกตอน import —
+    เป็น evidence ที่ถูกต้องสำหรับ grounding validator (สินค้าอ้างแหล่งที่มาของ
+    ตัวเองได้เสมอ). สินค้าที่ import จากไฟล์ → set ว่าง. Per-product only —
+    ไม่มี cross-product fallback.
+    """
+    si = load(product_id).get("source_import") or {}
+    return {
+        u for k in ("original_url", "final_url", "canonical_url")
+        if (u := si.get(k))
     }
 
 

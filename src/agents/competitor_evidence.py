@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..llm_client import bounded_reasoning
+
 
 # Schema for OpenRouter /response_format
 # The "field" property is an open string — the model returns whatever
@@ -856,6 +858,7 @@ class SemanticEvidenceReviewer:
                 max_retry_limit=0,  # no retry — one pass only
                 stream=False,
                 tools=None,  # no web tools — no web calls
+                reasoning=bounded_reasoning(self.config, self.config.get("max_tokens", 4096)),
                 source="competitor_analysis.semantic_review",
             )
         except Exception:
@@ -869,7 +872,7 @@ class SemanticEvidenceReviewer:
         # (finish_reason=length), the JSON is likely malformed.  Return None
         # (fail-closed) explicitly rather than relying on json.loads to fail.
         # This is a deterministic check on provider metadata.
-        if getattr(self.llm, "last_truncated", False):
+        if getattr(self.llm, "last_truncated", False) is True:
             return None
 
         # Parse JSON response
@@ -1034,6 +1037,7 @@ class BrandInterpretationPass:
                 max_retry_limit=0,  # no retry — one pass only
                 stream=False,
                 tools=None,  # no web tools — no web calls
+                reasoning=bounded_reasoning(self.config, self.config.get("max_tokens", 2048)),
                 source="competitor_analysis.brand_interpretation",
             )
         except Exception:
@@ -1047,7 +1051,7 @@ class BrandInterpretationPass:
         # explicitly rather than relying on json.loads to fail silently.
         # This is a deterministic check on provider metadata, not a semantic
         # guess about content completeness.
-        if getattr(self.llm, "last_truncated", False):
+        if getattr(self.llm, "last_truncated", False) is True:
             return []
 
         # Parse JSON response

@@ -16,6 +16,8 @@ import json
 import re
 from typing import Any
 
+from .llm_client import bounded_reasoning
+
 
 _REVIEW_SCHEMA = {
     "type": "object",
@@ -155,6 +157,7 @@ def review_script(
             max_tokens=2048,
             stream=False,
             response_format=response_format,
+            reasoning=bounded_reasoning(None, 2048),
             source="script_reviewer.review_script",
         )
         clean = raw.strip()

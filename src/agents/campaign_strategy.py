@@ -7,6 +7,7 @@ from typing import Any
 
 from ..campaign_validator import (
     AuditResult,
+    _normalize_url,
     audit_campaign_output,
     extract_context_flags,
     validate_campaign_output,
@@ -125,7 +126,14 @@ class CampaignStrategyAgent(BaseAgent):
             "competitor_names": [m for m in competitor_models if m],
             "target_text": target_text,
         }
-        self._selected_evidence_urls = context_urls | explicit_urls
+        # Product's own source URLs (source_import provenance) are legitimate
+        # evidence — authorized in the prompt manifest and validator alike.
+        provenance_urls = {
+            _normalize_url(u)
+            for u in getattr(self, "_product_source_urls", set()) or set()
+            if u
+        }
+        self._selected_evidence_urls = context_urls | explicit_urls | provenance_urls
 
     def _assess_source_relevance(self, annotation: dict[str, Any]) -> dict[str, Any]:
         """Offline relevance gate for web-search annotations.
@@ -256,6 +264,13 @@ class CampaignStrategyAgent(BaseAgent):
             relevant = raw
         self._selected_evidence = list(relevant)
         self._selected_evidence_urls = {a.get("url", "").lower().rstrip("/") for a in self._selected_evidence if a.get("url")}
+        # Product source provenance survives the post-search re-derivation —
+        # it is authorized evidence independent of web-search hits.
+        self._selected_evidence_urls |= {
+            _normalize_url(u)
+            for u in getattr(self, "_product_source_urls", set()) or set()
+            if u
+        }
 
         confirmed: set[str] = set()
         for m in self._requested_competitor_models:

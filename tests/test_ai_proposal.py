@@ -26,14 +26,17 @@ class _FakeLLM:
     `on_chat` fires during the call (used to simulate canonical drift while
     the model is still running)."""
 
-    def __init__(self, responses=None, fail=False, on_chat=None):
+    def __init__(self, responses=None, fail=False, on_chat=None, last_truncated=False):
         self.responses = responses or {}
         self.fail = fail
         self.on_chat = on_chat
+        self.last_truncated = last_truncated
         self.calls: list[str] = []
+        self.kw_by_source: dict[str, dict] = {}
 
     def chat(self, messages, *, source="", **kw):
         self.calls.append(source)
+        self.kw_by_source[source] = kw
         if self.on_chat:
             self.on_chat(source)
         if self.fail:
@@ -129,6 +132,38 @@ class TestGenerate:
         # Canonical untouched
         assert rec["derived_facts"]["battery"]["value"] == "770mAh"
         assert product_db.get_status(name) != "processing"
+
+    def test_truncated_generation_fails_with_controlled_message(self, brand_ws):
+        """When the LLM response is truncated (finish_reason=length, last_truncated=True),
+        generate_proposal must fail with a controlled recovery message rather than
+        letting json.loads() leak low-level 'Unterminated string...' details.
+        Canonical data remains untouched and status is 'failed'."""
+        name = _mk_product(brand_ws)
+        # partial JSON string truncated mid-stream
+        truncated_json = '{"summary": "สรุปสิ'
+        llm = _FakeLLM(
+            responses={"ingestion.metadata_summary": truncated_json},
+            last_truncated=True,
+        )
+        with pytest.raises(Exception) as exc_info:
+            ai_enrichment.generate_proposal(name, ["facts"], llm)
+
+        err_msg = str(exc_info.value)
+        assert "Unterminated string" not in err_msg, f"low-level json parser error leaked: {err_msg}"
+        assert ("ไม่ครบ" in err_msg or "truncated" in err_msg.lower() or "ความยาว" in err_msg), \
+            f"expected controlled truncation message, got: {err_msg}"
+
+        rec = product_db.load(name)
+        assert rec["ai_enrichment"]["status"] == "failed"
+        assert "ai_proposal" not in rec
+        assert "Unterminated string" not in (rec["ai_enrichment"].get("error") or "")
+        # Canonical facts untouched
+        assert rec["derived_facts"]["battery"]["value"] == "770mAh"
+        # Configured ceiling reaches the single summary call — no retry
+        assert llm.calls.count("ingestion.metadata_summary") == 1
+        assert llm.kw_by_source["ingestion.metadata_summary"]["max_tokens"] == 2048
+        # Reasoning budget is bounded so thinking cannot starve the JSON output
+        assert llm.kw_by_source["ingestion.metadata_summary"]["reasoning"] == {"max_tokens": 512}
 
     def test_no_source_text_rejected_before_model(self, brand_ws):
         brand_root = brand_ws["brand_root"]

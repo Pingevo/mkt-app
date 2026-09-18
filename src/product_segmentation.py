@@ -29,6 +29,7 @@ import re
 from typing import Any
 
 from .config_loader import load_config, get_section
+from .llm_client import bounded_reasoning
 
 
 def _strip_code_fence(text: str) -> str:
@@ -440,6 +441,7 @@ def _call_llm(llm, files: list[dict], config: dict) -> dict:
         max_tokens=seg_cfg.get("max_output_tokens", 4096),
         stream=False,
         response_format=response_format,
+        reasoning=bounded_reasoning(seg_cfg, seg_cfg.get("max_output_tokens", 4096)),
         source="product_segmentation.segment_products",
     )
 
