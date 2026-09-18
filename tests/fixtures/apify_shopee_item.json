@@ -1,0 +1,196 @@
+[
+ {
+  "itemId": 43332033245,
+  "shopId": 1191420560,
+  "region": "th",
+  "currency": "THB",
+  "url": "https://shopee.co.th/product/1191420560/43332033245",
+  "title": "(NewArrival) BLACK SHARK RUN สมาร์ทวอทช์ออกกำลังกาย Built-in GPS กันน้ำ 5ATM โหมดกีฬา 150+ แบตอึด 15 วัน -1Y",
+  "brand": "Black Shark(แบล็ค ชาร์ค)",
+  "condition": "new",
+  "itemStatus": "normal",
+  "isAvailable": true,
+  "mainImageUrl": "https://down-sg.img.susercontent.com/file/sg-11134201-8258y-mt8ydm3ctd6v17",
+  "imageUrls": [
+   "https://down-sg.img.susercontent.com/file/sg-11134201-8258y-mt8ydm3ctd6v17",
+   "https://down-sg.img.susercontent.com/file/th-11134207-81zte-msp9yxtbb5kw97",
+   "https://down-sg.img.susercontent.com/file/th-11134207-81zto-mqbn1xfkomiz05"
+  ],
+  "videos": [
+   {
+    "videoId": "api/v4/11110105/mms/th-11110105-6v8gu-mr2ho7fyx5hoce.16000081784948559.mp4",
+    "url": "https://mms.vod.susercontent.com/api/v4/11110105/mms/th-11110105-6v8gu-mr2ho7fyx5hoce.default.mp4",
+    "definition": "V540P",
+    "durationSeconds": 34,
+    "thumbnailUrl": "https://down-sg.img.susercontent.com/file/th-11110105-6v8gu-mr2ho7fyx5hoce_cover"
+   }
+  ],
+  "sizeChartUrl": null,
+  "categories": [
+   {
+    "id": 100013,
+    "name": "มือถือและอุปกรณ์เสริม"
+   },
+   {
+    "id": 100074,
+    "name": "อุปกรณ์สวมใส่"
+   },
+   {
+    "id": 100270,
+    "name": "สมาร์ทวอทช์และอุปกรณ์ฟิตเนส"
+   }
+  ],
+  "breadcrumb": [
+   {
+    "id": 11044946,
+    "name": "อุปกรณ์อิเล็กทรอนิกส์"
+   },
+   {
+    "id": 11045112,
+    "name": "อุปกรณ์ไอทีสวมใส่"
+   },
+   {
+    "id": 11045594,
+    "name": "สมาร์ทวอทช์"
+   }
+  ],
+  "categoryId": 100013,
+  "attributes": [
+   {
+    "name": "Item Type",
+    "value": "Smartwatch"
+   },
+   {
+    "name": "ประเภทการประกัน",
+    "value": "ประกันจากผู้ผลิต"
+   },
+   {
+    "name": "คุณสมบัติของนาฬิกา",
+    "value": "สนทนาแบบโทรศัพท์, GPS, กันน้ำ 5ATM, ดีไซน์สปอร์ต สวมใส่สบาย, โหมดกีฬา"
+   },
+   {
+    "name": "การเชื่อมต่อนาฬิกา",
+    "value": "บลูทูธ"
+   }
+  ],
+  "variations": [
+   {
+    "name": "ตัวเลือกสินค้า",
+    "options": [
+     "Orange",
+     "Black",
+     "Yellow",
+     "Black + T20 (Orange)",
+     "Orange +T20 (Orange)",
+     "Yellow +T20 (Orange)",
+     "Black + T20 (Gray)",
+     "Orange +T20 (Gray)",
+     "Yellow +T20 (Gray)"
+    ],
+    "optionImages": [
+     "https://down-sg.img.susercontent.com/file/th-11134207-81ztk-mpxjxw6m75zh40",
+     "https://down-sg.img.susercontent.com/file/th-11134207-81ztl-mpxjxtzpp1cf4f",
+     "https://down-sg.img.susercontent.com/file/th-11134207-81ztc-mpxjxyqeij9pa4",
+     "https://down-sg.img.susercontent.com/file/th-11134207-81ztn-msqvhkia80sh1a",
+     "https://down-sg.img.susercontent.com/file/th-11134207-81zte-msqvhpaqn4e85a",
+     "https://down-sg.img.susercontent.com/file/th-11134207-81ztm-msqvhsm7zv9la8",
+     "https://down-sg.img.susercontent.com/file/th-11134207-81zto-msqvkep1x0xsa5",
+     "https://down-sg.img.susercontent.com/file/th-11134207-81ztk-msqvkw3ddybm4f",
+     "https://down-sg.img.susercontent.com/file/th-11134207-81ztn-msqvkkzjso3rd5"
+    ]
+   }
+  ],
+  "variants": [
+   {
+    "modelId": 431475567536,
+    "name": "Yellow +T20 (Orange)",
+    "options": {
+     "ตัวเลือกสินค้า": "Yellow +T20 (Orange)"
+    },
+    "isPreOrder": false,
+    "estimatedShippingDays": 2,
+    "imageUrl": null,
+    "isAvailable": true
+   },
+   {
+    "modelId": 396116038298,
+    "name": "Orange",
+    "options": {
+     "ตัวเลือกสินค้า": "Orange"
+    },
+    "isPreOrder": false,
+    "estimatedShippingDays": 2,
+    "imageUrl": null,
+    "isAvailable": true
+   }
+  ],
+  "variantCount": 9,
+  "vouchers": [
+   {
+    "code": "BLAC09RUN",
+    "minSpend": 2990,
+    "discountPercent": null,
+    "discountAmount": 400,
+    "discountCap": null,
+    "percentUsed": 23,
+    "startsAt": "2026-09-01T05:22:00Z",
+    "endsAt": "2026-09-30T16:59:00Z"
+   }
+  ],
+  "isFreeShipping": false,
+  "isPreOrder": false,
+  "estimatedShippingDays": 2,
+  "canUseWholesale": false,
+  "shopLocation": "จังหวัดสมุทรปราการ",
+  "isCrossBorder": false,
+  "createdAt": "2026-06-26T10:42:21Z",
+  "createdAtEpoch": 1782470541,
+  "isAdult": false,
+  "description": "\n\n\n==============================\n📢 รบกวนลูกค้า เช็ครายละเอียดและเงื่อนไขต่าง ๆ ก่อนสั่งซื้อสินค้า!!\n💬 หรือสามารถสอบถามแอดมินในช่องทางแชทของร้านค้าได้เลยค่ะ\n==============================\n\n1. BLACK SHARK RUN สมาร์ทวอทช์ออกกำลังกาย Built-in GPS\n\n[[ จุดเด่นสินค้า ]]\n- ดีไซน์สปอร์ต สวมใส่สบาย เคลื่อนไหวได้อย่างคล่องตัว\n   * ตัวเรือนเบาพิเศษเพียง 30 กรัม\n- หน้าจอ AMOLED ขนาด 1.43 นิ้ว คมชัด สีสันสดใส \n   * ความสว่างสูงสุด 1000 Nits เห็นชัด แม้ใช้งานกลางแจ้ง\n   * ความละเอียดหน้าจอ 454×454p\n   * ความหนาแน่นพิกเซล 326 PPI\n   * อัตรารีเฟรช 60Hz จอลื่นไหล พร้อมแสดงผลสีสันถึง 16.7 ล้านสี\n- มาพร้อมสายนาฬ",
+  "descriptionBlocks": [
+   {
+    "type": "image",
+    "url": "https://down-sg.img.susercontent.com/file/th-11134208-81ztn-mnf4x9mi85j990"
+   },
+   {
+    "type": "image",
+    "url": "https://down-sg.img.susercontent.com/file/th-11134208-81ztm-mqbdue0iy51e65"
+   },
+   {
+    "type": "image",
+    "url": "https://down-sg.img.susercontent.com/file/th-11134208-81zto-mr1ijfhz670m91"
+   },
+   {
+    "type": "image",
+    "url": "https://down-sg.img.susercontent.com/file/th-11134208-81ztm-mqbdue0j0y6adc"
+   },
+   {
+    "type": "image",
+    "url": "https://down-sg.img.susercontent.com/file/th-11134208-81ztq-mr1ijfi1bg8x1a"
+   },
+   {
+    "type": "image",
+    "url": "https://down-sg.img.susercontent.com/file/th-11134208-81ztf-mqboiaa9rv9n41"
+   }
+  ],
+  "shop": {
+   "shopId": 1191420560,
+   "name": "Black Shark Thailand",
+   "username": "blacksharkthailandofficial",
+   "url": "https://shopee.co.th/shop/1191420560",
+   "itemCount": 68,
+   "followerCount": 48646,
+   "ratingStar": 4.887123,
+   "ratingTotal": 21182,
+   "responseRate": 91,
+   "responseTimeSeconds": 3237,
+   "cancellationRate": 0,
+   "isOfficialShop": true,
+   "isShopeeVerified": false,
+   "isPreferredPlusSeller": false,
+   "onVacation": false,
+   "country": "TH",
+   "createdAt": "2024-02-21T03:58:20Z"
+  }
+ }
+]

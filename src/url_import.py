@@ -15,6 +15,9 @@ Safety contract (SSRF):
   - bodies are streamed with hard byte caps — never buffered unboundedly
   - main page must be HTML/text; images must be image/{jpeg,png,webp}
     (the three types the ingestion pipeline classifies)
+  - Shopee hosts never get fetched directly: the product record comes from
+    an Apify actor (see _fetch_shopee_via_apify) and only the CDN image URLs
+    it returns are downloaded — through the same validated fetcher.
 
 ponytail: DNS is validated before connect, but httpx re-resolves at connect
 time — a fast-rebinding DNS attacker could theoretically swap IPs between the
@@ -31,6 +34,7 @@ import ipaddress
 import json
 import re
 import socket
+import time
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
@@ -41,6 +45,13 @@ try:
     from playwright.sync_api import sync_playwright
 except ImportError:  # optional — static fetch works without it
     sync_playwright = None
+
+try:
+    from . import apify_client
+    from .config_loader import get_env
+except ImportError:  # pragma: no cover — direct import from src/
+    import apify_client  # type: ignore
+    from config_loader import get_env  # type: ignore
 
 # --- Centralized limits (spec: keep constants in this module) ---------------
 MAX_PAGE_BYTES = 2_000_000          # 2 MB HTML cap
@@ -85,6 +96,19 @@ _PAGE_MIMES = ("text/html", "application/xhtml", "text/plain")
 _IMAGE_MIMES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
+# --- Shopee via Apify ----------------------------------------------------------
+# Shopee serves a JS shell and answers headless browsers with a traffic-verify
+# wall, so product pages are fetched through an Apify actor instead (same
+# pattern as sellcenter's KOL enrichment).  Host -> actor ``region`` code.
+_SHOPEE_HOSTS = {
+    "shopee.co.th": "th", "shopee.sg": "sg", "shopee.com.my": "my",
+    "shopee.co.id": "id", "shopee.vn": "vn", "shopee.ph": "ph",
+    "shopee.tw": "tw", "shopee.com.br": "br", "shopee.com.mx": "mx",
+    "shopee.com.co": "co", "shopee.cl": "cl",
+}
+APIFY_SHOPEE_ACTOR_DEFAULT = "incognito_mode~shopee-product-catalog-scraper"
+APIFY_TIMEOUT_S = 180
+
 
 class UrlImportError(Exception):
     """Controlled fetch/validation failure — carries a user-safe message only.
@@ -104,6 +128,8 @@ class UrlImportError(Exception):
         "too_large": "เนื้อหาหน้าเว็บใหญ่เกินไป",
         "empty_page": "ไม่พบเนื้อหาสินค้าที่อ่านได้ในหน้านี้",
         "fetch_failed": "ดึงข้อมูลจากลิงก์ไม่สำเร็จ — ลองอีกครั้งหรือใช้ลิงก์อื่น",
+        "apify_not_configured": "ยังไม่ได้ตั้งค่า APIFY_TOKEN สำหรับดึงข้อมูลสินค้าจาก Shopee",
+        "product_not_found": "ไม่พบสินค้านี้บน Shopee — สินค้าอาจถูกลบหรือลิงก์ไม่ถูกต้อง",
     }
 
     def __init__(self, reason: str, detail: str = ""):
@@ -722,6 +748,234 @@ def _image_candidates(ex: _PageExtractor, final_url: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Shopee product pages via Apify actor
+# ---------------------------------------------------------------------------
+
+def _shopee_region(url: str) -> str | None:
+    """Actor region code when ``url`` is a Shopee storefront host, else None."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return None
+    if host.startswith("www."):
+        host = host[4:]
+    return _SHOPEE_HOSTS.get(host)
+
+
+def _log_apify_usage(actor: str, *, status: str, cost_usd: float, started: float,
+                     url: str, run: dict | None, run_id: str = "",
+                     items: int | None = None, error: str = "",
+                     http_status: int | None = None) -> None:
+    """Record the actor run's REAL cost (success and error paths alike)."""
+    try:
+        from .ai_usage import make_entry, record_ai_usage
+    except ImportError:  # pragma: no cover
+        from ai_usage import make_entry, record_ai_usage  # type: ignore
+    raw = None
+    if run:
+        raw = {k: run.get(k) for k in (
+            "id", "actId", "status", "statusMessage", "startedAt",
+            "finishedAt", "usageTotalUsd", "usage") if run.get(k) is not None}
+    entry = make_entry(
+        provider="apify", model=actor, operation="actor.run",
+        source="url_import.shopee", request_id=run_id or None,
+        cost_usd=cost_usd, duration_ms=int((time.monotonic() - started) * 1000),
+        status=status, http_status=http_status, error_message=error or None,
+        raw_usage=raw, units={"items_fetched": items} if items is not None else None,
+        metadata={"platform": "shopee", "url": url},
+    )
+    record_ai_usage(entry)
+
+
+def _shopee_item_text(item: dict, url: str) -> str:
+    """Render one actor product record as the source_page.txt body.
+
+    Same header shape as the HTML path (Title/Description/Source) so
+    downstream ingestion treats both sources identically, followed by the
+    structured facts the actor exposes (the page's own JS-rendered content).
+    """
+    def _s(v) -> str:
+        return " ".join(str(v).split()) if v is not None else ""
+
+    title = _s(item.get("title"))
+    description = str(item.get("description") or "").strip()
+    if not description:
+        description = "\n".join(
+            str(b.get("text") or "").strip()
+            for b in (item.get("descriptionBlocks") or [])
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+        ).strip()
+
+    lines: list[str] = []
+    if title:
+        lines.append(f"Title: {title}")
+    if description:
+        lines.append(f"Description: {_s(description)[:300]}")
+    lines.append(f"Source: {item.get('url') or url}")
+    lines.append("")
+
+    if item.get("brand"):
+        lines.append(f"Brand: {_s(item['brand'])}")
+    shop = item.get("shop") if isinstance(item.get("shop"), dict) else {}
+    if shop.get("name"):
+        shop_line = f"Shop: {_s(shop['name'])}"
+        extras = []
+        if shop.get("ratingStar") is not None:
+            extras.append(f"rating {float(shop['ratingStar']):.2f}/5")
+        if shop.get("ratingTotal") is not None:
+            extras.append(f"{shop['ratingTotal']} ratings")
+        if shop.get("followerCount") is not None:
+            extras.append(f"{shop['followerCount']} followers")
+        if shop.get("isOfficialShop"):
+            extras.append("official shop")
+        if extras:
+            shop_line += " (" + ", ".join(extras) + ")"
+        lines.append(shop_line)
+    if item.get("shopLocation"):
+        lines.append(f"Ships from: {_s(item['shopLocation'])}")
+    cats = [_s(c.get("name")) for c in (item.get("categories") or [])
+            if isinstance(c, dict) and c.get("name")]
+    if cats:
+        lines.append("Category: " + " > ".join(cats))
+    if item.get("condition"):
+        lines.append(f"Condition: {_s(item['condition'])}")
+    if item.get("isAvailable") is not None:
+        lines.append("Availability: " + ("in stock" if item["isAvailable"] else "unavailable"))
+
+    variations = item.get("variations") or []
+    if variations:
+        lines.append("")
+        lines.append(f"Variants ({item.get('variantCount') or len(item.get('variants') or [])}):")
+        for v in variations:
+            if isinstance(v, dict) and v.get("options"):
+                lines.append(f"- {_s(v.get('name'))}: " + ", ".join(_s(o) for o in v["options"]))
+
+    attrs = [(a.get("name"), a.get("value")) for a in (item.get("attributes") or [])
+             if isinstance(a, dict) and a.get("name") and a.get("value")]
+    if attrs:
+        lines.append("")
+        lines.append("Specifications:")
+        lines.extend(f"- {_s(n)}: {_s(v)}" for n, v in attrs)
+
+    vouchers = [v for v in (item.get("vouchers") or []) if isinstance(v, dict) and v.get("code")]
+    if vouchers:
+        lines.append("")
+        lines.append("Vouchers:")
+        for v in vouchers:
+            disc = (f"{v['discountPercent']}% off" if v.get("discountPercent")
+                    else f"{v.get('discountAmount')} off" if v.get("discountAmount") else "")
+            cond = f" (min spend {v['minSpend']})" if v.get("minSpend") else ""
+            lines.append(f"- {v['code']}: {disc}{cond}".rstrip(": "))
+
+    if description:
+        lines.append("")
+        lines.append("Product description:")
+        lines.append(description)
+
+    return "\n".join(lines)[:MAX_TEXT_CHARS]
+
+
+def _shopee_image_urls(item: dict) -> list[str]:
+    ordered = [item.get("mainImageUrl")] + list(item.get("imageUrls") or [])
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in ordered:
+        if isinstance(u, str) and u.strip() and u not in seen:
+            seen.add(u)
+            out.append(u.strip())
+    return out
+
+
+def _fetch_shopee_via_apify(url: str, region: str) -> dict:
+    """Fetch a Shopee product through the configured Apify actor.
+
+    Returns the same dict contract as the HTML path.  Images are still
+    downloaded by us through ``_fetch_document`` — the CDN URLs the actor
+    returns get the identical scheme/DNS/IP/MIME/size policy.
+    """
+    _validate_url(url)
+    if not apify_client.apify_token():
+        raise UrlImportError("apify_not_configured", "APIFY_TOKEN missing")
+    actor = get_env("APIFY_SHOPEE_ACTOR", APIFY_SHOPEE_ACTOR_DEFAULT) or APIFY_SHOPEE_ACTOR_DEFAULT
+    payload = {
+        "products": [url],
+        "region": region,
+        "includeShop": True,
+        "includeDescription": True,
+        "maxItems": 1,
+    }
+    started = time.monotonic()
+    try:
+        result = apify_client.run_actor_and_get_items(actor, payload, timeout_s=APIFY_TIMEOUT_S)
+    except apify_client.ApifyError as e:
+        _log_apify_usage(actor, status="error", cost_usd=e.cost_usd, started=started,
+                         url=url, run=e.run, run_id=str((e.run or {}).get("id") or ""),
+                         error=str(e), http_status=e.http_status)
+        raise UrlImportError("fetch_failed", f"apify {e.reason}: {e}")
+    _log_apify_usage(actor, status="success", cost_usd=result.cost_usd, started=started,
+                     url=url, run=result.run, run_id=result.run_id, items=len(result.items))
+
+    item = next((it for it in result.items if isinstance(it, dict) and it.get("title")), None)
+    if item is None:
+        err = next((it.get("errorMessage") or it.get("error") for it in result.items
+                    if isinstance(it, dict)), None)
+        if err or not result.items:
+            raise UrlImportError("product_not_found", f"apify returned no product for {url}: {err}")
+        raise UrlImportError("empty_page", f"apify item without title for {url}")
+
+    text = _shopee_item_text(item, url)
+    canonical = item.get("url") if isinstance(item.get("url"), str) else ""
+
+    images: list[dict] = []
+    total_image_bytes = 0
+    client = _make_client()
+    try:
+        for img_url in _shopee_image_urls(item)[:MAX_IMAGES]:
+            if total_image_bytes >= MAX_TOTAL_IMAGE_BYTES:
+                break
+            try:
+                _f, ctype, data = _fetch_document(
+                    client, img_url, MAX_IMAGE_BYTES, set(_IMAGE_MIMES))
+            except UrlImportError:
+                continue  # best-effort — one bad image never kills the import
+            if total_image_bytes + len(data) > MAX_TOTAL_IMAGE_BYTES:
+                continue
+            images.append({
+                "name": f"page_img_{len(images) + 1:03d}{_IMAGE_MIMES[ctype]}",
+                "content": data,
+                "source_url": img_url,
+            })
+            total_image_bytes += len(data)
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    return {
+        "original_url": url,
+        "final_url": canonical or url,
+        "canonical_url": canonical,
+        "fetched_via": "apify",
+        "page_title": str(item.get("title") or ""),
+        "og_title": str(item.get("title") or ""),
+        # One product record for one product URL — a deterministic structured
+        # signal, same footing as a JSON-LD Product node on the HTML path.
+        "page_class": "single",
+        "page_signals": {
+            "product_count": 1,
+            "multi_signals": [],
+            "og_type": "product",
+            "provider": "apify",
+            "actor": actor,
+        },
+        "text": text,
+        "images": images,
+        "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Public interface
 # ---------------------------------------------------------------------------
 
@@ -743,6 +997,10 @@ def fetch_product_page(url: str) -> dict:
     if not isinstance(url, str) or not url.strip():
         raise UrlImportError("invalid_url", "empty URL")
     url = url.strip()
+
+    region = _shopee_region(url)
+    if region:
+        return _fetch_shopee_via_apify(url, region)
 
     def _parse(html_bytes: bytes, page_url: str) -> tuple[_PageExtractor, str, str]:
         ex = _PageExtractor()
