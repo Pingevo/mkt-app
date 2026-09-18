@@ -83,6 +83,7 @@ def _image_client(calls: list[str], *, status=200, ctype="image/jpeg") -> httpx.
 def apify_env(monkeypatch):
     monkeypatch.setenv("APIFY_TOKEN", "test-token")
     monkeypatch.delenv("APIFY_SHOPEE_ACTOR", raising=False)
+    monkeypatch.setattr(url_import, "APIFY_RETRY_SLEEP_S", 0)
     monkeypatch.setattr(socket, "getaddrinfo", _dns_map({
         "shopee.co.th": PUBLIC_IP,
         "down-sg.img.susercontent.com": PUBLIC_IP,
@@ -295,15 +296,45 @@ def test_image_count_capped(monkeypatch, apify_env):
 # Actor failure modes -> controlled UrlImportError + cost still logged
 # ---------------------------------------------------------------------------
 
-def test_product_not_found_row(monkeypatch, apify_env):
-    row = {"status": "error", "errorMessage": "Product not found — it may have been removed.",
-           "itemId": "1", "shopId": "2"}
-    monkeypatch.setattr(apify_client, "_make_client",
-                        lambda: _apify_transport(start_run=_run(), items=[row]))
+NOT_FOUND_ROW = {"error": "PRODUCT_NOT_FOUND",
+                 "errorMessage": "Shopee returned no product data for 1191420560/43332033245 (th)",
+                 "itemId": 43332033245, "shopId": 1191420560}
+
+
+def test_product_not_found_row_is_retried_then_reported(monkeypatch, apify_env):
+    runs: list[str] = []
+    monkeypatch.setattr(apify_client, "_make_client", lambda: (
+        runs.append("run") or _apify_transport(start_run=_run(run_id=f"r{len(runs)}"),
+                                               items=[NOT_FOUND_ROW])))
     with pytest.raises(UrlImportError) as ei:
         url_import.fetch_product_page(SHOPEE_URL)
     assert ei.value.reason == "product_not_found"
-    assert "Product not found" in ei.value.detail
+    assert "Shopee returned no product data" in ei.value.detail
+    assert len(runs) == url_import.APIFY_SHOPEE_ATTEMPTS == 3
+    entries = [e for e in _usage_entries() if e.get("provider") == "apify"]
+    assert [e["attempt"] for e in entries] == [1, 2, 3]
+    assert all(e["units"] == {"items_fetched": 0} for e in entries)
+    assert all("no product data" in e["error_message"] for e in entries)
+
+
+def test_flaky_actor_succeeds_on_retry(monkeypatch, apify_env):
+    """Observed live: the same listing errors on one run and succeeds seconds later."""
+    runs: list[str] = []
+
+    def factory():
+        runs.append("run")
+        items = [NOT_FOUND_ROW] if len(runs) == 1 else [_item()]
+        return _apify_transport(start_run=_run(run_id=f"r{len(runs)}"), items=items)
+
+    monkeypatch.setattr(apify_client, "_make_client", factory)
+    monkeypatch.setattr(url_import, "_make_client", lambda: _image_client([]))
+    result = url_import.fetch_product_page(SHOPEE_URL)
+    assert result["page_title"].startswith("(NewArrival) BLACK SHARK RUN")
+    assert len(runs) == 2
+    entries = [e for e in _usage_entries() if e.get("provider") == "apify"]
+    assert [(e["attempt"], e["units"]["items_fetched"], e["request_id"]) for e in entries] == [
+        (1, 0, "r1"), (2, 1, "r2")]
+    assert entries[1].get("error_message") is None
 
 
 def test_empty_dataset_is_product_not_found(monkeypatch, apify_env):

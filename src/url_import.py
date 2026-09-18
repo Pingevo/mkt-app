@@ -108,6 +108,8 @@ _SHOPEE_HOSTS = {
 }
 APIFY_SHOPEE_ACTOR_DEFAULT = "incognito_mode~shopee-product-catalog-scraper"
 APIFY_TIMEOUT_S = 180
+APIFY_SHOPEE_ATTEMPTS = 3           # actor intermittently misses live listings
+APIFY_RETRY_SLEEP_S = 2.0
 
 
 class UrlImportError(Exception):
@@ -129,7 +131,7 @@ class UrlImportError(Exception):
         "empty_page": "ไม่พบเนื้อหาสินค้าที่อ่านได้ในหน้านี้",
         "fetch_failed": "ดึงข้อมูลจากลิงก์ไม่สำเร็จ — ลองอีกครั้งหรือใช้ลิงก์อื่น",
         "apify_not_configured": "ยังไม่ได้ตั้งค่า APIFY_TOKEN สำหรับดึงข้อมูลสินค้าจาก Shopee",
-        "product_not_found": "ไม่พบสินค้านี้บน Shopee — สินค้าอาจถูกลบหรือลิงก์ไม่ถูกต้อง",
+        "product_not_found": "Shopee ไม่ส่งข้อมูลสินค้านี้กลับมา (ลองแล้วหลายครั้ง) — ตรวจสอบว่าลิงก์ยังเปิดได้ แล้วลองใหม่อีกครั้ง",
     }
 
     def __init__(self, reason: str, detail: str = ""):
@@ -764,8 +766,8 @@ def _shopee_region(url: str) -> str | None:
 
 def _log_apify_usage(actor: str, *, status: str, cost_usd: float, started: float,
                      url: str, run: dict | None, run_id: str = "",
-                     items: int | None = None, error: str = "",
-                     http_status: int | None = None) -> None:
+                     items: int | None = None, error: str | None = "",
+                     http_status: int | None = None, attempt: int = 1) -> None:
     """Record the actor run's REAL cost (success and error paths alike)."""
     try:
         from .ai_usage import make_entry, record_ai_usage
@@ -782,7 +784,7 @@ def _log_apify_usage(actor: str, *, status: str, cost_usd: float, started: float
         cost_usd=cost_usd, duration_ms=int((time.monotonic() - started) * 1000),
         status=status, http_status=http_status, error_message=error or None,
         raw_usage=raw, units={"items_fetched": items} if items is not None else None,
-        metadata={"platform": "shopee", "url": url},
+        metadata={"platform": "shopee", "url": url}, attempt=attempt,
     )
     record_ai_usage(entry)
 
@@ -913,24 +915,36 @@ def _fetch_shopee_via_apify(url: str, region: str) -> dict:
         "includeDescription": True,
         "maxItems": 1,
     }
-    started = time.monotonic()
-    try:
-        result = apify_client.run_actor_and_get_items(actor, payload, timeout_s=APIFY_TIMEOUT_S)
-    except apify_client.ApifyError as e:
-        _log_apify_usage(actor, status="error", cost_usd=e.cost_usd, started=started,
-                         url=url, run=e.run, run_id=str((e.run or {}).get("id") or ""),
-                         error=str(e), http_status=e.http_status)
-        raise UrlImportError("fetch_failed", f"apify {e.reason}: {e}")
-    _log_apify_usage(actor, status="success", cost_usd=result.cost_usd, started=started,
-                     url=url, run=result.run, run_id=result.run_id, items=len(result.items))
-
-    item = next((it for it in result.items if isinstance(it, dict) and it.get("title")), None)
+    # The actor's Shopee fetch is flaky: the same live listing intermittently
+    # comes back as an error row ("no product data ... removed or ID wrong")
+    # and succeeds seconds later.  A run costs ~$0.00005, so retry before
+    # telling the user the product is gone.
+    item: dict | None = None
+    last_err: str | None = None
+    for attempt in range(1, APIFY_SHOPEE_ATTEMPTS + 1):
+        started = time.monotonic()
+        try:
+            result = apify_client.run_actor_and_get_items(actor, payload, timeout_s=APIFY_TIMEOUT_S)
+        except apify_client.ApifyError as e:
+            _log_apify_usage(actor, status="error", cost_usd=e.cost_usd, started=started,
+                             url=url, run=e.run, run_id=str((e.run or {}).get("id") or ""),
+                             error=str(e), http_status=e.http_status, attempt=attempt)
+            raise UrlImportError("fetch_failed", f"apify {e.reason}: {e}")
+        item = next((it for it in result.items if isinstance(it, dict) and it.get("title")), None)
+        last_err = next((it.get("errorMessage") or it.get("error") for it in result.items
+                         if isinstance(it, dict) and not it.get("title")), None)
+        _log_apify_usage(actor, status="success", cost_usd=result.cost_usd, started=started,
+                         url=url, run=result.run, run_id=result.run_id,
+                         items=1 if item else 0, attempt=attempt,
+                         error=None if item else (last_err or "no product row"))
+        if item is not None:
+            break
+        if attempt < APIFY_SHOPEE_ATTEMPTS:
+            time.sleep(APIFY_RETRY_SLEEP_S)
     if item is None:
-        err = next((it.get("errorMessage") or it.get("error") for it in result.items
-                    if isinstance(it, dict)), None)
-        if err or not result.items:
-            raise UrlImportError("product_not_found", f"apify returned no product for {url}: {err}")
-        raise UrlImportError("empty_page", f"apify item without title for {url}")
+        raise UrlImportError(
+            "product_not_found",
+            f"apify returned no product for {url} after {APIFY_SHOPEE_ATTEMPTS} attempts: {last_err}")
 
     text = _shopee_item_text(item, url)
     canonical = item.get("url") if isinstance(item.get("url"), str) else ""
