@@ -7,3 +7,4 @@ PyMuPDF>=1.24.0
 Pillow>=10.0.0
 pytesseract>=0.3.10
 bcrypt>=4.0.0
+playwright>=1.60,<2.0
