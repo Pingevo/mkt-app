@@ -8493,10 +8493,60 @@ function _pdAiRender() {
   body.innerHTML = h;
 }
 
-function _pdAiValText(v) {
-  if (v === null || v === undefined || v === '') return '';
-  if (typeof v === 'object') return JSON.stringify(v);
-  return String(v);
+// Human-readable labels for known nested proposal/profile keys — the same
+// Thai wording the marketing section uses.  Unknown keys de-snake_case
+// into readable words; raw JSON syntax is never user-visible.
+const _PD_AI_FIELD_LABELS = {
+  primary: 'กลุ่มเป้าหมาย', end_user: 'ผู้ใช้ปลายทาง',
+  secondary: 'กลุ่มรอง', age: 'ช่วงอายุ', role: 'บทบาท',
+  desc: 'ลักษณะ', description: 'รายละเอียด',
+  gender: 'เพศ', income: 'รายได้', location: 'พื้นที่',
+  interests: 'ความสนใจ', lifestyle: 'ไลฟ์สไตล์',
+  pain_points: 'Pain points', channels: 'ช่องทาง',
+  image_style: 'สไตล์ภาพ', tone: 'โทน', mood: 'อารมณ์',
+  keywords: 'Keywords', name: 'ชื่อ', url: 'URL',
+  price: 'ราคา', note: 'หมายเหตุ',
+};
+
+function _pdAiFieldLabel(k) {
+  return _PD_AI_FIELD_LABELS[k] || String(k).replace(/_/g, ' ');
+}
+
+// Canonical 'no value' — same shapes the backend's _is_empty treats as
+// absent: a dict/list holding ANY member (even "") is not empty.
+function _pdAiEmpty(v) {
+  if (v === null || v === undefined || v === '') return true;
+  if (Array.isArray(v)) return v.length === 0;
+  if (typeof v === 'object') return Object.keys(v).length === 0;
+  return false;
+}
+
+// Generic proposal-value renderer: scalar → text, array → list items,
+// object → labeled fields (recursive).  Display only — the structured
+// value itself is never flattened into a JSON string for the user.
+function _pdAiValHtml(v) {
+  if (v === null || v === undefined || v === '') {
+    return '<span style="color:#555">— ว่าง —</span>';
+  }
+  if (Array.isArray(v)) {
+    if (!v.length) return '<span style="color:#555">— ว่าง —</span>';
+    let h = '<ul style="margin:2px 0;padding-left:18px">';
+    for (const item of v) h += '<li>' + _pdAiValHtml(item) + '</li>';
+    return h + '</ul>';
+  }
+  if (typeof v === 'object') {
+    const es = Object.entries(v);
+    if (!es.length) return '<span style="color:#555">— ว่าง —</span>';
+    let h = '';
+    for (const [k, val] of es) {
+      const lab = escapeHtml(_pdAiFieldLabel(k));
+      h += (val !== null && typeof val === 'object')
+        ? '<div style="margin:4px 0"><div style="font-size:11px;color:#888">' + lab + '</div><div style="margin-left:10px">' + _pdAiValHtml(val) + '</div></div>'
+        : '<div style="margin:4px 0"><span style="color:#888">' + lab + ':</span> ' + _pdAiValHtml(val) + '</div>';
+    }
+    return h;
+  }
+  return escapeHtml(String(v));
 }
 
 // escapeHtml does NOT escape '"' — attribute values carrying model output
@@ -8506,28 +8556,32 @@ function _pdAiAttr(s) {
 }
 
 function _pdAiRow(kind, key, label, cur, sug, stale) {
-  const curT = _pdAiValText(cur);
-  const sugT = _pdAiValText(sug);
-  const empty = !curT;
+  const empty = _pdAiEmpty(cur);
+  const sugStructured = sug !== null && typeof sug === 'object';
+  // data-sug is TRANSPORT for the editor (JSON for structured values) —
+  // never the rendered text; display goes through _pdAiValHtml.
+  const sugT = sugStructured ? JSON.stringify(sug)
+    : (sug === null || sug === undefined ? '' : String(sug));
   let h = '<div class="pd-ai-row" style="border:1px solid #2a2d3a;border-radius:8px;padding:10px;margin-bottom:10px">';
   h += '<div style="font-size:12px;color:#7c8aff;margin-bottom:6px">' + escapeHtml(label) + '</div>';
   h += '<div style="display:flex;gap:10px;font-size:13px">';
-  h += '<div style="flex:1;min-width:0"><div style="font-size:10px;color:#666;margin-bottom:2px">CURRENT</div><div style="color:#e0e0e0;word-break:break-word">' + (curT ? escapeHtml(curT) : '<span style="color:#555">— ว่าง —</span>') + '</div></div>';
-  h += '<div style="flex:1;min-width:0"><div style="font-size:10px;color:#666;margin-bottom:2px">AI SUGGESTION</div><div style="color:#4ade80;word-break:break-word">' + escapeHtml(sugT) + '</div></div>';
+  h += '<div style="flex:1;min-width:0"><div style="font-size:10px;color:#666;margin-bottom:2px">CURRENT</div><div class="pd-ai-cur" style="color:#e0e0e0;word-break:break-word">' + _pdAiValHtml(cur) + '</div></div>';
+  h += '<div style="flex:1;min-width:0"><div style="font-size:10px;color:#666;margin-bottom:2px">AI SUGGESTION</div><div class="pd-ai-sug" style="color:#4ade80;word-break:break-word">' + _pdAiValHtml(sug) + '</div></div>';
   h += '</div>';
-  h += '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap" data-kind="' + _pdAiAttr(kind) + '" data-key="' + _pdAiAttr(key) + '" data-sug="' + _pdAiAttr(sugT) + '" data-empty="' + (empty ? '1' : '0') + '">';
-  const btnS = 'background:#1a1d27;border:1px solid #3a3d4a;color:#e0e0e0;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px';
-  const btnA = 'background:#1a3d2a;border:1px solid #4ade80;color:#4ade80;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px';
+  h += '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap" data-kind="' + _pdAiAttr(kind) + '" data-key="' + _pdAiAttr(key) + '" data-sug="' + _pdAiAttr(sugT) + '"' + (sugStructured ? ' data-structured="1"' : '') + ' data-empty="' + (empty ? '1' : '0') + '">';
+  const btnS = 'background:#1a1d27;border:1px solid #3a3d4a;color:#e0e0e0;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px';
+  const btnA = 'background:#1a3d2a;border:1px solid #4ade80;color:#4ade80;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px';
+  const btnE = 'background:#1a1d27;border:1px solid #7c8aff;color:#7c8aff;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px';
   // Stale source: accepting obsolete AI output is not a valid action —
   // keep (writes nothing) and edit (the user's own value) stay available.
   if (empty) {
     if (!stale) h += '<button onclick="pdAiResolveOne(this,\'accept\')" style="' + btnA + '">รับค่า</button>';
     h += '<button onclick="pdAiResolveOne(this,\'keep\')" style="' + btnS + '">ไม่ใช้</button>';
-    h += '<button onclick="pdAiEditRow(this)" style="' + btnS + '">แก้ไขก่อนรับ</button>';
+    h += '<button onclick="pdAiEditRow(this)" style="' + btnE + '">แก้ไขก่อนรับ</button>';
   } else {
     h += '<button onclick="pdAiResolveOne(this,\'keep\')" style="' + btnS + '">เก็บค่าเดิม</button>';
     if (!stale) h += '<button onclick="pdAiResolveOne(this,\'accept\')" style="' + btnA + '">ใช้ค่าที่ AI แนะนำ</button>';
-    h += '<button onclick="pdAiEditRow(this)" style="' + btnS + '">แก้ไขเอง</button>';
+    h += '<button onclick="pdAiEditRow(this)" style="' + btnE + '">แก้ไขเอง</button>';
   }
   h += '</div></div>';
   return h;
@@ -8609,13 +8663,98 @@ function _pdAiEnrich(scopes, replace) {
   });
 }
 
+// Type-aware editor for structured suggestion values — scalar → input,
+// array → removable per-item rows (+ add for scalar lists), object →
+// labeled fields (recursive).  _pdAiEditorRead rebuilds the same JSON
+// types, so the canonical write path never receives a stringified blob.
+const _PD_AI_EDIT_INPUT = 'background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:6px 8px;color:#e0e0e0;font-size:13px';
+
+function _pdAiEditRemove() {
+  return '<button type="button" onclick="this.closest(\'.pd-ai-node\').remove()" title="ลบรายการ" style="background:none;border:none;color:#f87171;cursor:pointer;font-size:14px;padding:2px 4px">×</button>';
+}
+
+function _pdAiEditorHtml(v, removable) {
+  if (Array.isArray(v)) {
+    let h = '<div class="pd-ai-node" data-type="array">';
+    for (const item of v) h += _pdAiEditorHtml(item, true);
+    if (v.every(i => i === null || typeof i !== 'object')) {
+      h += '<div style="margin-top:4px"><button type="button" onclick="_pdAiEditAddItem(this)" style="background:none;border:1px dashed #3a3d4a;color:#7c8aff;padding:2px 10px;border-radius:6px;cursor:pointer;font-size:11px">+ เพิ่มรายการ</button></div>';
+    }
+    return h + '</div>';
+  }
+  if (v !== null && typeof v === 'object') {
+    let h = '<div class="pd-ai-node" data-type="object"' +
+      (removable ? ' style="border:1px solid #2a2d3a;border-radius:6px;padding:6px;margin:4px 0"' : '') + '>';
+    if (removable) h += '<div style="text-align:right">' + _pdAiEditRemove() + '</div>';
+    for (const [k, val] of Object.entries(v)) {
+      h += '<div class="pd-ai-field" data-key="' + _pdAiAttr(k) + '" style="margin:4px 0">' +
+        '<div style="font-size:11px;color:#888">' + escapeHtml(_pdAiFieldLabel(k)) + '</div>' +
+        _pdAiEditorHtml(val, false) + '</div>';
+    }
+    return h + '</div>';
+  }
+  const ptype = v === null ? 'null' : typeof v;
+  let ctrl;
+  if (ptype === 'boolean') {
+    ctrl = '<select class="pd-ai-scalar" style="' + _PD_AI_EDIT_INPUT + '">' +
+      '<option value="true"' + (v ? ' selected' : '') + '>ใช่</option>' +
+      '<option value="false"' + (v ? '' : ' selected') + '>ไม่ใช่</option></select>';
+  } else {
+    const val = v === null ? '' : String(v);
+    ctrl = (val.length > 60 || val.indexOf('\n') >= 0)
+      ? '<textarea class="pd-ai-scalar" style="flex:1;min-height:44px;' + _PD_AI_EDIT_INPUT + '">' + escapeHtml(val) + '</textarea>'
+      : '<input class="pd-ai-scalar" value="' + _pdAiAttr(val) + '" style="flex:1;' + _PD_AI_EDIT_INPUT + '">';
+  }
+  return '<div class="pd-ai-node" data-type="scalar" data-ptype="' + ptype + '" style="display:flex;gap:6px;margin:2px 0">' + ctrl + (removable ? _pdAiEditRemove() : '') + '</div>';
+}
+
+function _pdAiEditAddItem(btn) {
+  const arr = btn.closest('.pd-ai-node');
+  const tmp = document.createElement('div');
+  tmp.innerHTML = _pdAiEditorHtml('', true);
+  arr.insertBefore(tmp.firstChild, btn.parentElement);
+}
+
+function _pdAiEditorRead(node) {
+  const t = node.getAttribute('data-type');
+  if (t === 'scalar') {
+    const ctrl = node.querySelector('.pd-ai-scalar');
+    const raw = ctrl ? ctrl.value : '';
+    const pt = node.getAttribute('data-ptype');
+    if (pt === 'boolean') return raw === 'true';
+    if (pt === 'number') {
+      const n = Number(raw);
+      return raw.trim() !== '' && !isNaN(n) ? n : raw;
+    }
+    if (pt === 'null') return raw === '' ? null : raw;
+    return raw;
+  }
+  if (t === 'array') {
+    return [...node.children]
+      .filter(c => c.classList && c.classList.contains('pd-ai-node'))
+      .map(c => _pdAiEditorRead(c));
+  }
+  const o = {};
+  node.querySelectorAll(':scope > .pd-ai-field').forEach(f => {
+    const child = f.querySelector(':scope > .pd-ai-node');
+    if (child) o[f.getAttribute('data-key')] = _pdAiEditorRead(child);
+  });
+  return o;
+}
+
 function pdAiEditRow(btn) {
   const holder = btn.closest('[data-kind]');
   const sug = holder.getAttribute('data-sug') || '';
+  let structured = null;
+  if (holder.getAttribute('data-structured') === '1') {
+    try { structured = JSON.parse(sug); } catch (e) { structured = null; }
+  }
   const btnS = 'background:#1a3d2a;border:1px solid #4ade80;color:#4ade80;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px';
   const btnC = 'background:#1a1d27;border:1px solid #3a3d4a;color:#888;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px';
-  holder.innerHTML = '<textarea class="pd-ai-edit" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;min-height:56px">' + escapeHtml(sug) + '</textarea>' +
-    '<div style="display:flex;gap:6px;margin-top:6px">' +
+  holder.innerHTML = (structured !== null
+      ? _pdAiEditorHtml(structured, false)
+      : '<textarea class="pd-ai-edit" style="width:100%;background:#0f1117;border:1px solid #2a2d3a;border-radius:6px;padding:8px;color:#e0e0e0;font-size:13px;min-height:56px">' + escapeHtml(sug) + '</textarea>') +
+    '<div style="display:flex;gap:6px;margin-top:8px">' +
     '<button onclick="pdAiResolveOne(this,\'edit\')" style="' + btnS + '">บันทึกค่าของฉัน</button>' +
     '<button onclick="_pdAiLoad()" style="' + btnC + '">ยกเลิก</button>' +
     '</div>';
@@ -8629,14 +8768,19 @@ function pdAiResolveOne(btn, action) {
     action: action,
   };
   if (action === 'edit') {
-    const ta = holder.querySelector('.pd-ai-edit');
-    let v = ta ? ta.value : '';
-    const orig = (holder.getAttribute('data-sug') || '').trim();
-    // Preserve JSON type for complex profile fields (object/array values)
-    if (/^[\[{]/.test(orig) || /^[\[{]/.test(v.trim())) {
-      try { v = JSON.parse(v); } catch (e) { /* keep as string */ }
+    const node = holder.querySelector('.pd-ai-node');
+    if (node) {
+      res.value = _pdAiEditorRead(node);
+    } else {
+      const ta = holder.querySelector('.pd-ai-edit');
+      let v = ta ? ta.value : '';
+      const orig = (holder.getAttribute('data-sug') || '').trim();
+      // Preserve JSON type for complex profile fields (object/array values)
+      if (/^[\[{]/.test(orig) || /^[\[{]/.test(v.trim())) {
+        try { v = JSON.parse(v); } catch (e) { /* keep as string */ }
+      }
+      res.value = v;
     }
-    res.value = v;
   }
   _pdAiResolve([res]);
 }

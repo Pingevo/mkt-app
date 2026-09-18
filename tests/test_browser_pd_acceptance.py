@@ -616,3 +616,261 @@ def test_enrich_shows_only_changed_fields(_ctx):
     assert labels == ["category:category"]
     # The suppressed identical summary never reaches the DOM.
     assert not page.query_selector("#pd-ai-body [data-kind='summary']")
+
+
+# ---------------------------------------------------------------------------
+# 5. Structured proposal values — human rendering, typed accept/edit
+# ---------------------------------------------------------------------------
+# Real proposal shapes from the marketing scope: audience is a nested
+# object, competitors/differentiators/use_cases/keywords are string lists,
+# visual_override mixes a nested object with a list.  The renderer must
+# show all of these as readable Thai UI without ever surfacing JSON syntax,
+# while accept/edit keep the original structured types.
+
+_STRUCTURED_PROPOSAL = {
+    "proposal": {
+        "proposal_id": "struct1",
+        "facts": {"battery_capacity": {"label": "Battery Capacity",
+                                       "value": "680mAh"}},
+        "summary": "นาฬิกาเด็กสมาร์ทวอทช์ กันน้ำ พร้อม GPS",
+        "profile": {
+            "audience": {
+                "primary": {"age": "28-45 ปี", "role": "ผู้ปกครองยุคใหม่"},
+                "end_user": {"age": "4-12 ปี", "desc": "เด็กวัยประถม"},
+            },
+            "competitors": ["imoo Watch Phone Z1", "Xiaomi Mi Kids Watch"],
+            "differentiators": ["กล้อง 5MP", "กันน้ำ IP68"],
+            "use_cases": ["ติดตามลูก", "โทรหาผู้ปกครอง"],
+            "visual_override": {
+                "image_style": {"tone": "สดใส เป็นกันเอง"},
+                "keywords": ["kids", "colorful"],
+            },
+            "mystery_box": {"sub_key": "fallback"},
+        },
+    },
+    "current": {"facts": {}, "summary": "", "category": "", "profile": {}},
+    "source_stale": False,
+    "ai_enrichment": {"status": "proposal_ready"},
+}
+
+_JSON_CHARS = '{}"[]'
+
+
+def _ai_row(page, key):
+    """Read the rendered suggestion cell of one proposal row."""
+    return page.evaluate("""k => {
+      const h = document.querySelector('#pd-ai-body [data-key="' + k + '"]');
+      if (!h) return null;
+      const row = h.closest('.pd-ai-row');
+      const sug = row.querySelector('.pd-ai-sug');
+      return {text: sug.innerText,
+              lis: sug.querySelectorAll('li').length,
+              buttons: [...h.querySelectorAll('button')].map(b => b.textContent.trim())};
+    }""", key)
+
+
+def test_ai_proposal_renders_structured_values_as_human_ui(_ctx):
+    """Objects render as labeled fields, arrays as list items — no JSON
+    syntax anywhere in the review surface."""
+    page = _ctx["page"]
+    page.evaluate("v => { _pdAiView = v; _pdAiRender(); }", _STRUCTURED_PROPOSAL)
+    page.evaluate(
+        "() => document.getElementById('pd-ai-overlay').classList.add('visible')")
+    page.wait_for_selector('#pd-ai-body [data-key="audience"]')
+
+    # Scalar — plain text, no JSON introduced.
+    summ = _ai_row(page, "summary")
+    assert summ["text"] == "นาฬิกาเด็กสมาร์ทวอทช์ กันน้ำ พร้อม GPS"
+
+    # Nested object → labeled human fields (canonical Thai labels).
+    aud = _ai_row(page, "audience")
+    for needle in ("กลุ่มเป้าหมาย", "ผู้ใช้ปลายทาง", "ช่วงอายุ", "บทบาท",
+                   "28-45 ปี", "เด็กวัยประถม"):
+        assert needle in aud["text"], needle
+    assert not any(c in aud["text"] for c in _JSON_CHARS), aud["text"]
+
+    # Array → one readable item per entry, not a "[...]" dump.
+    comp = _ai_row(page, "competitors")
+    assert comp["lis"] == 2
+    assert "imoo Watch Phone Z1" in comp["text"]
+    assert "Xiaomi Mi Kids Watch" in comp["text"]
+    assert not any(c in comp["text"] for c in _JSON_CHARS), comp["text"]
+
+    # Object containing a nested array — labeled field + list.
+    vis = _ai_row(page, "visual_override")
+    assert "สไตล์ภาพ" in vis["text"]
+    assert "kids" in vis["text"] and "colorful" in vis["text"]
+    assert vis["lis"] == 2
+    assert not any(c in vis["text"] for c in _JSON_CHARS), vis["text"]
+
+    # Unknown keys still get a readable fallback label — never JSON.
+    unk = _ai_row(page, "mystery_box")
+    assert "sub key" in unk["text"] and "fallback" in unk["text"]
+    assert not any(c in unk["text"] for c in _JSON_CHARS), unk["text"]
+
+    page.evaluate("() => pdAiClose()")
+
+
+def test_ai_row_actions_are_distinct_spaced_buttons(_ctx):
+    """The three row actions render as separate, non-overlapping buttons —
+    not a merged 'รับค่าไม่ใช้แก้ไขก่อนรับ' blob."""
+    page = _ctx["page"]
+    page.evaluate("v => { _pdAiView = v; _pdAiRender(); }", _STRUCTURED_PROPOSAL)
+    page.evaluate(
+        "() => document.getElementById('pd-ai-overlay').classList.add('visible')")
+    page.wait_for_selector('#pd-ai-body [data-key="competitors"]')
+    res = page.evaluate("""() => {
+      const h = document.querySelector('#pd-ai-body [data-key="competitors"]');
+      const btns = [...h.querySelectorAll('button')];
+      const rects = btns.map(b => b.getBoundingClientRect());
+      const gaps = [];
+      for (let i = 1; i < rects.length; i++) {
+        const a = rects[i - 1], b = rects[i];
+        if (Math.abs(a.top - b.top) < 2) gaps.push(b.left - a.right);
+      }
+      return {count: btns.length,
+              labels: btns.map(b => b.textContent.trim()),
+              minGap: gaps.length ? Math.min(...gaps) : -1};
+    }""")
+    assert res["count"] == 3
+    assert res["labels"] == ["รับค่า", "ไม่ใช้", "แก้ไขก่อนรับ"]
+    assert res["minGap"] >= 4, res
+    page.evaluate("() => pdAiClose()")
+
+
+def _seed_ai_proposal(env, product, profile):
+    """Store a pending marketing proposal with a valid baseline — the state
+    generate_proposal leaves behind, minus the (paid) model call."""
+    brand_root = env["brand_root"]
+    pdir = brand_root / "data" / product
+    pdir.mkdir(parents=True, exist_ok=True)
+    spec = pdir / "spec.txt"
+    spec.write_text("spec text", encoding="utf-8")
+    from src import product_db, ai_enrichment
+    from src.workspace_context import WorkspaceContext, set_workspace
+    set_workspace(WorkspaceContext.for_brand(
+        env["server"]["user_id"], env["bid"], env["server"]["tmp"]))
+    try:
+        rec = product_db.load(product) or {}
+        rec.update({
+            "raw_text": "spec text",
+            "files": [{"name": "spec.txt", "path": str(spec),
+                       "hash": product_db.compute_file_hash(spec),
+                       "type": "text", "status": "ingested"}],
+            "metadata": {}, "derived_facts": {},
+        })
+        product_db.save(product, rec)
+        rec = product_db.load(product)
+        rec["ai_proposal"] = {
+            "proposal_id": "struct-e2e",
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "scopes": ["marketing"],
+            "baseline": ai_enrichment._baseline(product, rec),
+            "profile": profile,
+        }
+        rec["ai_enrichment"] = {"status": "proposal_ready"}
+        product_db.save(product, rec)
+    finally:
+        set_workspace(None)
+
+
+def _read_profile(env, product):
+    p = env["brand_root"] / "cache" / product / "product_profile.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+
+def _open_ai_dialog(page, product):
+    _open_pd(page, product)
+    page.evaluate("() => { if (typeof pdAiClose === 'function') pdAiClose(); }")
+    page.locator("#pd-body button", has_text="เติมข้อมูลด้วย AI").click()
+
+
+def test_ai_accept_structured_proposal_preserves_types(_ctx):
+    """Accepting an object/array proposal writes the ORIGINAL structured
+    value — dict stays dict, list stays list."""
+    env = _ctx
+    page = env["page"]
+    prod = "AIStructAccept"
+    _seed_ai_proposal(env, prod, {
+        "audience": {"primary": {"age": "28-45 ปี", "role": "ผู้ปกครอง"},
+                     "end_user": {"age": "4-12 ปี", "desc": "เด็ก"}},
+        "competitors": ["imoo Watch Phone Z1", "Xiaomi Mi Kids Watch"],
+    })
+    # Canonical product unchanged until acceptance.
+    assert _read_profile(env, prod).get("audience") is None
+
+    _open_ai_dialog(page, prod)
+    page.wait_for_selector('#pd-ai-body [data-key="audience"]', timeout=10000)
+    for key in ("audience", "competitors"):
+        page.locator(f'#pd-ai-body [data-key="{key}"] button',
+                     has_text="รับค่า").click()
+        page.wait_for_timeout(700)
+
+    prof = _read_profile(env, prod)
+    assert isinstance(prof["audience"], dict), prof
+    assert prof["audience"]["primary"] == {"age": "28-45 ปี",
+                                          "role": "ผู้ปกครอง"}
+    assert isinstance(prof["competitors"], list), prof
+    assert prof["competitors"] == ["imoo Watch Phone Z1",
+                                   "Xiaomi Mi Kids Watch"]
+
+
+def test_ai_edit_structured_proposal_preserves_types(_ctx):
+    """Editing a structured suggestion uses a type-aware editor (per-item
+    inputs, labeled object fields) — the saved value keeps its type, it is
+    never a stringified JSON blob."""
+    env = _ctx
+    page = env["page"]
+    prod = "AIStructEdit"
+    _seed_ai_proposal(env, prod, {
+        "competitors": ["imoo Watch Phone Z1", "Xiaomi Mi Kids Watch"],
+        "audience": {"primary": {"age": "28-45 ปี"}},
+    })
+    _open_ai_dialog(page, prod)
+    page.wait_for_selector('#pd-ai-body [data-key="competitors"]',
+                           timeout=10000)
+
+    # Edit the array — per-item controls, no JSON textarea.
+    page.locator('#pd-ai-body [data-key="competitors"] button',
+                 has_text="แก้ไขก่อนรับ").click()
+    page.wait_for_selector(
+        '#pd-ai-body [data-key="competitors"] .pd-ai-node[data-type="array"]')
+    editor = page.evaluate("""() => {
+      const h = document.querySelector('#pd-ai-body [data-key="competitors"]');
+      const ta = h.querySelector('textarea');
+      return {scalars: h.querySelectorAll('.pd-ai-scalar').length,
+              addBtn: [...h.querySelectorAll('button')]
+                        .some(b => b.textContent.includes('เพิ่มรายการ')),
+              jsonTextarea: !!ta && /[\\[\\]{}"]/.test(ta.value)};
+    }""")
+    assert editor["scalars"] == 2, editor
+    assert editor["addBtn"], editor
+    assert not editor["jsonTextarea"], editor
+
+    page.evaluate("""() => {
+      const h = document.querySelector('#pd-ai-body [data-key="competitors"]');
+      h.querySelectorAll('.pd-ai-scalar')[0].value = 'imoo Z2';
+    }""")
+    page.locator('#pd-ai-body [data-key="competitors"] button',
+                 has_text="บันทึกค่าของฉัน").click()
+    page.wait_for_timeout(800)
+    prof = _read_profile(env, prod)
+    assert prof["competitors"] == ["imoo Z2", "Xiaomi Mi Kids Watch"], prof
+
+    # Edit the object — labeled leaf fields; one edit keeps the dict shape.
+    page.locator('#pd-ai-body [data-key="audience"] button',
+                 has_text="แก้ไขก่อนรับ").click()
+    page.wait_for_selector(
+        '#pd-ai-body [data-key="audience"] .pd-ai-node[data-type="object"]')
+    page.evaluate("""() => {
+      const h = document.querySelector('#pd-ai-body [data-key="audience"]');
+      const inp = h.querySelector(
+        '.pd-ai-field[data-key="primary"] .pd-ai-field[data-key="age"] .pd-ai-scalar');
+      inp.value = '30-40 ปี';
+    }""")
+    page.locator('#pd-ai-body [data-key="audience"] button',
+                 has_text="บันทึกค่าของฉัน").click()
+    page.wait_for_timeout(800)
+    prof = _read_profile(env, prod)
+    assert isinstance(prof["audience"], dict), prof
+    assert prof["audience"]["primary"]["age"] == "30-40 ปี", prof
