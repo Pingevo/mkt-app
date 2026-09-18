@@ -9,6 +9,9 @@
 # Local user workspace — mutable state, never product config
 workspace/
 
+# Per-user workspaces (brands, products, usage logs) — runtime state
+/users/
+
 # Python
 __pycache__/
 *.pyc
