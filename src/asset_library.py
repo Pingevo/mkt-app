@@ -44,7 +44,27 @@ def _assets_dir() -> Path:
 
 
 def _db_path() -> Path:
-    """Asset DB path — local workspace (user-derived catalog)."""
+    """Asset DB path — brand-scoped under an active brand context (ASSET-ISO-01).
+
+    Active brand  → ``users/<uid>/brands/<bid>/cache/assets/db.json``
+    No workspace  → ``workspace/local/cache/assets/db.json`` (CLI/test compat)
+    User-only ws  → fail closed, same contract as ``local_brand_dir``.
+    """
+    from .workspace_context import get_workspace
+    ws = get_workspace()
+    if ws is not None and ws.brand_id is not None:
+        from .workspace_context import brand_state_root
+        return brand_state_root() / "cache" / "assets" / "db.json"
+    if ws is None:
+        return _legacy_db_path()
+    raise ValueError("asset library catalog requires an active brand context")
+
+
+def _legacy_db_path() -> Path:
+    """Pre-ASSET-ISO-01 shared catalog location (user-level / CLI global).
+
+    Read-only legacy source — never written to once a brand catalog exists.
+    """
     from .local_workspace import local_root
     return local_root() / "cache" / "assets" / "db.json"
 
@@ -212,8 +232,73 @@ def _empty_db() -> dict[str, Any]:
     return {"assets": [], "next_id": 1}
 
 
+def _atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _migrate_legacy_catalog(brand_db_path: Path) -> None:
+    """One-time split of the pre-ASSET-ISO-01 shared catalog into this brand.
+
+    Runs only when the brand catalog does not exist yet. Claims a legacy
+    record only when its stored path resolves inside this brand's
+    ``brand/assets/`` directory — the sole mechanical ownership proof.
+    Everything else stays in the untouched legacy file (non-destructive
+    quarantine) and is listed in ``migration_report.json``.
+
+    Deterministic + idempotent: the legacy file is read-only; re-running
+    produces the same brand catalog, and once the brand catalog exists the
+    migration never runs again (the brand catalog is authoritative).
+    """
+    legacy = _legacy_db_path()
+    if not legacy.exists() or legacy == brand_db_path:
+        return
+    claimed: list[dict] = []
+    quarantined: list[dict] = []
+    status = "migrated"
+    try:
+        with open(legacy, "r", encoding="utf-8") as f:
+            legacy_data = json.load(f)
+        records = legacy_data.get("assets", []) if isinstance(legacy_data, dict) else []
+        assets_root = _assets_dir().resolve()
+        for rec in records:
+            rec_path = rec.get("path") or ""
+            try:
+                inside = bool(rec_path) and Path(rec_path).resolve().is_relative_to(assets_root)
+            except OSError:
+                inside = False
+            if inside:
+                claimed.append(rec)
+            else:
+                quarantined.append(
+                    {"id": rec.get("id"), "path": rec_path,
+                     "reason": "path missing or outside this brand's assets directory"}
+                )
+    except (json.JSONDecodeError, OSError):
+        status = "legacy_unreadable"
+
+    max_id = 0
+    for rec in claimed:
+        rid = str(rec.get("id", ""))
+        if rid.startswith("a_") and rid[2:].isdigit():
+            max_id = max(max_id, int(rid[2:]))
+    _atomic_write_json(brand_db_path, {"assets": claimed, "next_id": max_id + 1})
+    _atomic_write_json(brand_db_path.parent / "migration_report.json", {
+        "migrated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "source": str(legacy),
+        "status": status,
+        "claimed_ids": [r.get("id") for r in claimed],
+        "quarantined": quarantined,
+        "note": "legacy catalog preserved read-only; quarantined records are not visible to any brand",
+    })
+
+
 def _load_db() -> dict[str, Any]:
     path = _db_path()
+    if not path.exists():
+        _migrate_legacy_catalog(path)
     if not path.exists():
         return _empty_db()
     try:

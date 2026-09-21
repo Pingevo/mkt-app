@@ -2,9 +2,14 @@
 
 FREE-IMPORT contract: catalog splitting is decided by deterministic table
 structure — a stable identity column (Model/SKU/Product/Item) with multiple
-distinct values — never by a model call.  The real PO acceptance fixture is
-``CACGO Smart Watch Price List- Grace.pdf`` (20 numbered model rows).
+distinct values — never by a model call.
+
+Real-source qualification (opt-in): point ``MKTAPP_CACGO_CATALOG_PDF`` at the
+supplier catalog (``CACGO Smart Watch Price List- Grace.pdf``, 20 numbered
+model rows) to run the real-document check.  It is never required CI state;
+the generic contract is covered hermetically by the synthetic tests below.
 """
+import hashlib
 import json
 import os
 import sys
@@ -15,7 +20,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CACGO_PDF = Path("/Users/its-dev2/Downloads/CACGO Smart Watch Price List- Grace.pdf")
+_CACGO_ENV = os.environ.get("MKTAPP_CACGO_CATALOG_PDF")
+CACGO_PDF = Path(_CACGO_ENV).expanduser() if _CACGO_ENV else None
 
 
 @pytest.fixture
@@ -38,11 +44,14 @@ def _seg(files):
 #  Real CACGO PDF — authoritative reproduction
 # ------------------------------------------------------------------
 
-@pytest.mark.skipif(not CACGO_PDF.exists(), reason="real PO fixture absent")
+@pytest.mark.skipif(
+    CACGO_PDF is None or not CACGO_PDF.exists(),
+    reason="real-source qualification — set MKTAPP_CACGO_CATALOG_PDF")
 def test_cacgo_pdf_detects_twenty_products_via_staging(_ws, tmp_path):
     """The real price-list PDF must stage as MULTIPLE product candidates —
     one per Model row — not collapse into a single product."""
     from src import staging
+    assert CACGO_PDF is not None
 
     batch_id = staging.create_batch(
         [(CACGO_PDF.name, CACGO_PDF.read_bytes())])
@@ -61,10 +70,126 @@ def test_cacgo_pdf_detects_twenty_products_via_staging(_ws, tmp_path):
         assert refs and all(r.get("file") == CACGO_PDF.name for r in refs), \
             "each candidate must keep row-level source provenance"
 
+    from src import product_db
+    chosen = [next(i for i, s in enumerate(segs) if s["product_key"] == key)
+              for key in ("K67", "K72")]
+    staging.commit_batch(batch_id, [
+        {"segment_index": i, "action": "create"} for i in chosen])
+    first = product_db.load("K67")
+    second = product_db.load("K72")
+    first_facts = {f["value"] for f in first["derived_facts"].values()}
+    second_facts = {f["value"] for f in second["derived_facts"].values()}
+    assert {"K67", "US$21.50"} <= first_facts
+    assert {"K72", "US$22.50"} <= second_facts
+    assert "K72" not in first_facts and "US$22.50" not in first_facts
+    assert "K67" not in second_facts and "US$21.50" not in second_facts
+    assert all(f.get("source_file") == CACGO_PDF.name
+               for f in first["derived_facts"].values())
+    assert all(f.get("source_file") == CACGO_PDF.name
+               for f in second["derived_facts"].values())
+
+    def media_hashes(record):
+        return {
+            hashlib.sha256(Path(item["path"]).read_bytes()).hexdigest()
+            for item in record["image_descriptions"]
+            if not item.get("unassigned_source_media")
+        }
+
+    first_media = media_hashes(first)
+    second_media = media_hashes(second)
+    assert len(first_media) == 4 and len(second_media) == 4
+    assert first_media - second_media
+    assert second_media - first_media
+
 
 # ------------------------------------------------------------------
 #  Synthetic table structures — generic detector contract
 # ------------------------------------------------------------------
+
+def test_multi_product_commit_keeps_product_scoped_facts(_ws):
+    from src import product_db, staging
+
+    source = ("Model,Material,Price\n"
+              "Atlas A,Titanium,$101\n"
+              "Beacon B,Steel,$202\n")
+    batch_id = staging.create_batch([("catalog.csv", source.encode())])
+    result = staging.run_segmentation(batch_id)
+    assert result["mode"] == "multi"
+
+    staging.commit_batch(batch_id, [
+        {"segment_index": 0, "action": "create"},
+        {"segment_index": 1, "action": "create"},
+    ])
+    atlas = product_db.load("Atlas A").get("derived_facts") or {}
+    beacon = product_db.load("Beacon B").get("derived_facts") or {}
+    atlas_pairs = {(f["label"], f["value"]) for f in atlas.values()}
+    beacon_pairs = {(f["label"], f["value"]) for f in beacon.values()}
+
+    assert {("Model", "Atlas A"), ("Material", "Titanium"),
+            ("Price", "$101")} <= atlas_pairs
+    assert {("Model", "Beacon B"), ("Material", "Steel"),
+            ("Price", "$202")} <= beacon_pairs
+    assert atlas_pairs != beacon_pairs
+    assert not ({"Beacon B", "Steel", "$202"}
+                & {value for _, value in atlas_pairs})
+    assert not ({"Atlas A", "Titanium", "$101"}
+                & {value for _, value in beacon_pairs})
+    assert all(f.get("source_file") == "catalog.csv" for f in atlas.values())
+    assert all(f.get("source_file") == "catalog.csv" for f in beacon.values())
+
+
+def _two_product_pdf() -> bytes:
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=360)
+    xs = [20, 80, 200, 480, 580]
+    ys = [40, 80, 200, 320]
+    for x in xs:
+        page.draw_line((x, ys[0]), (x, ys[-1]), width=0.5)
+    for y in ys:
+        page.draw_line((xs[0], y), (xs[-1], y), width=0.5)
+    for x, text in zip(xs, ("No.", "Model", "Product Picture", "Price")):
+        page.insert_text((x + 4, 65), text, fontsize=9)
+    for y, values in ((110, ("1", "Atlas A", "$101")),
+                      (230, ("2", "Beacon B", "$202"))):
+        page.insert_text((24, y), values[0], fontsize=9)
+        page.insert_text((84, y), values[1], fontsize=9)
+        page.insert_text((484, y), values[2], fontsize=9)
+    for rect, color in ((fitz.Rect(260, 105, 325, 170), 0xFF0000),
+                        (fitz.Rect(260, 225, 325, 290), 0x0000FF)):
+        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 65, 65), False)
+        pix.clear_with(color)
+        page.insert_image(rect, stream=pix.tobytes("png"))
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_multi_product_pdf_keeps_product_scoped_media(_ws):
+    from src import product_db, staging
+
+    batch_id = staging.create_batch([("catalog.pdf", _two_product_pdf())])
+    result = staging.run_segmentation(batch_id)
+    assert [s["product_key"] for s in result["segments"]] == ["Atlas A", "Beacon B"]
+    staging.commit_batch(batch_id, [
+        {"segment_index": 0, "action": "create"},
+        {"segment_index": 1, "action": "create"},
+    ])
+
+    def owned(name):
+        return [Path(i["path"]) for i in product_db.load(name)["image_descriptions"]
+                if not i.get("unassigned_source_media")]
+
+    atlas = owned("Atlas A")
+    beacon = owned("Beacon B")
+    assert len(atlas) == 1
+    assert len(beacon) == 1
+    assert {p.read_bytes() for p in atlas}.isdisjoint(
+        {p.read_bytes() for p in beacon})
+    assert product_db.get_product_image_paths("Atlas A") == [str(atlas[0])]
+    assert product_db.get_product_image_paths("Beacon B") == [str(beacon[0])]
+
 
 def test_identity_column_rows_become_candidates():
     """A table with a Model column and 3 distinct identities → 3 segments."""
@@ -81,8 +206,11 @@ def test_identity_column_rows_become_candidates():
     out = _seg(files)
     assert out is not None and out["mode"] == "multi"
     assert [s["product_key"] for s in out["products"]] == ["A1", "B2", "C3"]
+    assert [(s["source_refs"][0]["line_start"],
+             s["source_refs"][0]["line_end"])
+            for s in out["products"]] == [(2, 2), (3, 3), (4, 5)]
     # row text is self-describing: header labels carry into the segment text
-    assert "Model: B2" in out["products"][1]["text"]
+    assert "Model | B2" in out["products"][1]["text"]
 
 
 def test_same_model_color_rows_stay_single():

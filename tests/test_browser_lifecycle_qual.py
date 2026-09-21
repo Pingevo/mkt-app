@@ -918,11 +918,12 @@ class TestJourneyB:
                 assert server.data_products(uid, a1) == [], \
                     "product materialized before human confirmation"
                 # deterministic single-product import — exactly one choice
-                seg_count = page.locator("select[data-seg-action]").count()
+                seg_count = page.locator(".seg-toggle[data-seg-action]").count()
                 assert seg_count == 1, \
                     f"expected 1 deterministic segment, got {seg_count}"
 
-                page.select_option("select[data-seg-action='0']", "create")
+                page.locator(".seg-toggle[data-seg-action='0'] label",
+                             has_text="เพิ่ม").click()
                 page.click("#staging-confirm-btn")
                 page.wait_for_function(
                     "document.querySelector('#upload-modal-status')"
@@ -1095,12 +1096,12 @@ class TestJourneyC:
                 # Exactly one segment is offered for review — the contract
                 # allows review of the single detected product, never a
                 # multi-product picker.
-                selects = page.locator(
-                    "#staging-preview-modal select[data-seg-action]")
-                assert selects.count() == 1, \
-                    f"single-product URL must stage exactly 1 choice: {selects.count()}"
+                toggles = page.locator(
+                    "#staging-preview-modal .seg-toggle[data-seg-action]")
+                assert toggles.count() == 1, \
+                    f"single-product URL must stage exactly 1 choice: {toggles.count()}"
                 page.fill("input[data-seg-name='0']", "URL Alpha Gadget")
-                page.select_option("select[data-seg-action='0']", "create")
+                toggles.locator("label", has_text="เพิ่ม").click()
                 page.click("#staging-confirm-btn")
                 page.wait_for_function(
                     "document.querySelector('#upload-modal-status')"
@@ -1395,7 +1396,8 @@ class TestJourneyD:
                 # --- seed the product through the REAL staging UI ----------
                 _stage_via_ui(page, server, seed_path,
                               product_name="PD Detail Widget")
-                page.select_option("select[data-seg-action='0']", "create")
+                page.locator(".seg-toggle[data-seg-action='0'] label",
+                             has_text="เพิ่ม").click()
                 page.click("#staging-confirm-btn")
                 page.wait_for_function(
                     "document.querySelector('#upload-modal-status')"
@@ -1663,7 +1665,7 @@ class TestJourneyD:
                 prods = server.data_products(uid, a1)
                 if "PD Detail Widget" in prods:
                     failures.append("deleted product still on disk")
-                if "QualWatch Alpha" not in prods:
+                if "D Sibling Sentinel" not in prods:
                     failures.append("delete removed wrong product")
                 _shot(env, "pd_deleted")
             finally:

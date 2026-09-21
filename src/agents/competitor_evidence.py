@@ -269,14 +269,48 @@ class CompetitorReportRenderer:
         research: ResearchResponse,
         relevant_annotations: list[dict] | None = None,
         quick_brief: str = "",
+        our_product: str = "",
+        our_product_spec: str | None = None,
     ):
         self.research = research
         self.quick_brief = (quick_brief or "").lower().strip()
+        # our_product_spec = product-owned source for our-product cells
+        # (confirmed facts/profile/scoped segment).  None → standalone mode:
+        # the caller-provided product_spec is caller-asserted product data.
+        # "" or text → ONLY this source is eligible; an unscoped page blob
+        # can embed other products' listings and must never fill our cells.
+        self._our_product_spec = our_product_spec
+        # our_product = runtime-selected product identity (authoritative).
+        # research.target_model is a model-emitted research field — it may
+        # disagree (e.g. a model code found in the spec) and must never
+        # override the selected product in the rendered report.
+        self._our_product = (our_product or "").strip()
+        if (self._our_product and research.target_model
+                and self._canonical_identity(self._our_product)
+                != self._canonical_identity(research.target_model)):
+            print(
+                f"[competitor_analysis] identity mismatch: runtime product "
+                f"'{self._our_product}' vs research target_model "
+                f"'{research.target_model}' — rendering runtime identity"
+            )
         self.rel_map: dict[str, dict] = {}
         for a in relevant_annotations or []:
             key = (a.get("url") or "").lower().rstrip("/")
             if key:
                 self.rel_map[key] = a
+
+    def _our_product_label(self) -> str:
+        """Authoritative our-product display name: runtime-selected identity
+        first, then the model's research field (standalone fallback), then a
+        generic label — never a competitor name."""
+        return self._our_product or self.research.target_model or "สินค้าของเรา"
+
+    def _product_source(self, product_spec: str) -> str:
+        """The text our-product cells may quote.  Runtime-scoped mode uses
+        only the product-owned source; standalone mode keeps the given spec."""
+        if self._our_product_spec is not None:
+            return self._our_product_spec
+        return product_spec
 
     def _competitor_names_lower(self) -> list[str]:
         return [n.lower() for n in self.research.competitor_names]
@@ -398,29 +432,66 @@ class CompetitorReportRenderer:
     def _product_cells(self, product_spec: str, fields: tuple[tuple[str, str], ...]) -> dict[str, str]:
         """Parse product spec lines using field labels from validated evidence.
 
-        For each field, check if any product spec line starts with
+        For each field, check if any product spec line matches
         that label (case-insensitive, canonicalized). This is a best-effort
         match — if no line matches, the cell shows a clear message indicating
         no match was found, NOT '-' (which could be misread as "product has
         no data").
+
+        Spec lines arrive in two extractable shapes — parsed to (label, value):
+          - ``label: value`` / ``label：value`` — facts-section lines
+          - ``a | b | ... | v`` — flattened spec-table rows where the LAST
+            cell is the value and the preceding cells are the label path
+            (``Other | Waterproof level | IP68``)
+          Bare prose lines have no extractable value and are skipped —
+          otherwise an embedded recommendation card could become a cell.
+
+        Matching is mechanical only: the field canon equals the label canon,
+        prefixes it (hierarchical section ``Camera | ...``), or appears as a
+        whole word inside it (``waterproof`` inside ``Other Waterproof level``).
+        When multiple distinct lines match (e.g. front vs back camera), all
+        candidates are shown with their sub-labels — picking one silently
+        would guess semantics code cannot know.
         """
         cells: dict[str, str] = {}
         for canon, display in fields:
-            cells[canon] = self._NO_MATCH
+            matches: list[tuple[str, str]] = []  # (sub_label, value)
             for raw_line in product_spec.splitlines():
                 line = raw_line.strip()
                 if not line:
                     continue
-                line_canon = self._canonical_field(line.split(":")[0] if ":" in line else line.split("：")[0] if "：" in line else line)
-                if line_canon == canon or line_canon.startswith(canon):
-                    # Extract the value after the label
-                    for sep in ("：", ":"):
-                        if sep in line:
-                            cells[canon] = line.split(sep, 1)[1].strip()
-                            break
-                    else:
-                        cells[canon] = line
-                    break
+                label = value = None
+                for sep in ("：", ":"):
+                    if sep in line:
+                        label, _, value = line.partition(sep)
+                        label, value = label.strip(), value.strip()
+                        break
+                if label is None and "|" in line:
+                    parts = [c.strip() for c in line.strip().strip("|").split("|") if c.strip()]
+                    if len(parts) >= 2:
+                        label, value = " ".join(parts[:-1]), parts[-1]
+                if label is None:
+                    # Bare prose line — no label:value shape to extract.
+                    # Skipping prevents a whole sentence/card (e.g. an
+                    # embedded related-product listing) from becoming a cell.
+                    continue
+                sub_label = label
+                label_canon = self._canonical_field(label)
+                if label_canon == canon or label_canon.startswith(canon) or canon in label_canon.split():
+                    matches.append((sub_label, value))
+            # The same fact can arrive via two source shapes (derived-fact
+            # "Battery Capacity: 680mAh" + spec-table "Battery | Capacity |
+            # 680mAh") — if every match agrees on one value, emit the value
+            # alone; only when values differ are sub-labels needed for
+            # disambiguation (front vs back camera).
+            uniq_values = list(dict.fromkeys(v for _, v in matches))
+            if not uniq_values:
+                cells[canon] = self._NO_MATCH
+            elif len(uniq_values) == 1:
+                cells[canon] = uniq_values[0]
+            else:
+                cells[canon] = "; ".join(
+                    f"{s}: {v}" for s, v in dict.fromkeys(matches))
         return cells
 
     def _fields_to_render(self, product_spec: str) -> tuple[tuple[str, str], ...]:
@@ -486,7 +557,7 @@ class CompetitorReportRenderer:
         """
         by_field = self._index_validated()
         fields = self._fields_to_render(product_spec)
-        product_cells = self._product_cells(product_spec, fields)
+        product_cells = self._product_cells(self._product_source(product_spec), fields)
 
         competitors = [
             comp
@@ -498,7 +569,7 @@ class CompetitorReportRenderer:
             return self._render_limited_analysis(product_spec)
 
         lines = [
-            f"# Executive Brief: {self.research.target_model}",
+            f"# Executive Brief: {self._our_product_label()}",
             "",
             "## คู่แข่งที่วิเคราะห์",
             "",
@@ -569,7 +640,7 @@ class CompetitorReportRenderer:
 
         by_field = self._index_validated()
         fields = self._fields_to_render(product_spec)
-        product_cells = self._product_cells(product_spec, fields)
+        product_cells = self._product_cells(self._product_source(product_spec), fields)
 
         # show only competitors that have at least one validated evidence in the rendered fields
         competitors = [
@@ -582,14 +653,14 @@ class CompetitorReportRenderer:
             return self._render_limited_analysis(product_spec)
 
         lines = [
-            f"# รายงานวิเคราะห์เปรียบเทียบคู่แข่ง: {self.research.target_model}",
+            f"# รายงานวิเคราะห์เปรียบเทียบคู่แข่ง: {self._our_product_label()}",
             "",
             "## ตารางเปรียบเทียบคุณสมบัติและสเปก",
             "",
         ]
 
         lines.extend([
-            "| คุณสมบัติ | " + " | ".join([self.research.target_model] + competitors) + " |",
+            "| คุณสมบัติ | " + " | ".join([f"{self._our_product_label()} (สินค้าของเรา)"] + competitors) + " |",
             "| :--- | " + " | ".join([":---"] * (len(competitors) + 1)) + " |",
         ])
 
@@ -661,7 +732,7 @@ class CompetitorReportRenderer:
         - explains what's missing
         """
         lines = [
-            f"# รายงานวิเคราะห์จำกัด: {self.research.target_model}",
+            f"# รายงานวิเคราะห์จำกัด: {self._our_product_label()}",
             "",
             "**limited_analysis: true**",
             "",
@@ -675,9 +746,10 @@ class CompetitorReportRenderer:
             lines.append("- ยังไม่ระบุ")
         lines.append("")
 
-        # Product spec summary
+        # Product spec summary — scoped to product-owned source so embedded
+        # related-product content never renders as our product's facts.
         lines.extend(["## สรุปสินค้าของเรา", ""])
-        for raw_line in (product_spec or "").splitlines():
+        for raw_line in (self._product_source(product_spec) or "").splitlines():
             line = raw_line.strip()
             if line:
                 lines.append(f"- {line}")
@@ -962,6 +1034,8 @@ class BrandInterpretationPass:
 3. implications เป็น inference/recommendation ไม่ใช่ evidence
 4. แต่ละ implication ต้องอ้างอิง evidence ที่อยู่ในรายการที่ให้มา (evidence_ref = index)
 5. ห้าม dump raw brand context ลงใน implications — ใช้เป็นเลนส์คิดเท่านั้น
+6. เมื่ออ้างข้อเท็จจริงจาก evidence ต้องระบุชื่อ competitor รายนั้นเสมอ — ห้ามขยายหลักฐานของรายเดียวเป็น "คู่แข่ง" โดยรวม (เช่น evidence ว่า A มีการรับประกัน 1 ปี → ห้ามเขียน "คู่แข่งมีการรับประกัน 1 ปี")
+7. implication สำคัญควรอ้างอิง competitor ที่มี verified evidence เพียงพอ — ห้ามเขียนโปรไฟล์รายละเอียดให้ competitor ที่ไม่มี evidence
 
 ตัวอย่าง:
 - evidence[0]: "CompA ราคา 5,000 THB" + brand: "premium positioning"
@@ -1133,8 +1207,11 @@ field (เลือกจากข้อมูลจริงทีพบ):
 - field คือชื่อคุณสมบัติทีเกี่ยวข้องกับสินค้าทีกำลังวิเคราะห์
 - เลือกจากข้อมูลสินค้าและคำขอของผู้ใช้ — ไม่มีรายการ fixed
 - ตัวอย่างเช่น price, menu, material, plan tier, display, battery — ขึ้นกับสินค้าจริง
+- field ต้องระบุคุณสมบัติเดียวที่เจาะจงที่สุดที่ claim นั้นรองรับ — ห้ามรวมหลายคุณสมบัติไว้ใน field กว้าง เช่น "features", "general", "overview" เมื่อหลักฐานแยกเป็น attribute เฉพาะได้
+- ถ้า claim เดียวครอบคลุมหลายคุณสมบัติ ให้แยกเป็น evidence หลายรายการ รายการละ field หนึ่ง
 - ห้ามตั้งชื่อ field ทีไม่มีในข้อมูลจริง
 - ใช้ field label เดียวกันสำหรับคุณสมบัติเดียวกันข้าม competitors (เช่น ใช้ "price" ทั้งคู่ ไม่ใช่ "price" กับ "Price")
+- ถ้าคุณสมบัตินั้นปรากฏในข้อมูลสินค้าของเรา ให้ใช้ชื่อ field ตาม label เดียวกับที่ข้อมูลสินค้าใช้ (เช่น ถ้าข้อมูลสินค้าเขียน "ราคา" ให้ field เป็น "ราคา" ไม่ใช่ "price") — เพื่อให้คอลัมน์สินค้าของเราในตารางแสดงค่าจริงได้
 
 กฎการเลือก evidence:
 - สูงสุด 6 evidence เท่านั้น
@@ -1142,6 +1219,8 @@ field (เลือกจากข้อมูลจริงทีพบ):
 - ให้ความสำคัญกับ evidence ทีมี geography: thailand
 - ไม่ต้องสร้าง evidence ครบทุก field หรือทุก competitor
 - แต่ละ claim ต้องกระชับ ไม่เกิน 400 ตัวอักษร
+- แต่ละ claim เป็นของ competitor ที่ระบุใน field `competitor` รายนั้นเท่านั้น — ห้าม generalize ข้อเท็จจริงของคู่แข่งรายเดียวให้เป็น "คู่แข่ง" ทั้งหมด
+- เมื่อมีหลาย URL รองรับ claim เดียวกัน ให้เลือกแหล่งที่เป็นทางการที่สุดก่อน: เว็บผู้ผลิต/ผู้จำหน่ายอย่างเป็นทางการ → ร้านค้าหรือสื่อที่น่าเชื่อถือ → บทความรวม/รีวิวรวม (เลือกเฉพาะจาก URL ที่มีอยู่แล้วเท่านั้น)
 
 กฎ recommendations และ hypotheses (สำคัญมาก):
 - evidence_based_recommendations: ข้อเสนอแนะที่มีหลักฐานรองรับโดยตรง
@@ -1153,6 +1232,9 @@ field (เลือกจากข้อมูลจริงทีพบ):
 - strategic_hypotheses: สมมติฐานเชิงกลยุทธ์ที่ยังไม่ยืนยัน
   - เป็นความคิดเห็น/ข้อสังเกต ไม่ใช่ข้อเท็จจริง
   - ต้องมี rationale อธิบายว่าทำไมคิดแบบนั้น
+  - rationale อ้างได้เฉพาะ evidence ที่มีอยู่จริง หรือใช้ถ้อยคำเดาที่ระบุชัดเจน — ห้ามเขียนข้อเท็จจริงที่ไม่มีหลักฐาน (เช่น "ได้รับความนิยมสูง", "ครองตลาด") แม้จะอยู่ในส่วนสมมติฐาน
+  - คู่แข่งที่ไม่มี verified evidence เลย → ห้ามเขียนรายละเอียดสเปก/โปรไฟล์ให้ — ให้ระบุช่องว่างหลักฐานใน uncertainty แทน
+  - เมื่ออ้างข้อเท็จจริงของคู่แข่ง ต้องระบุชื่อรายนั้นเสมอ — ห้ามเขียน "คู่แข่ง" โดยรวมสำหรับข้อเท็จจริงที่มีหลักฐานแค่บางราย
   - สูงสุด 3 รายการ
 - uncertainty: สิ่งที่ยังไม่พบหลักฐาน ห้ามคาดการณ์
   - สูงสุด 3 รายการ

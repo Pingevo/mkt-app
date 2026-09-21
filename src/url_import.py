@@ -1055,23 +1055,42 @@ def fetch_product_page(url: str) -> dict:
         )
 
         ex, text, body_text = _parse(html_bytes, final_url)
-        if not _usable(ex, body_text):
-            # Thin initial HTML / JS shell / challenge page. Best-effort
-            # browser fallback under the same URL/IP policy; failure surfaces
-            # the controlled error, not silently thin or challenged content.
-            fetched_via = "browser"
-            final_url, html_bytes = _browser_fetch(url)
-            ex, text, body_text = _parse(html_bytes, final_url)
-            if not _usable(ex, body_text):
-                raise UrlImportError(
-                    "empty_page", f"insufficient usable content from {final_url}")
+        signals = classify_product_signals(ex.jsonld_chunks)
+        if not _usable(ex, body_text) or signals["page_class"] != "single":
+            # Thin initial HTML / JS shell / challenge page — OR a readable
+            # document that cannot confirm one product.  Client-rendered
+            # storefronts serve fat boilerplate shells (nav/footer text past
+            # MIN_BODY_CHARS, og:type meta) whose JSON-LD Product only exists
+            # after render, so an unconfirmed classification is also a reason
+            # to try the browser once under the same URL/IP policy.  The
+            # rendered doc is adopted only when usable; classification of
+            # whatever doc we keep still decides — fail-closed unchanged.
+            try:
+                b_url, b_html = _browser_fetch(url)
+            except UrlImportError:
+                if not _usable(ex, body_text):
+                    raise  # nothing usable at all — surface the fetch error
+                # usable static doc: browser failure adds no evidence —
+                # the static verdict stands.
+            else:
+                b_ex, b_text, b_body = _parse(b_html, b_url)
+                if _usable(b_ex, b_body):
+                    fetched_via = "browser"
+                    final_url, html_bytes = b_url, b_html
+                    ex, text, body_text = b_ex, b_text, b_body
+                    signals = classify_product_signals(ex.jsonld_chunks)
+                elif not _usable(ex, body_text):
+                    raise UrlImportError(
+                        "empty_page",
+                        f"insufficient usable content from {b_url}")
+                # else: rendered doc unusable but the static doc was
+                # readable — keep the static verdict.
 
 
         canonical = ex.meta.get("og_url") or ex.canonical
         # Deterministic single-product classification from structured page
         # signals (JSON-LD / og:type) — no model involved, per the
         # FREE-IMPORT URL contract.
-        signals = classify_product_signals(ex.jsonld_chunks)
         images: list[dict] = []
         total_image_bytes = 0
         # Non-single pages get rejected by the caller — never download their

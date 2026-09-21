@@ -589,3 +589,52 @@ def test_rejects_too_long_uncertainty():
     payload = _base_payload(uncertainty=["x" * 401])
     ok, err, _ = agent._validate_research_json(payload)
     assert not ok and "uncertainty too long" in err
+
+
+# ---------------------------------------------------------------------------
+# AGENT2-QUALITY-CLOSEOUT-01 — comparison-table usability contract
+# ---------------------------------------------------------------------------
+
+
+def test_table_header_labels_target_as_our_product():
+    """The target column must be visually distinguishable from competitor
+    columns — a bare model code reads as just another competitor."""
+    fixture = _load_fixture()
+    research = ResearchResponse.from_dict(json.loads(_good_research_response()))
+    renderer = CompetitorReportRenderer(research, relevant_annotations=fixture["relevant_annotations"])
+    output = renderer.render(fixture["product_spec"])
+    header = next(l for l in output.splitlines() if l.startswith("| คุณสมบัติ"))
+    assert "CACGO K77 (สินค้าของเรา)" in header
+    assert "Xiaomi Watch S3" in header and "Kieslect" in header
+
+
+def test_each_evidence_field_renders_as_own_row():
+    """Distinct evidence fields must render as distinct table rows — the
+    table must not collapse a competitor profile into one generic row."""
+    fixture = _load_fixture()
+    research = ResearchResponse.from_dict(json.loads(_good_research_response()))
+    renderer = CompetitorReportRenderer(research, relevant_annotations=fixture["relevant_annotations"])
+    output = renderer.render(fixture["product_spec"])
+    rows = [l for l in output.splitlines() if l.startswith("| **")]
+    assert len(rows) >= 2, f"expected per-field rows, got: {rows}"
+    assert any("**display**" in r for r in rows)
+    assert any("**battery**" in r for r in rows)
+
+
+def test_competitor_without_evidence_for_field_shows_no_evidence_cell():
+    """A competitor lacking evidence for a rendered field must show an
+    explicit no-evidence marker — never an invented value."""
+    fixture = _load_fixture()
+    research = ResearchResponse.from_dict(json.loads(_good_research_response()))
+    renderer = CompetitorReportRenderer(research, relevant_annotations=fixture["relevant_annotations"])
+    output = renderer.render(fixture["product_spec"])
+    display_row = next(l for l in output.splitlines() if "**display**" in l)
+    # Kieslect has battery evidence but no display evidence
+    assert "ไม่มีหลักฐานยืนยัน" in display_row
+
+
+def test_evidence_prompt_requires_spec_label_alignment():
+    """Field labels must reuse our product spec's own attribute labels so the
+    mechanical our-product column matcher can fill real values — the matcher
+    cannot bridge languages or synonyms."""
+    assert "label เดียวกับที่ข้อมูลสินค้าใช้" in EVIDENCE_SYSTEM_PROMPT

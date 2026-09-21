@@ -327,29 +327,63 @@ def test_ai_review_modal_rows_inside_bounds(_ctx):
             "() => document.getElementById('pd-ai-overlay').classList.remove('visible')")
 
 
-def test_ai_setup_view_keeps_start_button_visible(_ctx):
-    """Setup phase: scope checkboxes + เริ่มใช้ AI visible inside bounds."""
+def test_ai_action_is_in_product_information_header(_ctx):
     page = _ctx["page"]
-    page.set_viewport_size({"width": 900, "height": 800})
-    page.evaluate("v => { _pdAiView = v; _pdAiRender(); }",
-                  {"ai_enrichment": {"status": "idle"}})
-    page.evaluate(
-        "() => document.getElementById('pd-ai-overlay').classList.add('visible')")
-    page.wait_for_timeout(200)
-    res = page.evaluate("""() => {
-      const m = document.querySelector('#pd-ai-overlay .settings-modal');
-      const mr = m.getBoundingClientRect();
-      const btn = [...document.querySelectorAll('#pd-ai-body button')]
-        .find(b => b.textContent.includes('เริ่มใช้ AI'));
-      const br = btn ? btn.getBoundingClientRect() : null;
-      const scopes = document.querySelectorAll('#pd-ai-body input[type=checkbox]').length;
-      return {hasBtn: !!btn, inBounds: br ? (br.left >= mr.left && br.right <= mr.right) : false,
-              scopes, mScrollW: m.scrollWidth, mClientW: m.clientWidth};
-    }""")
-    assert res["hasBtn"] and res["inBounds"], f"เริ่มใช้ AI must be visible: {res}"
-    assert res["scopes"] == 2
-    page.evaluate(
-        "() => document.getElementById('pd-ai-overlay').classList.remove('visible')")
+    _open_pd(page, _ctx["product"])
+    buttons = page.locator("#pd-body button", has_text="เติมข้อมูลด้วย AI")
+    assert buttons.count() == 1
+    section = buttons.first.locator("xpath=ancestor::div[contains(@class,'pd-section')][1]")
+    assert "ข้อมูลสินค้า" in section.inner_text()
+    assert section.locator("button", has_text="แก้ไข").count() == 1
+
+
+def test_ai_setup_view_keeps_options_together_at_desktop_and_narrow_width(_ctx):
+    page = _ctx["page"]
+    _open_pd(page, _ctx["product"])
+    page.locator("#pd-body button", has_text="เติมข้อมูลด้วย AI").click()
+    page.wait_for_selector("#pd-ai-overlay.visible #pd-ai-scope-facts")
+    for width in (900, 360):
+        page.set_viewport_size({"width": width, "height": 700})
+        page.wait_for_timeout(100)
+        res = page.evaluate("""() => {
+          const modal = document.querySelector('#pd-ai-overlay .settings-modal');
+          const mr = modal.getBoundingClientRect();
+          const options = [...document.querySelectorAll('#pd-ai-body .pd-ai-option')];
+          const start = [...document.querySelectorAll('#pd-ai-body button')]
+            .find(b => b.textContent.includes('เริ่มใช้ AI'));
+          const inside = r => r.left >= mr.left - .5 && r.right <= mr.right + .5
+            && r.top >= mr.top - .5 && r.bottom <= mr.bottom + .5;
+          return {
+            labels: options.map(o => o.innerText.trim()),
+            associated: options.every(o => o.querySelector('input[type=checkbox]')
+              && o.querySelector('span')),
+            rowsInside: options.every(o => inside(o.getBoundingClientRect())),
+            contentInside: options.every(o => {
+              const or = o.getBoundingClientRect();
+              const ir = o.querySelector('input').getBoundingClientRect();
+              const sr = o.querySelector('span').getBoundingClientRect();
+              return ir.left >= or.left - .5 && ir.right <= or.right + .5
+                && sr.left >= or.left - .5 && sr.right <= or.right + .5;
+            }),
+            startVisible: !!start && inside(start.getBoundingClientRect()),
+            overflow: modal.scrollWidth > modal.clientWidth + 1,
+          };
+        }""")
+        assert res["labels"] == [
+            "ข้อมูลสินค้า (สรุป / หมวด / คุณสมบัติ)",
+            "Marketing (กลุ่มเป้าหมาย / จุดขาย / โทน)",
+        ]
+        assert res["associated"] and res["rowsInside"] and res["contentInside"], res
+        assert res["startVisible"] and not res["overflow"], res
+
+    box = page.locator("label[for='pd-ai-scope-facts']")
+    checkbox = page.locator("#pd-ai-scope-facts")
+    assert checkbox.is_checked()
+    box.locator("span").click()
+    assert not checkbox.is_checked()
+    box.locator("span").click()
+    assert checkbox.is_checked()
+    page.evaluate("() => pdAiClose()")
     page.set_viewport_size({"width": 1440, "height": 900})
 
 
@@ -415,6 +449,39 @@ def test_extracted_media_shares_source_row_contract(_ctx):
     assert res["mediaDims"] == {"w": "32px", "h": "32px", "fit": "cover"}
     assert res["hasMenu"], "media row must expose the same ⋯ menu affordance"
     assert "ดู" in res["menuView"]
+    assert "ลบไฟล์" in res["menuView"]
+
+
+def test_extracted_media_delete_in_browser(_ctx):
+    """Clicking 'ลบไฟล์' on an extracted media row in Product Detail:
+    - shows confirmation dialog
+    - deletes the extracted media row after confirm
+    - keeps the source file row intact
+    """
+    page = _ctx["page"]
+    _open_pd(page, _ctx["product"])
+    page.evaluate("() => { _pdExpandedSections['sources'] = true; _pdRefresh(); }")
+    page.wait_for_timeout(600)
+
+    # find the extracted media menu button
+    menu_btn = page.locator(".pd-src-row:has(img[src*='/api/product_media/']) button[onclick*=_pdToggleFileMenu]")
+    assert menu_btn.count() >= 1, "extracted media row must have a menu button"
+    menu_btn.first.click()
+
+    # set up dialog handler to accept confirm
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.locator(".pd-file-menu:visible div:has-text('ลบไฟล์')").click()
+    page.wait_for_timeout(1000)
+
+    # verify extracted media is gone, but source file remains
+    res = page.evaluate("""() => {
+      const imgs = [...document.querySelectorAll('#pd-body img')]
+        .filter(i => i.src.includes('/api/product_media/'));
+      const text = document.getElementById('pd-body').textContent;
+      return {mediaImgs: imgs.map(i => i.src), hasSource: text.includes('spec.txt')};
+    }""")
+    assert len(res["mediaImgs"]) == 0, f"extracted media should be deleted, got {res}"
+    assert res["hasSource"], "source file must remain listed"
 
 
 # ---------------------------------------------------------------------------
@@ -874,3 +941,49 @@ def test_ai_edit_structured_proposal_preserves_types(_ctx):
     prof = _read_profile(env, prod)
     assert isinstance(prof["audience"], dict), prof
     assert prof["audience"]["primary"]["age"] == "30-40 ปี", prof
+
+
+# ---------------------------------------------------------------------------
+# Legacy marketing profile — persisted product_profile.json may hold
+# pre-list-schema strings ("a, b" not ["a","b"], image_style as bare string).
+# The real K2 profile does; the renderer must normalize like the backend does
+# (orchestrator.py/media_gen.py) — before this fix the expanded section threw
+# `vo.keywords.join is not a function` and silently dropped the image tone.
+# ---------------------------------------------------------------------------
+
+def test_marketing_section_renders_legacy_string_schema(_ctx):
+    page = _ctx["page"]
+    prod = _ctx["product"]
+    cache_dir = _ctx["brand_root"] / "cache" / prod
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "product_profile.json").write_text(json.dumps({
+        "competitors": "WatchA, WatchB",
+        "differentiators": "GPS, waterproof",
+        "use_cases": "tracking kids",
+        "price_tier": "mid",
+        "visual_override": {
+            "image_style": "dark premium",
+            "keywords": "kids, colorful",
+        },
+    }, ensure_ascii=False), encoding="utf-8")
+
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    _open_pd(page, prod)
+    page.evaluate("_pdExpandedSections['marketing'] = true; _pdRefresh()")
+    page.wait_for_timeout(800)
+
+    html = page.locator("#product-detail-view").inner_html()
+    assert not errors, f"JS errors on expand: {errors}"
+    assert "WatchA, WatchB" in html, "legacy competitors string must render"
+    assert "GPS, waterproof" in html
+    assert "kids, colorful" in html, "legacy keywords string must render"
+    assert "dark premium" in html, "legacy string image_style must render as tone"
+
+    # Edit mode must surface the legacy tone too (was silently dropped).
+    page.evaluate("pdEditMkt()")
+    page.wait_for_timeout(800)
+    assert not errors, f"JS errors entering edit: {errors}"
+    tone = page.locator("#pd-mkt-visual-tone").input_value()
+    assert tone == "dark premium", f"legacy tone lost in edit mode: {tone!r}"
+    page.evaluate("_pdEditingSection = null; _pdRefresh()")

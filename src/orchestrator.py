@@ -359,22 +359,36 @@ class Orchestrator:
             agent = self._make_agent("competitor_analysis", CompetitorAnalysisAgent, llm)
             # ดึงข้อมูลสินค้าจาก DB ถ้ามี ไม่งั้นใช้ parameter (backward compatible)
             product_data = self._get_product_data(product_spec)
-            # If competitor_data is None or empty, agent will search web itself
-            prompt = agent.build_prompt(product_data, competitor_data or "")
+            # Runtime-selected product identity is authoritative for display —
+            # the model's target_model field (a spec-derived code) must not
+            # override it in the rendered report.
+            prompt = agent.build_prompt(
+                product_data, competitor_data or "",
+                product_name=self.product_id or "",
+            )
             image_paths = self._get_product_image_paths()
             result = agent.run(
                 prompt, quick_brief=quick_brief, image_paths=image_paths,
                 resource_context=resource_context, extra_image_paths=extra_image_paths,
                 step_context=step_context,
             )
-            # Final grounding gate — verify complete output before persistence
+            # Final grounding gate — verify complete output before persistence.
+            # The verifier must see the same evidence the report was built
+            # from: the agent's own finalized research (verified claims with
+            # provenance) plus any user-uploaded run resources.  Without the
+            # agent evidence the gate can only compare web-researched claims
+            # against product_source and must reject them all.
+            evidence_parts = [
+                getattr(agent, "_grounding_evidence_json", "") or "",
+                resource_context or "",
+            ]
             result = self._ground_and_store(
                 "competitor_analysis", result, llm,
                 runtime_context={
                     "product_source": product_data,
                     "brand_context": self._build_brand_context_text(),
                     "quick_brief": quick_brief,
-                    "verified_evidence": resource_context or "",
+                    "verified_evidence": "\n\n".join(p for p in evidence_parts if p),
                 },
             )
             self.results["competitor_analysis"] = result
@@ -745,9 +759,11 @@ class Orchestrator:
         คืน: string สรุป asset ที่เลือก (id + description + วิธีใช้) สำหรับแปะเข้า prompt.
         """
         from . import asset_library
+        # รีเซ็ตก่อนเสมอ — orchestrator ถูก share ข้ามรัน selection ค้างจาก
+        # รันก่อนต้องไม่รั่วเข้า catalog/session meta ของรันนี้
+        self._selected_asset_ids = []
         all_assets = asset_library.list_all()
         if not all_assets:
-            self._selected_asset_ids = []
             return ""
 
         import json as _json

@@ -64,6 +64,100 @@ def _repair_budget(category: str, max_repair: int) -> int:
     return max_repair
 
 
+# ---------------------------------------------------------------------------
+# Grounding-response boundary — provider-abort classification + salvage parse.
+#
+# finish_reason values the provider reports for abnormal termination of a
+# generation (mid-generation abort, safety refusal).  Content from such a
+# generation is definitionally suspect — it is classified as provider_error
+# and retried within the configured bound instead of being parsed.
+# ---------------------------------------------------------------------------
+
+_GROUNDING_PROVIDER_ERROR_FINISHES = frozenset({"error", "content_filter"})
+
+
+def _iter_grounding_json_candidates(text: str):
+    """Yield JSON-object candidate strings, in recovery order:
+    1. the whole text (canonical JSON)
+    2. inner content of ``` fenced blocks anywhere in the text
+    3. balanced top-level {...} spans (prose-wrapped JSON)
+
+    Balanced scanning is string-aware so braces inside JSON string values
+    do not corrupt the depth count.
+    """
+    import re as _re
+    stripped = text.strip()
+    if stripped:
+        yield stripped
+    for m in _re.finditer(r"```(?:json)?\s*(.*?)```", text, _re.DOTALL):
+        inner = m.group(1).strip()
+        if inner:
+            yield inner
+    n = len(text)
+    i = 0
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        in_str = False
+        esc = False
+        j = i
+        while j < n:
+            c = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        yield text[i:j + 1]
+                        i = j
+                        break
+            j += 1
+        i += 1  # unbalanced '{' — a complete object may still start later
+
+
+def _parse_grounding_json(raw: str):
+    """Parse the grounding verdict, tolerating recoverable wrappers.
+
+    Contract validation is mechanical: the object must carry a boolean
+    ``grounded`` verdict and, when present, a list ``unsupported_claims``.
+    A wrong-shape object that parses is a contract violation, not malformed
+    JSON — the distinction matters because contract violations are
+    deterministic while malformed output may be a transient truncation.
+
+    Returns ``(result, error)``:
+      ``(dict, None)``             — parsed object satisfying the contract
+      ``(None, "invalid_schema")`` — a JSON object parsed but wrong shape
+      ``(None, "malformed_json")`` — no parseable JSON object anywhere
+    """
+    import json as _json
+    saw_object = False
+    for cand in _iter_grounding_json_candidates(raw):
+        try:
+            obj = _json.loads(cand)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        saw_object = True
+        if isinstance(obj.get("grounded"), bool) and (
+                "unsupported_claims" not in obj
+                or isinstance(obj["unsupported_claims"], list)):
+            return obj, None
+    return None, ("invalid_schema" if saw_object else "malformed_json")
+
+
 def _web_search_cfg() -> dict:
     """อ่าน web_search section จาก config — fallback {} ถ้าโหลดไม่ได้ (lazy, กัน circular import)."""
     try:
@@ -1276,6 +1370,10 @@ class BaseAgent:
             "5. ถ้าไม่แน่ใจว่า claim มีฐานหรือไม่ → ถือว่าไม่มีฐาน\n"
             "6. CTA ที่อ้างถึง offer/โปรโมชั่นที่ user ไม่ได้ระบุ = unsupported claim\n"
             "7. inference/recommendation ที่ไม่อ้างเป็น fact = ผ่าน\n"
+            "8. claim ที่นำเสนอเป็นข้อเท็จจริงต้องไม่แรงกว่าหลักฐานที่รองรับ — "
+            "ห้ามขยายคุณสมบัติ/spec ให้กว้างกว่า แรงกว่า หรือแน่นอนกว่าที่หลักฐาน "
+            "กล่าวไว้ (รวมถึงการเติม superlative, ขยายขอบเขตเป็นทุกกรณี, หรือ "
+            "การันตีผลลัพธ์ที่หลักฐานไม่ได้ระบุ) — claim ที่เกิน = unsupported\n"
             f"{image_rules}\n"
             f"{context_block}\n\n"
             "คืน JSON ตาม schema"
@@ -1306,50 +1404,74 @@ class BaseAgent:
             },
         }
 
-        import json as _json
-        import re as _re
+        # Bounded attempts — transport-class failures (provider aborts that
+        # surface as finish_reason="error" with partial content, or unparseable
+        # garbage) may be transient.  Bound comes from config max_retry_limit
+        # (agent → defaults → 1).  Deterministic classes (truncated, empty,
+        # exception — already retried inside chat; invalid_schema — contract
+        # violation) never retry.
+        max_attempts = self._grounding_max_attempts()
+        fail_error = "malformed_json"
+        for _attempt in range(max_attempts):
+            try:
+                raw = self.llm.chat(
+                    messages,
+                    temperature=0.1,
+                    max_tokens=2048,
+                    stream=False,
+                    response_format=response_format,
+                    reasoning=self._reasoning(2048),
+                    source=f"{self.agent_name}.final_grounding_check",
+                )
+            except Exception:
+                # Infrastructure failure → fail closed.
+                return {"grounded": False, "unsupported_claims": [], "error": "llm_exception"}
 
+            if isinstance(raw, tuple):
+                raw = raw[0]
+
+            # Empty or None response → fail closed.
+            if not raw or not raw.strip():
+                return {"grounded": False, "unsupported_claims": [], "error": "empty_response"}
+
+            # Truncated response → fail closed (deterministic token budget).
+            if getattr(self.llm, "last_truncated", False) is True:
+                return {"grounded": False, "unsupported_claims": [], "error": "truncated"}
+
+            # Provider-reported abnormal termination → transport-class
+            # failure.  Content from an aborted generation is suspect —
+            # do not parse it; retry within the bound.
+            finish = getattr(self.llm, "last_finish_reason", None)
+            if finish in _GROUNDING_PROVIDER_ERROR_FINISHES:
+                fail_error = "provider_error"
+                continue
+
+            result, perr = _parse_grounding_json(raw)
+            if result is not None:
+                return {
+                    "grounded": bool(result.get("grounded")),
+                    "unsupported_claims": result.get("unsupported_claims", []),
+                }
+            fail_error = perr
+            if perr == "invalid_schema":
+                break  # deterministic contract violation — no retry
+
+        # All attempts exhausted or unrecoverable → fail closed.
+        return {"grounded": False, "unsupported_claims": [], "error": fail_error}
+
+    def _grounding_max_attempts(self) -> int:
+        """Bounded attempts for the grounding call — config-driven, never
+        unbounded.  Resolution: agent config ``max_retry_limit`` →
+        config defaults ``max_retry_limit`` → 1.  Same attempt semantics
+        as ``LLMClient.chat`` (N = total attempts)."""
+        n = (self.config or {}).get("max_retry_limit")
+        if n is None:
+            try:
+                from ..config_loader import load_config
+                n = (load_config() or {}).get("defaults", {}).get("max_retry_limit")
+            except Exception:
+                n = None
         try:
-            raw = self.llm.chat(
-                messages,
-                temperature=0.1,
-                max_tokens=2048,
-                stream=False,
-                response_format=response_format,
-                reasoning=self._reasoning(2048),
-                source=f"{self.agent_name}.final_grounding_check",
-            )
-        except Exception:
-            # Infrastructure failure → fail closed.
-            return {"grounded": False, "unsupported_claims": [], "error": "llm_exception"}
-
-        if isinstance(raw, tuple):
-            raw = raw[0]
-
-        # Empty or None response → fail closed.
-        if not raw or not raw.strip():
-            return {"grounded": False, "unsupported_claims": [], "error": "empty_response"}
-
-        # Truncated response → fail closed.
-        if getattr(self.llm, "last_truncated", False) is True:
-            return {"grounded": False, "unsupported_claims": [], "error": "truncated"}
-
-        # Strip code fences if present
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = _re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = _re.sub(r"\s*```$", "", raw)
-
-        try:
-            result = _json.loads(raw)
-        except (ValueError, TypeError):
-            # Malformed JSON → fail closed.
-            return {"grounded": False, "unsupported_claims": [], "error": "malformed_json"}
-
-        if not isinstance(result, dict) or "grounded" not in result:
-            return {"grounded": False, "unsupported_claims": [], "error": "invalid_schema"}
-
-        return {
-            "grounded": bool(result.get("grounded")),
-            "unsupported_claims": result.get("unsupported_claims", []),
-        }
+            return max(1, int(n))
+        except (TypeError, ValueError):
+            return 1

@@ -255,3 +255,6 @@ def test_run_flows_null_auto_image_does_not_auto_generate_media(_client, tmp_pat
     assert not video_retry_called, "BUG: generate_video_with_retry ถูกเรียกทั้งที่ auto_video=None"
     assert not image_called, "BUG: generate_image ถูกเรียกทั้งที่ auto_image=None"
     assert not video_called, "BUG: generate_video ถูกเรียกทั้งที่ auto_video=None"
+    assert not fake_orch._select_assets_for_content.called, (
+        "deferred/ask media must not spend an asset-selection model call"
+    )

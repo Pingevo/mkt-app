@@ -18,6 +18,21 @@ from .competitor_evidence import (
 )
 
 
+def _serialize_research(research: ResearchResponse) -> str:
+    """Serialize a finalized ResearchResponse as verified-evidence JSON.
+
+    Field names keep each section's epistemic tier self-describing:
+    ``evidence`` = verified records with provenance, ``strategic_hypotheses``
+    / ``strategic_implications`` = labeled inference, ``uncertainty`` =
+    explicit gaps.  The grounding verifier reads the labels.
+    """
+    import dataclasses
+    try:
+        return json.dumps(dataclasses.asdict(research), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return ""
+
+
 class CompetitorAnalysisAgent(BaseAgent):
     agent_name = "competitor_analysis"
     display_name = "นักวิเคราะห์คู่แข่ง"
@@ -58,18 +73,33 @@ class CompetitorAnalysisAgent(BaseAgent):
             return False
         return super()._include_brand_reference_in_prompt()
 
-    def build_prompt(self, product_spec: str, competitor_data: str) -> str:
+    def build_prompt(self, product_spec: str, competitor_data: str,
+                     product_name: str = "") -> str:
         self._relevance_context = self._build_relevance_context(product_spec, competitor_data)
         self._product_spec = product_spec or ""
         self._competitor_data = competitor_data or ""
         self._competitor_names = [line.strip() for line in self._competitor_data.splitlines() if line.strip()]
         self._target_model = self._extract_target_model(self._product_spec)
+        # Runtime-selected product identity — authoritative for display.
+        # The model's target_model field may carry a model code from the spec
+        # (e.g. รหัสสินค้า) — it must never override the selected product.
+        self._our_product = (product_name or "").strip()
+        # Product-owned fact source for our-product cells.  The composed
+        # product_spec may embed unscoped page text (marketplace scrapes can
+        # carry other products' listings) — that text stays in the prompt for
+        # research but must never fill our-product cells.
+        self._our_product_facts = self._load_our_product_facts()
         self._web_search_enabled = bool(self.config.get("web_search"))
         self._thin_competitor_context = self._is_thin_competitor_context(self._competitor_data)
 
+        selected_line = (
+            f"สินค้าที่เลือกวิเคราะห์ (our product — authoritative identity): "
+            f"{self._our_product}\n\n"
+        ) if self._our_product else ""
         prompt = (
             "กรุณาวิเคราะห์เปรียบเทียบสินค้าของเรากับคู่แข่ง "
             "โดยใช้ข้อมูลดังต่อไปนี้:\n\n"
+            f"{selected_line}"
             "--- สเปคสินค้าของเรา (สินค้าที่จะวิเคราะห์ ใช้รุ่นนี้เท่านั้น) ---\n"
             f"{product_spec}\n\n"
             "--- ข้อมูลคู่แข่ง ---\n"
@@ -210,19 +240,25 @@ class CompetitorAnalysisAgent(BaseAgent):
             reviewed = semantic_reviewer.review(research, relevant)
             if reviewed is None:
                 # Fail-closed: render limited analysis without unchecked claims
+                limited_research = ResearchResponse(
+                    target_model=research.target_model,
+                    competitor_names=research.competitor_names,
+                    evidence=[],  # no unchecked evidence
+                    evidence_based_recommendations=[],
+                    strategic_hypotheses=research.strategic_hypotheses,
+                    uncertainty=research.uncertainty + [
+                        "semantic evidence review ล้มเหลว — evidence claims ไม่ถึงผู้ใช้",
+                    ],
+                )
+                # Grounding must see exactly the evidence the renderer used —
+                # here: none survived review, so the verifier gets none.
+                self._grounding_evidence_json = _serialize_research(limited_research)
                 limited_renderer = CompetitorReportRenderer(
-                    ResearchResponse(
-                        target_model=research.target_model,
-                        competitor_names=research.competitor_names,
-                        evidence=[],  # no unchecked evidence
-                        evidence_based_recommendations=[],
-                        strategic_hypotheses=research.strategic_hypotheses,
-                        uncertainty=research.uncertainty + [
-                            "semantic evidence review ล้มเหลว — evidence claims ไม่ถึงผู้ใช้",
-                        ],
-                    ),
+                    limited_research,
                     relevant_annotations=relevant,
                     quick_brief=getattr(self, "_quick_brief", ""),
+                    our_product=getattr(self, "_our_product", ""),
+                    our_product_spec=self._our_product_spec_arg(),
                 )
                 markdown = limited_renderer.render(self._product_spec)
                 self._last_draft_output = final_json
@@ -269,10 +305,16 @@ class CompetitorAnalysisAgent(BaseAgent):
                 strategic_implications=implications,
             )
 
+        # The finalized, post-review research is exactly what the renderer
+        # used — it is also the verified evidence the grounding gate needs.
+        self._grounding_evidence_json = _serialize_research(research)
+
         renderer = CompetitorReportRenderer(
             research,
             relevant_annotations=relevant,
             quick_brief=getattr(self, "_quick_brief", ""),
+            our_product=getattr(self, "_our_product", ""),
+            our_product_spec=self._our_product_spec_arg(),
         )
 
         # Stage 3: render Markdown from validated evidence only
@@ -310,12 +352,41 @@ class CompetitorAnalysisAgent(BaseAgent):
         except (json.JSONDecodeError, AttributeError):
             return
 
-        names = data.get("competitor_names") if isinstance(data, dict) else None
-        if not isinstance(names, list) or not names:
+        names = self._extract_competitor_identities(data)
+        if not names:
             return
 
-        self._relevance_context["competitor_names"] = [str(n) for n in names if n]
+        self._relevance_context["competitor_names"] = names
         self._reassess_all_annotations()
+
+    def _extract_competitor_identities(self, data: dict) -> list[str]:
+        """Canonical competitor identity set from the structured contract:
+        declared input scope ∪ competitor_names ∪ evidence[].competitor.
+
+        String items only, deduped by canonical identity, first-seen order
+        preserved.  An empty ``competitor_names`` field must not silently
+        discard identities that evidence records already carry.
+        """
+        if not isinstance(data, dict):
+            return []
+        names_field = data.get("competitor_names")
+        evidence = data.get("evidence")
+        seen: set[str] = set()
+        names: list[str] = []
+        sources = [getattr(self, "_competitor_names", []) or [],
+                   names_field if isinstance(names_field, list) else [],
+                   (ev.get("competitor") for ev in evidence
+                    if isinstance(ev, dict)) if isinstance(evidence, list) else []]
+        for source in sources:
+            for n in source:
+                if not isinstance(n, str):
+                    continue
+                n = n.strip()
+                key = self._canonical_identity(n) if n else ""
+                if key and key not in seen:
+                    seen.add(key)
+                    names.append(n)
+        return names
 
     def _reassess_all_annotations(self) -> None:
         """Re-run _assess_source_relevance on all stored annotations and split
@@ -434,6 +505,12 @@ class CompetitorAnalysisAgent(BaseAgent):
             return False, "structural_output_failed: target_model too long", None
 
         research = ResearchResponse.from_dict(data)
+
+        # Canonical identity set = declared input scope ∪ competitor_names ∪
+        # evidence[].competitor — an empty declared field must not discard
+        # identities that evidence records already carry.
+        research.competitor_names = self._extract_competitor_identities(data)
+
         if not research.target_model or not research.target_model.strip():
             return False, "structural_output_failed: target_model is empty", None
         if not research.competitor_names:
@@ -441,10 +518,19 @@ class CompetitorAnalysisAgent(BaseAgent):
 
         # Target product must not change — model must analyze the product
         # specified in the input, not a different one.
-        expected_target = (getattr(self, "_target_model", "") or "").strip().lower()
-        actual_target = (research.target_model or "").strip().lower()
-        if expected_target and actual_target and expected_target not in actual_target and actual_target not in expected_target:
-            return False, f"structural_output_failed: target_model changed from {expected_target!r} to {actual_target!r}", None
+        # Our product has up to two legitimate identities: the runtime-selected
+        # product name (authoritative) and the model code inside the spec.
+        # The model may emit either — only an unrelated name is drift.
+        expected_targets = {
+            self._canonical_identity(v)
+            for v in (getattr(self, "_target_model", ""), getattr(self, "_our_product", ""))
+            if self._canonical_identity(v)
+        }
+        actual_target = self._canonical_identity(research.target_model)
+        if expected_targets and actual_target and not any(
+            e in actual_target or actual_target in e for e in expected_targets
+        ):
+            return False, f"structural_output_failed: target_model changed from {sorted(expected_targets)!r} to {research.target_model!r}", None
 
         # Only verified annotations (relevant=True) are passed to the renderer
         # as provenance candidates. Candidate annotations (relevant=None) are
@@ -468,12 +554,18 @@ class CompetitorAnalysisAgent(BaseAgent):
         verified = getattr(self, "_last_relevant_annotations", []) or []
         candidates = getattr(self, "_last_candidate_annotations", []) or []
         target = getattr(self, "_target_model", "") or ""
-        competitors = getattr(self, "_competitor_names", []) or []
+        # Canonical scope = relevance context (carries model-discovered names
+        # in default discovery mode) — not only the declared input list.
+        ctx = getattr(self, "_relevance_context", None) or {}
+        competitors = ctx.get("competitor_names") or getattr(self, "_competitor_names", []) or []
         lines = [
             f"สินค้าเป้าหมาย (target_model): {target}",
             f"คู่แข่งใน scope: {', '.join(competitors) if competitors else '(ไม่ระบุ)'}",
-            f"หมายเหตุ: competitor_names ต้องมาจากรายชื่อคู่แข่งข้างต้นเสมอ แม้จะไม่มี evidence",
         ]
+        if competitors:
+            lines.append("หมายเหตุ: competitor_names ต้องมาจากรายชื่อคู่แข่งข้างต้นเสมอ แม้จะไม่มี evidence")
+        else:
+            lines.append("หมายเหตุ: competitor_names ต้องตรงกับชื่อคู่แข่งที่ใช้ใน evidence[].competitor")
         if not verified and not candidates:
             lines.append("ไม่พบ URL จากการค้นหา")
         else:
@@ -1289,7 +1381,7 @@ class CompetitorAnalysisAgent(BaseAgent):
     def _limited_analysis_fallback(self) -> str:
         """คืนรายงาน limited analysis แบบ deterministic เมื่อข้อมูลไม่พอ."""
         spec = getattr(self, "_product_spec", "")
-        model = getattr(self, "_target_model", "สินค้า") or "สินค้า"
+        model = self._display_product()
         competitors = getattr(self, "_competitor_names", [])
         comp_section = ", ".join(competitors) if competitors else "ยังไม่ระบุ"
 
@@ -1388,9 +1480,42 @@ class CompetitorAnalysisAgent(BaseAgent):
         ]
         return output.rstrip() + "\n" + "\n".join(extra)
 
+    def _display_product(self) -> str:
+        """Runtime-selected product identity for report display — falls back
+        to the spec-derived model code, then a generic label."""
+        return getattr(self, "_our_product", "") or getattr(self, "_target_model", "") or "สินค้า"
+
+    def _load_our_product_facts(self) -> str:
+        """Product-owned source text for our-product cells — confirmed facts,
+        confirmed profile, and (for scoped records) the proven raw segment.
+
+        An unscoped record's raw page text is NOT eligible: a marketplace
+        scrape can embed other products' listings, and if the system cannot
+        prove a raw segment belongs to the selected product it must not
+        supply our-product facts.  Empty result → cells render explicit
+        no-evidence markers.
+        """
+        if not self._our_product:
+            return ""
+        try:
+            from .. import product_db
+            if product_db.is_ready(self._our_product):
+                return product_db.get_agent_facts_text(self._our_product) or ""
+        except Exception:
+            pass
+        return ""
+
+    def _our_product_spec_arg(self) -> str | None:
+        """Renderer arg: with a runtime identity, cells use ONLY the
+        product-owned fact source (possibly empty → no-evidence markers);
+        without one, standalone mode scans the caller-provided spec."""
+        if getattr(self, "_our_product", ""):
+            return getattr(self, "_our_product_facts", "")
+        return None
+
     def _structural_output_failure(self, error: str) -> str:
         """คืนรายงานทีบอกว่า evidence ผ่านแต่ output structure ไม่ตรง contract."""
-        model = (getattr(self, "_target_model", "") or "สินค้า").upper()
+        model = self._display_product().upper()
         tool_status = self._web_search_tool_status()
         return "\n".join([
             f"# รายงานวิเคราะห์ไม่สำเร็จ: {model}",
@@ -1418,7 +1543,7 @@ class CompetitorAnalysisAgent(BaseAgent):
 
     def _required_search_failure(self, error: str) -> str:
         """คืนรายงานทีบอกว่า required web search ล้มเหลว และระบุสาเหตุ."""
-        model = getattr(self, "_target_model", "สินค้า") or "สินค้า"
+        model = self._display_product()
         # ดึง tool status จากสถานะจริงของ web search ครั้งล่าสุด
         tool_status = self._web_search_tool_status()
 

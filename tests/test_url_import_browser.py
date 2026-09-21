@@ -35,6 +35,7 @@ RENDERED_HTML = f"""<!DOCTYPE html>
 <title>ACME Turbo Blender 9000</title>
 <meta property="og:title" content="ACME Turbo Blender 9000">
 <meta property="og:image" content="https://shop.example.com/img/blender.png">
+<script type="application/ld+json">{{"@context":"https://schema.org","@type":"Product","name":"ACME Turbo Blender 9000"}}</script>
 </head><body>
 <div id="app">
 <h1>ACME Turbo Blender 9000</h1>
@@ -46,13 +47,34 @@ Ships nationwide in 2-4 days. {MARKER}</p>
 </body></html>"""
 
 STATIC_RICH_HTML = b"""<!DOCTYPE html>
-<html><head><title>Static Product</title></head>
+<html><head><title>Static Product</title>
+<script type="application/ld+json">{"@context":"https://schema.org",
+"@type":"Product","name":"Static Product"}</script>
+</head>
 <body><h1>Static Product</h1>
 <p>This page carries real product content in the initial HTML: full specs,
 pricing, warranty terms, shipping options, and a feature list long enough
 to look like an actual ecommerce product page rather than an app shell.
 STATIC-RICH-MARKER appears here alongside model numbers and stock info.</p>
 <ul><li>Spec one</li><li>Spec two</li><li>Spec three</li></ul>
+</body></html>"""
+
+# A client-rendered storefront's initial HTML: fat enough to pass
+# MIN_BODY_CHARS on boilerplate alone, even carries og:type=product —
+# but the JSON-LD Product only exists after the client render, so the
+# static document cannot confirm a single product.  (Real shape observed
+# on AliExpress item pages 2026-09: nav/footer shell, zero JSON-LD.)
+FAT_SHELL_HTML = b"""<!DOCTYPE html>
+<html><head><title>Shop</title>
+<meta property="og:type" content="product">
+<meta name="description" content="Smarter Shopping, Better Living!">
+</head><body>
+<nav>Help Center | Disputes &amp; Reports | Return &amp; refund policy |
+IPR infringement report | Transparency center | Recall | Free returns</nav>
+<footer>Multilingual site: Russian, Portuguese, Spanish, French, German,
+Italian, Dutch, Turkish, Japanese, Korean, Thai, Vietnamese, Arabic,
+Hebrew, Polish - browse by category, coupons, new user zone, help
+center, disputes and reports, buyer protection.</footer>
 </body></html>"""
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 300
@@ -183,6 +205,72 @@ def test_thin_page_and_failed_browser_yields_error_not_thin_content(monkeypatch)
     }))
     with pytest.raises(url_import.UrlImportError):
         url_import.fetch_product_page(PRODUCT_URL)
+
+
+# ---------------------------------------------------------------------------
+# Fat-shell fallback — usable boilerplate but ZERO structured product
+# evidence is still an incomplete document (client-rendered JSON-LD)
+# ---------------------------------------------------------------------------
+
+def test_fat_shell_falls_back_to_rendered_product(monkeypatch):
+    """Boilerplate shell ≥MIN_BODY_CHARS with no JSON-LD must still render —
+    the real AliExpress shape.  Rendered doc carries Product → single."""
+    from src import url_import
+
+    client = _static_client(FAT_SHELL_HTML)
+    _patch_base(monkeypatch, client)
+    monkeypatch.setattr(url_import, "_BROWSER_FULFILL", _browser_fulfill({
+        PRODUCT_URL: (200, "text/html", RENDERED_HTML),
+    }))
+    result = url_import.fetch_product_page(PRODUCT_URL)
+    assert result["fetched_via"] == "browser"
+    assert result["page_class"] == "single"
+    assert MARKER in result["text"]
+
+
+def test_fat_shell_rendered_still_ambiguous_rejects(monkeypatch):
+    """Render that still confirms nothing → ambiguous (fail closed)."""
+    from src import url_import
+
+    client = _static_client(FAT_SHELL_HTML)
+    _patch_base(monkeypatch, client)
+    monkeypatch.setattr(url_import, "_BROWSER_FULFILL", _browser_fulfill({
+        PRODUCT_URL: (200, "text/html", FAT_SHELL_HTML),
+    }))
+    result = url_import.fetch_product_page(PRODUCT_URL)
+    assert result["page_class"] == "ambiguous"
+    assert result["images"] == []  # rejected pages never download media
+
+
+def test_fat_shell_browser_unusable_keeps_static_verdict(monkeypatch):
+    """Static doc was readable; rendered doc is a challenge page → the
+    static verdict (ambiguous) stands — no empty_page override."""
+    from src import url_import
+
+    client = _static_client(FAT_SHELL_HTML)
+    _patch_base(monkeypatch, client)
+    monkeypatch.setattr(url_import, "_BROWSER_FULFILL", _browser_fulfill({
+        PRODUCT_URL: (200, "text/html", CHALLENGE_HTML),
+    }))
+    result = url_import.fetch_product_page(PRODUCT_URL)
+    assert result["fetched_via"] == "static"
+    assert result["page_class"] == "ambiguous"
+
+
+def test_fat_shell_browser_failure_keeps_static_verdict(monkeypatch):
+    """Browser fetch error on a usable-but-unconfirmed page → the static
+    ambiguous verdict surfaces, not a fetch error."""
+    from src import url_import
+
+    client = _static_client(FAT_SHELL_HTML)
+    _patch_base(monkeypatch, client)
+    monkeypatch.setattr(
+        url_import, "_browser_fetch",
+        lambda *a, **k: (_ for _ in ()).throw(
+            url_import.UrlImportError("fetch_failed", "no chromium")))
+    result = url_import.fetch_product_page(PRODUCT_URL)
+    assert result["fetched_via"] == "static"
+    assert result["page_class"] == "ambiguous"
 
 
 # ---------------------------------------------------------------------------

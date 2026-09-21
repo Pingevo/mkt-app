@@ -480,7 +480,10 @@ def _write_product_record(name: str, seg: dict, data_dir: Path, *, is_create: bo
     is used solely for identity/scope, not as a proxy for product count.
     """
     from datetime import datetime
-    from .ingestion import _classify_file, _load_config, extract_embedded_media
+    from .ingestion import (
+        _classify_file, _load_config, extract_embedded_media,
+        source_media_ownership,
+    )
 
     record = product_db.load(name)
     record["product_id"] = name
@@ -541,15 +544,16 @@ def _write_product_record(name: str, seg: dict, data_dir: Path, *, is_create: bo
             suffix = f.suffix.lower()
             if suffix in {".pdf", ".docx", ".xlsx", ".xls"}:
                 try:
+                    original_file = next(
+                        (src for src, saved in (saved_files or {}).items()
+                         if saved == f.name), f.name)
                     for img in extract_embedded_media(f, dest_cache_dir):
                         if is_multi_split:
-                            # PDF images carry page + y0 metadata that
-                            # get_product_image_paths() uses for
-                            # deterministic per-product association.
-                            # Only mark as unassigned when no page
-                            # metadata is available (XLSX/DOCX).
-                            has_page_meta = img.get("page") is not None
-                            if not has_page_meta:
+                            ownership = source_media_ownership(
+                                img, seg.get("source_refs", []), original_file)
+                            if ownership is False:
+                                continue
+                            if ownership is None:
                                 img["unassigned_source_media"] = True
                         new_extracted_images.append(img)
                 except Exception:
@@ -613,6 +617,7 @@ def _write_product_record(name: str, seg: dict, data_dir: Path, *, is_create: bo
     # `file` values already contain the real filenames on disk (e.g.
     # "catalog.txt" for old content, "catalog (1).txt" for new content).
     # Do NOT remap these — they already match the stored files.
+    from .file_loader import load_table_rows
     from .ingestion import extract_text
     text_extracts: list[dict] = []
     if data_dir.exists():
@@ -624,7 +629,14 @@ def _write_product_record(name: str, seg: dict, data_dir: Path, *, is_create: bo
                 try:
                     full_text = extract_text(f, _load_config())
                     if full_text:
-                        text_extracts.append({"file": f.name, "text": full_text})
+                        extract_entry = {"file": f.name, "text": full_text}
+                        # Positioned table rows keep cell structure that
+                        # flattened text loses (see ingest_file); sparse
+                        # section/feature/value spec sheets depend on it.
+                        tables = load_table_rows(f)
+                        if tables:
+                            extract_entry["tables"] = tables
+                        text_extracts.append(extract_entry)
                 except Exception:
                     continue
     # If we couldn't extract full text, fall back to the segment text

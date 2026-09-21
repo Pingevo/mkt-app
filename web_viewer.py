@@ -2154,7 +2154,7 @@ async def api_delete_file(request: Request) -> JSONResponse:
     filepath = body.get("filepath", "")
     if not folder or not filepath:
         return JSONResponse({"error": "ไม่ระบุโฟลเดอร์หรือไฟล์"}, status_code=400)
-    # Files in cache/ are deliverables (เอกสารสเปคจาก product_spec agent) — ลบได้เลย ไม่กระทบ DB
+    # Files in cache/ are deliverables or extracted media
     if filepath.startswith("cache/"):
         real_name = filepath[len("cache/"):]
         try:
@@ -2164,6 +2164,21 @@ async def api_delete_file(request: Request) -> JSONResponse:
             return JSONResponse({"error": "เส้นทางไม่ถูกต้อง"}, status_code=400)
         if full_path.exists() and full_path.is_file():
             full_path.unlink()
+            # If deleting extracted embedded media (under extracted_images/) → sync product DB
+            if real_name.startswith("extracted_images/"):
+                img_filename = full_path.name
+                record = product_db.load(folder)
+                if record:
+                    old_imgs = record.get("image_descriptions", [])
+                    new_imgs = [d for d in old_imgs if Path(d.get("path", "")).name != img_filename]
+                    if len(new_imgs) != len(old_imgs):
+                        record["image_descriptions"] = new_imgs
+                        meta = record.get("metadata") or {}
+                        usable_imgs = [d for d in new_imgs if not d.get("unassigned_source_media")]
+                        meta["has_images"] = bool(usable_imgs)
+                        meta["image_count"] = len(usable_imgs)
+                        record["metadata"] = meta
+                        product_db.save(folder, record)
             return JSONResponse({"ok": True})
         return JSONResponse({"error": "ไม่พบไฟล์"})
     # User files in data/ — ลบไฟล์ + sync DB
@@ -4057,6 +4072,22 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
         all_posts: list[dict] = []
         pre_mutation_posts: list[dict] = []
 
+        # Brand Asset selection — seam เดียวกับ auto mode: เมื่อ run นี้มี
+        # media generation ให้เลือก asset จาก library เข้า reference catalog
+        # ก่อนสร้างคอนเทนต์ — ไม่เช่นนั้น Agent 4 ไม่เห็น asset เลยและ
+        # asset_ids/catalog_asset_ids จะว่างเสมอ (media หา references ไม่เจอ)
+        asset_summary = ""
+        # orchestrator ถูก share ข้ามรัน — รัน text-only ที่ไม่เข้า selection
+        # ต้องไม่ถือ selection ค้างจากรันก่อนไปเขียน session meta (line ~4202)
+        orch._selected_asset_ids = []
+        if (auto_image or auto_video) and llm is not None:
+            try:
+                asset_summary = orch._select_assets_for_content(
+                    llm, quick_brief=quick_brief, product_ids=effective_folders,
+                )
+            except Exception:
+                asset_summary = ""
+
         for platform in target_platforms:
             platform_label = platform_names.get(platform, platform) if platform else ""
             for post_idx in range(count_per_platform):
@@ -4093,6 +4124,7 @@ def _run_single_agent(agent_key: str, folder: str, raw_contents: list[str],
                     run_kwargs["resource_context"] = resource_context
                 if extra_image_paths:
                     run_kwargs["extra_image_paths"] = extra_image_paths
+                run_kwargs["asset_summary"] = asset_summary
                 effective_step_context = step_context
                 if step_context is not None:
                     effective_step_context = step_context.with_quick_brief(multi_brief)
@@ -5761,6 +5793,12 @@ async function mktappLogout() {
   .pillar-keyword-add { display: inline-flex; align-items: center; gap: 4px; }
   .pillar-keyword-add input { background: transparent; border: 1px dashed #3a3d5a; border-radius: 12px; padding: 4px 10px; color: #e0e0e0; font-size: 12px; width: 120px; }
   .pillar-keyword-add input:focus { outline: none; border-color: #7c8aff; border-style: solid; }
+  .seg-toggle { display: inline-flex; border: 1px solid #2a2d3a; border-radius: 6px; overflow: hidden; }
+  .seg-toggle .seg-opt { position: relative; margin: 0; cursor: pointer; }
+  .seg-toggle .seg-opt input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+  .seg-toggle .seg-opt span { display: block; padding: 5px 12px; font-size: 11px; color: #888; background: #1c1e2a; user-select: none; }
+  .seg-toggle .seg-opt input:checked + span { background: #7c8aff; color: #fff; }
+  .seg-toggle .seg-opt input:focus-visible + span { outline: 2px solid #7c8aff; outline-offset: -2px; }
   .pillar-add-btn { background: #1a1d2e; border: 1px dashed #7c8aff; color: #7c8aff; border-radius: 10px; padding: 14px; font-size: 14px; cursor: pointer; width: 100%; margin-top: 8px; }
   .pillar-add-btn:hover { background: #1a2a4a; }
 
@@ -5941,6 +5979,9 @@ async function mktappLogout() {
   .settings-modal h3 { font-size: 16px; color: #7c8aff; margin-bottom: 16px; }
   .settings-modal label { font-size: 12px; color: #888; display: block; margin-bottom: 4px; margin-top: 12px; }
   .settings-modal input, .settings-modal select { width: 100%; background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; padding: 8px 10px; color: #e0e0e0; font-size: 13px; }
+  #pd-ai-body .pd-ai-option { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 10px; color: #e0e0e0; cursor: pointer; min-width: 0; }
+  #pd-ai-body .pd-ai-option input[type="checkbox"] { width: auto; flex: 0 0 auto; margin: 2px 0 0; padding: 0; accent-color: #7c8aff; }
+  #pd-ai-body .pd-ai-option span { min-width: 0; line-height: 1.5; overflow-wrap: anywhere; }
   .settings-modal .settings-actions { display: flex; gap: 8px; margin-top: 20px; }
   .settings-modal .settings-save { background: #4ade80; color: #0f1117; border: none; border-radius: 8px; padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer; flex: 1; }
   .settings-modal .settings-save:disabled { background: #2a2d3a; color: #555; cursor: not-allowed; }
@@ -7295,10 +7336,10 @@ function renderStagingPreview() {
     if (isExists) {
       html += '<span style="font-size:11px;color:#666">—</span>';
     } else {
-      html += '<select data-seg-action="' + i + '" onchange="_updateStagingConfirmLabel()" style="background:#1c1e2a;border:1px solid #2a2d3a;color:#fff;border-radius:4px;padding:5px 8px;font-size:12px;width:100%">';
-      html += '<option value="create" selected>สร้างใหม่</option>';
-      html += '<option value="skip">ข้าม</option>';
-      html += '</select>';
+      html += '<div class="seg-toggle" data-seg-action="' + i + '" role="radiogroup" aria-label="การกระทำ">';
+      html += '<label class="seg-opt"><input type="radio" name="seg-act-' + i + '" value="skip" onchange="_updateStagingConfirmLabel()"><span>ข้าม</span></label>';
+      html += '<label class="seg-opt"><input type="radio" name="seg-act-' + i + '" value="create" checked onchange="_updateStagingConfirmLabel()"><span>เพิ่ม</span></label>';
+      html += '</div>';
     }
     html += '</div>';
     html += '</div>';
@@ -7323,28 +7364,30 @@ function _updateStagingConfirmLabel() {
   const btn = document.getElementById('staging-confirm-btn');
   if (!btn) return;
   let nCreate = 0;
-  const selects = document.querySelectorAll('#staging-preview-modal select[data-seg-action]');
-  for (const sel of selects) {
-    if (sel.value === 'create') nCreate++;
+  const toggles = document.querySelectorAll('#staging-preview-modal .seg-toggle[data-seg-action]');
+  for (const t of toggles) {
+    const c = t.querySelector('input:checked');
+    if (c && c.value === 'create') nCreate++;
   }
   if (nCreate === 0) {
     btn.textContent = 'ยืนยัน';
     btn.disabled = true;
   } else {
     btn.disabled = false;
-    btn.textContent = 'ยืนยัน (สร้าง ' + nCreate + ')';
+    btn.textContent = 'ยืนยัน (เพิ่ม ' + nCreate + ')';
   }
 }
 
 function confirmStagingCommit() {
   const status = document.getElementById('upload-modal-status');
   if (!_stagingBatchId) return;
-  // อ่าน choices จาก dropdown action (มีแค่ตัวที่ยังไม่มี — ตัวที่มีอยู่แล้วไม่มี dropdown)
+  // อ่าน choices จาก toggle action (มีแค่ตัวที่ยังไม่มี — ตัวที่มีอยู่แล้วไม่มี toggle)
   const choices = [];
-  const selects = document.querySelectorAll('#staging-preview-modal select[data-seg-action]');
-  for (const sel of selects) {
-    const idx = parseInt(sel.dataset.segAction);
-    const action = sel.value;
+  const toggles = document.querySelectorAll('#staging-preview-modal .seg-toggle[data-seg-action]');
+  for (const t of toggles) {
+    const idx = parseInt(t.dataset.segAction);
+    const checked = t.querySelector('input:checked');
+    const action = checked ? checked.value : 'skip';
     if (action === 'skip') continue;
     const nameInput = document.querySelector('#staging-preview-modal input[data-seg-name="' + idx + '"]');
     const choice = { segment_index: idx, action: action };
@@ -7355,7 +7398,7 @@ function confirmStagingCommit() {
   }
   if (choices.length === 0) {
     status.className = 'upload-status err';
-    status.textContent = 'เลือกอย่างน้อย 1 สินค้า (เปลี่ยนจาก "ข้าม" เป็น "สร้างใหม่")';
+    status.textContent = 'เลือกอย่างน้อย 1 สินค้า (เปลี่ยนจาก "ข้าม" เป็น "เพิ่ม")';
     return;
   }
   const saveBtn = document.getElementById('staging-confirm-btn');
@@ -8398,14 +8441,13 @@ function _renderProductDetailView(profile, info, files, ai) {
   document.getElementById('pd-meta').textContent = (category ? category + ' · ' : '') + sourceLabel;
 
   let h = '';
-  h += _pdRenderFactsView(effective, derived, sourceType);
+  h += _pdRenderFactsView(effective, derived, sourceType, ai);
   if (summary) {
     h += '<div class="pd-section" style="margin-bottom:24px">';
     h += '<div style="font-size:14px;font-weight:600;color:#e0e0e0;margin-bottom:8px">สรุปสินค้า</div>';
     h += '<div style="font-size:13px;color:#aaa;line-height:1.6">' + escapeHtml(summary) + '</div>';
     h += '</div>';
   }
-  h += _pdRenderAiSection(ai);
   h += _pdRenderMktSection(profile);
   h += _pdRenderSrcSection(files, sourceType, info);
   pd.innerHTML = h;
@@ -8424,22 +8466,16 @@ function _pdRenderAiSection(ai) {
   const enrich = (ai && ai.ai_enrichment) || {};
   const proposal = ai && ai.proposal;
   const status = enrich.status || 'never_run';
-  let h = '<div class="pd-section" style="margin-bottom:24px">';
-  h += '<div style="display:flex;justify-content:space-between;align-items:center">';
-  h += '<div style="font-size:14px;font-weight:600;color:#e0e0e0">AI</div>';
-  h += '<button onclick="pdAiOpen()" style="background:none;border:1px solid #7c8aff;color:#7c8aff;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px">✨ เติมข้อมูลด้วย AI</button>';
-  h += '</div>';
   if (proposal) {
-    h += '<div style="margin-top:8px;font-size:12px;color:#facc15">มีข้อเสนอจาก AI รอตรวจสอบ — <span onclick="pdAiOpen()" style="color:#7c8aff;cursor:pointer">เปิดดูข้อเสนอ ›</span></div>';
-  } else if (status === 'failed') {
-    h += '<div style="margin-top:8px;font-size:12px;color:#f87171">AI วิเคราะห์ไม่สำเร็จครั้งล่าสุด — สินค้ายังใช้งานได้ปกติ กดปุ่มเพื่อลองใหม่</div>';
-  } else if (status === 'no_changes') {
-    h += '<div style="margin-top:8px;font-size:12px;color:#555">AI ตรวจสอบแล้ว — ไม่พบข้อมูลใหม่ที่แตกต่างจากข้อมูลปัจจุบัน</div>';
-  } else {
-    h += '<div style="margin-top:8px;font-size:12px;color:#555">สินค้าใช้งานได้เต็มที่โดยไม่ต้องใช้ AI — กดปุ่มเมื่อต้องการให้ AI เสนอข้อมูลเพิ่ม (ใช้เครดิต)</div>';
+    return '<div style="margin-top:10px;font-size:12px;color:#facc15">มีข้อเสนอจาก AI รอตรวจสอบ — <span onclick="pdAiOpen()" style="color:#7c8aff;cursor:pointer">เปิดดูข้อเสนอ ›</span></div>';
   }
-  h += '</div>';
-  return h;
+  if (status === 'failed') {
+    return '<div style="margin-top:10px;font-size:12px;color:#f87171">AI วิเคราะห์ไม่สำเร็จครั้งล่าสุด — สินค้ายังใช้งานได้ปกติ กดปุ่มเพื่อลองใหม่</div>';
+  }
+  if (status === 'no_changes') {
+    return '<div style="margin-top:10px;font-size:12px;color:#555">AI ตรวจสอบแล้ว — ไม่พบข้อมูลใหม่ที่แตกต่างจากข้อมูลปัจจุบัน</div>';
+  }
+  return '<div style="margin-top:10px;font-size:12px;color:#555">สินค้าใช้งานได้เต็มที่โดยไม่ต้องใช้ AI — กดปุ่มเมื่อต้องการให้ AI เสนอข้อมูลเพิ่ม (ใช้เครดิต)</div>';
 }
 
 let _pdAiView = null;  // latest /proposal view-model while the dialog is open
@@ -8483,8 +8519,8 @@ function _pdAiRender() {
     h += '<div style="font-size:13px;color:#4ade80;margin-bottom:14px;line-height:1.6">AI ตรวจสอบแล้ว ไม่พบข้อมูลใหม่ที่แตกต่างจากข้อมูลปัจจุบัน</div>';
   }
   h += '<div style="font-size:13px;color:#aaa;margin-bottom:14px;line-height:1.6">AI จะอ่านไฟล์ต้นทางของสินค้าแล้วเสนอข้อมูลให้ตรวจสอบ — ข้อมูลเดิมของคุณจะไม่ถูกเปลี่ยนจนกว่าจะเลือกรับทีละฟิลด์</div>';
-  h += '<label style="display:flex;gap:8px;align-items:center;font-size:13px;color:#e0e0e0;margin-bottom:8px"><input type="checkbox" id="pd-ai-scope-facts" checked> ข้อมูลสินค้า (สรุป / หมวด / คุณสมบัติ)</label>';
-  h += '<label style="display:flex;gap:8px;align-items:center;font-size:13px;color:#e0e0e0;margin-bottom:14px"><input type="checkbox" id="pd-ai-scope-marketing" checked> Marketing (กลุ่มเป้าหมาย / จุดขาย / โทน)</label>';
+  h += '<label class="pd-ai-option" for="pd-ai-scope-facts"><input type="checkbox" id="pd-ai-scope-facts" checked><span>ข้อมูลสินค้า (สรุป / หมวด / คุณสมบัติ)</span></label>';
+  h += '<label class="pd-ai-option" for="pd-ai-scope-marketing"><input type="checkbox" id="pd-ai-scope-marketing" checked><span>Marketing (กลุ่มเป้าหมาย / จุดขาย / โทน)</span></label>';
   if (enrich.status === 'failed') {
     h += '<div style="font-size:12px;color:#f87171;margin-bottom:10px">ครั้งล่าสุดล้มเหลว: ' + escapeHtml(enrich.error || '') + '</div>';
   }
@@ -8840,20 +8876,20 @@ function _pdAiResolve(resolutions) {
 
 // --- Facts section ---
 
-function _pdRenderFactsView(effective, derived, sourceType) {
+function _pdRenderFactsView(effective, derived, sourceType, ai) {
   let h = '<div class="pd-section" style="margin-bottom:24px">';
   const isEditing = _pdEditingSection === 'facts';
-  h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
+  h += '<div class="pd-section-head" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">';
   h += '<div style="font-size:14px;font-weight:600;color:#e0e0e0">ข้อมูลสินค้า</div>';
+  h += '<span class="pd-section-actions" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">';
+  h += '<button onclick="pdAiOpen()" style="background:none;border:1px solid #7c8aff;color:#7c8aff;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px">✨ เติมข้อมูลด้วย AI</button>';
   if (!isEditing) {
     h += '<button onclick="pdEditFacts()" style="background:none;border:1px solid #3a3d4a;color:#7c8aff;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px">แก้ไข</button>';
   } else {
-    h += '<span style="display:flex;gap:6px">';
     h += '<button onclick="pdSaveFacts()" style="background:#22c55e;border:none;color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">บันทึก</button>';
     h += '<button onclick="pdCancelEdit()" style="background:none;border:1px solid #3a3d4a;color:#888;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px">ยกเลิก</button>';
-    h += '</span>';
   }
-  h += '</div>';
+  h += '</span></div>';
   if (!isEditing) {
     const factEntries = Object.entries(effective);
     if (factEntries.length === 0) {
@@ -8904,6 +8940,7 @@ function _pdRenderFactsView(effective, derived, sourceType) {
     // repeated empty forms.
     h += '<span class="pillar-keyword-add" style="margin-top:4px"><input placeholder="+ เพิ่มข้อมูล (ชื่อฟิลด์)" onkeydown="if(event.key===\'Enter\'){event.preventDefault();_pdAddFact(this.value.trim());this.value=\'\';}" style="width:230px"></span>';
   }
+  h += _pdRenderAiSection(ai);
   h += '</div>';
   return h;
 }
@@ -8936,21 +8973,24 @@ function _pdRenderMktSection(profile) {
     const aud = profile.audience || {};
     if (aud.primary?.age || aud.primary?.role) h += '<div style="margin-bottom:8px"><span style="color:#888">กลุ่มเป้าหมาย:</span> ' + escapeHtml(aud.primary.age || '') + ' ' + escapeHtml(aud.primary.role || '') + '</div>';
     if (aud.end_user?.age || aud.end_user?.desc) h += '<div style="margin-bottom:8px"><span style="color:#888">ผู้ใช้ปลายทาง:</span> ' + escapeHtml(aud.end_user.age || '') + ' ' + escapeHtml(aud.end_user.desc || '') + '</div>';
-    if (profile.competitors?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">คู่แข่ง:</span> ' + escapeHtml(profile.competitors.join(', ')) + '</div>';
-    if (profile.differentiators?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">จุดขาย:</span> ' + escapeHtml(profile.differentiators.join(', ')) + '</div>';
-    if (profile.use_cases?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">Use cases:</span> ' + escapeHtml(profile.use_cases.join(', ')) + '</div>';
+    // product_profile รุ่นเก่าเก็บ list เป็น string คั่นจุลภาค — normalize เหมือน backend
+    const _joinList = v => Array.isArray(v) ? v.join(', ') : String(v || '');
+    if (profile.competitors?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">คู่แข่ง:</span> ' + escapeHtml(_joinList(profile.competitors)) + '</div>';
+    if (profile.differentiators?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">จุดขาย:</span> ' + escapeHtml(_joinList(profile.differentiators)) + '</div>';
+    if (profile.use_cases?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">Use cases:</span> ' + escapeHtml(_joinList(profile.use_cases)) + '</div>';
     if (profile.price_tier) h += '<div style="margin-bottom:8px"><span style="color:#888">ระดับราคา:</span> ' + escapeHtml(profile.price_tier) + '</div>';
     if (profile.tone_adjustment) h += '<div style="margin-bottom:8px"><span style="color:#888">ปรับโทน:</span> ' + escapeHtml(profile.tone_adjustment) + '</div>';
     const vo = profile.visual_override || {};
-    if (vo.image_style?.tone) h += '<div style="margin-bottom:8px"><span style="color:#888">โทนภาพ:</span> ' + escapeHtml(vo.image_style.tone) + '</div>';
-    if (vo.keywords?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">Keywords ภาพ:</span> ' + escapeHtml(vo.keywords.join(', ')) + '</div>';
+    const voTone = typeof vo.image_style === 'string' ? vo.image_style : vo.image_style?.tone;
+    if (voTone) h += '<div style="margin-bottom:8px"><span style="color:#888">โทนภาพ:</span> ' + escapeHtml(voTone) + '</div>';
+    if (vo.keywords?.length) h += '<div style="margin-bottom:8px"><span style="color:#888">Keywords ภาพ:</span> ' + escapeHtml(_joinList(vo.keywords)) + '</div>';
     h += '</div>';
   } else {
     const aud = profile.audience || {};
     const prim = aud.primary || {};
     const eu = aud.end_user || {};
     const vo = profile.visual_override || {};
-    const vis = vo.image_style || {};
+    const vis = typeof vo.image_style === 'string' ? {tone: vo.image_style} : (vo.image_style || {});
     h += '<div style="margin-top:12px">';
     h += '<div style="font-size:13px;color:#7c8aff;margin-bottom:8px">กลุ่มเป้าหมาย</div>';
     h += _field('ช่วงอายุผู้ซื้อ', 'pd-mkt-age', prim.age, 'เช่น 28-45 ปี', 'กำหนดช่วงอายุผู้ซื้อหลัก มีผลต่อภาษา มุมมอง และช่องทางที AI เลือกใช้');
@@ -9020,16 +9060,19 @@ function _pdRenderSrcSection(files, sourceType, info) {
       // Media extracted FROM the source files (embedded images in
       // xlsx/docx/pdf) — same row presentation as source-file media (one
       // renderer, one DOM contract); only the byte route and the
-      // attribution differ.  Extracted bytes are not user files, so the
-      // menu offers view only — deleting the source file covers removal.
+      // attribution differ.
       h += '<div style="margin-top:14px;padding-top:10px;border-top:1px solid #1a1d27">';
       h += '<div style="font-size:12px;color:#888;margin-bottom:8px">สื่อที่สกัดจากไฟล์ (' + media.length + ')</div>';
       for (const m of media) {
         const murl = '/api/product_media/' + encodeURIComponent(_pdFolder) + '/' + encodeURIComponent(m.name);
+        const cachePath = 'cache/extracted_images/' + m.name;
+        const safeCp = cachePath.replace(/'/g,"\\'").replace(/"/g,"&quot;");
+        const menuHtml = '<div onclick="window.open(\'' + murl + '\',\'_blank\');this.closest(\'.pd-file-menu\').style.display=\'none\'" style="padding:6px 12px;font-size:12px;color:#e0e0e0;cursor:pointer" onmouseover="this.style.background=\'#2a2d3a\'" onmouseout="this.style.background=\'none\'">ดู</div>' +
+          '<div onclick="_pdFileAction(this,\'delete\',\'' + safeCp + '\')" style="padding:6px 12px;font-size:12px;color:#f87171;cursor:pointer" onmouseover="this.style.background=\'#2a2d3a\'" onmouseout="this.style.background=\'none\'">ลบไฟล์</div>';
         h += _pdSrcRowHtml({
           thumbUrl: murl, icon: '🖼', name: m.name,
           nameTitle: m.source ? 'จาก: ' + m.source : '',
-          menuItems: '<div onclick="window.open(\'' + murl + '\',\'_blank\');this.closest(\'.pd-file-menu\').style.display=\'none\'" style="padding:6px 12px;font-size:12px;color:#e0e0e0;cursor:pointer" onmouseover="this.style.background=\'#2a2d3a\'" onmouseout="this.style.background=\'none\'">ดู</div>',
+          menuItems: menuHtml,
         });
       }
       h += '</div>';

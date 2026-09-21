@@ -375,3 +375,109 @@ class TestRealK2Acceptance:
         assert "680mAh" in product_db.get_agent_context_text("RealK2")
         assert no_model_calls["provider"] == 0
         assert no_model_calls["make_llm"] == 0
+
+
+# ---------------------------------------------------------------------------
+#  Colon-row source facts (FREE-URL-FACTS-01)
+#  A product page whose spec rows flatten to literal `label : value` lines
+#  (space-colon-space) must yield the same deterministic derived_facts as
+#  `label | value` rows — verbatim, provenance-traced, no model.
+# ---------------------------------------------------------------------------
+
+_K5_PAGE = Path(__file__).parent / "fixtures" / "url_thaisuperphone_k5_page.json"
+
+
+def _k5_text() -> str:
+    return json.loads(_K5_PAGE.read_text(encoding="utf-8"))["text"]
+
+
+def _labels(facts: dict) -> list[str]:
+    return [f.get("label", "") for f in facts.values()]
+
+
+def _has(facts: dict, label: str, value: str) -> bool:
+    return any(
+        f.get("label") == label and f.get("value") == value
+        for f in facts.values()
+    )
+
+
+class TestColonRowFacts:
+    """`label : value` rows — the other generic two-cell shape."""
+
+    def test_real_k5_page_text_yields_explicit_facts(self):
+        """The captured K5-shaped page text produces non-empty facts —
+        brand/processor/battery/water-resistance all verbatim."""
+        facts = ingestion.extract_source_facts(_k5_text())
+        assert facts, "page with explicit `label : value` rows produced none"
+        assert _has(facts, "แบรนด์", "Lagenio K5")
+        assert _has(facts, "หน่วยประมวลผล", "W117")
+        assert _has(facts, "แบตเตอรี่", "570 mAh")
+        assert _has(facts, "มาตรฐานการกันน้ำ", "IP68")
+
+    def test_colon_rows_generic_not_page_specific(self):
+        """A synthetic English spec block with the same shape works —
+        proves no page/brand/language-specific patch."""
+        text = ("Brand : Acme Tools\n"
+                "Battery : 900mAh\n"
+                "Waterproof : IP67\n"
+                "Warranty : 12 months\n")
+        facts = ingestion.extract_source_facts(text)
+        assert _has(facts, "Brand", "Acme Tools")
+        assert _has(facts, "Battery", "900mAh")
+        assert _has(facts, "Waterproof", "IP67")
+
+    def test_importer_header_lines_never_become_facts(self):
+        """Source URL / Final URL / Fetched / Title / Description use
+        `Key:` (no space before the colon) — importer provenance, not
+        product facts."""
+        text = ("Source URL: https://shop.example.com/p/1\n"
+                "Final URL: https://shop.example.com/p/1\n"
+                "Fetched: 2026-09-17T10:00:00+00:00\n"
+                "Title: Some Product Page\n"
+                "Description: A product page\n\n"
+                "Brand : Acme\n"
+                "Battery : 900mAh\n")
+        facts = ingestion.extract_source_facts(text)
+        for bad in ("source_url", "final_url", "fetched", "title",
+                    "description", "source"):
+            assert bad not in facts, f"importer line became a fact: {bad}"
+        assert _has(facts, "Brand", "Acme")
+
+    def test_urls_with_colons_are_not_split(self):
+        """A bare URL line and a `label : https://…` row carry a colon
+        inside the value — ambiguous, so they stay evidence only."""
+        text = ("https://shop.example.com/products/x:y\n"
+                "Link : https://shop.example.com/more\n"
+                "Brand : Acme\n"
+                "Battery : 900mAh\n")
+        facts = ingestion.extract_source_facts(text)
+        assert _has(facts, "Brand", "Acme")
+        assert len(facts) == 2, facts
+
+    def test_colon_attached_prose_is_not_facts(self):
+        """Ordinary `Word: rest` prose (colon without the leading space)
+        is not a two-cell row."""
+        text = ("Note: items may vary by batch\n"
+                "Available: soon in stores\n"
+                "Warning: keep away from water\n")
+        assert ingestion.extract_source_facts(text) == {}
+
+    def test_bare_label_colon_has_no_fact(self):
+        """`แบรนด์:` alone (empty value) yields nothing."""
+        text = "แบรนด์:\nสี: \nBrand : Acme\nBattery : 900mAh\n"
+        facts = ingestion.extract_source_facts(text)
+        assert _has(facts, "Brand", "Acme")
+        assert len(facts) == 2, facts
+
+    def test_isolated_colon_prose_is_not_a_spec_block(self):
+        text = ("Introductory copy\n"
+                "Notice : registration details\n"
+                "More explanatory copy\n"
+                "Support : weekdays during business hours\n")
+        assert ingestion.extract_source_facts(text) == {}
+
+    def test_real_k5_page_excludes_isolated_colon_prose(self):
+        labels = _labels(ingestion.extract_source_facts(_k5_text()))
+        assert "หมายเหตุ" not in labels
+        assert "บริการแชท" not in labels

@@ -506,6 +506,92 @@ def _effective_facts_text(product_id: str) -> str:
     )
 
 
+def _confirmed_profile_text(product_id: str) -> str:
+    """Render the user-confirmed capability record (accepted enrichment
+    profile) as context text.
+
+    ``product_profile.json`` holds product truth the user reviewed and
+    accepted — the canonical ``summary`` plus capability-bearing
+    ``differentiators`` and ``use_cases``.  These live outside spec-table
+    facts, so without this block a confirmed capability can silently
+    disappear from the agent context and get replaced by noisy or
+    mistranslated raw-source phrasing.  Same trust tier as verified facts.
+
+    Positioning fields (audience, competitors, price_tier, tone, visual)
+    are intentionally NOT rendered — they are marketing positioning
+    delivered through the brand-reference channel, not product facts.
+
+    Returns "" when no confirmed record exists.
+    """
+    try:
+        from .brand_loader import load_product_profile
+        profile = load_product_profile(product_id)
+    except Exception:
+        profile = {}
+    if not isinstance(profile, dict) or not profile:
+        return ""
+    def _as_list(value) -> list:
+        """Profile JSON is user-writable — coerce a bare string to one item,
+        drop non-list/non-string shapes entirely."""
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        return [str(v).strip() for v in value if str(v).strip()]
+
+    lines = []
+    summary = str(profile.get("summary") or "").strip()
+    if summary:
+        lines.append(f"  คำอธิบายสินค้า: {summary}")
+    diffs = _as_list(profile.get("differentiators"))
+    if diffs:
+        lines.append("  จุดเด่น/ความสามารถที่ยืนยัน: " + ", ".join(diffs))
+    uses = _as_list(profile.get("use_cases"))
+    if uses:
+        lines.append("  การใช้งานที่ยืนยัน: " + ", ".join(uses))
+    if not lines:
+        return ""
+    return (
+        "--- ข้อมูลสินค้าที่ผู้ใช้ยืนยัน (Confirmed Product Profile) ---\n"
+        "ข้อมูลนี้ผู้ใช้ตรวจสอบและยืนยันแล้ว — เป็นข้อเท็จจริงของสินค้า "
+        "ระดับเดียวกับข้อมูลสินค้า (Product Information)\n"
+        "ให้ใช้แทนข้อความในข้อมูลดิบที่อาจกำกวมหรือถูกแปลผิด "
+        "ต้องคงความหมายของความสามารถที่ยืนยันไว้ "
+        "ห้ามแทนที่ด้วยความสามารถอื่นหรือละทิ้งโดยไม่มีเหตุผล\n"
+        + "\n".join(lines)
+        + "\n--- สิ้นสุดข้อมูลที่ยืนยัน ---\n"
+    )
+
+
+def get_agent_facts_text(product_id: str) -> str:
+    """Product-owned source text for rendering our-product factual claims.
+
+    Trust order: effective facts (manual overrides + derived) → confirmed
+    profile → the product's own raw text ONLY when the record is scoped
+    (raw_text was cut to this product's segment at ingest, so every line is
+    proven to describe it).  An unscoped record's raw_text is a whole page
+    scrape that can embed other products' listings/recommendation cards —
+    not proven to belong to this product, so it is never eligible as a
+    factual our-product source.
+
+    Returns "" when no product-owned source exists — callers must treat an
+    empty result as "no verified facts", not fall back to the page blob.
+    """
+    parts = []
+    facts_text = _effective_facts_text(product_id)
+    if facts_text:
+        parts.append(facts_text)
+    confirmed_text = _confirmed_profile_text(product_id)
+    if confirmed_text:
+        parts.append(confirmed_text)
+    record = load(product_id) or {}
+    if record.get("scope"):
+        raw = (record.get("raw_text") or "").strip()
+        if raw:
+            parts.append(raw[:_get_raw_text_max_length()])
+    return "\n".join(parts)
+
+
 def get_agent_context_text(product_id: str) -> str:
     """สร้าง text สำหรับยัดเป็น context ของ agent การตลาด.
 
@@ -514,6 +600,7 @@ def get_agent_context_text(product_id: str) -> str:
 
     ลำดับ precedence (ตามที่ปรากฏใน context):
       1. USER-VERIFIED / MANUAL PRODUCT FACTS  (แก้ไขโดยผู้ใช้ — สูงสุด)
+      1.5 ข้อมูลสินค้าที่ผู้ใช้ยืนยัน (confirmed capability record)
       2. ขอบเขตสินค้า (scope)
       3. ข้อมูลดิบ (raw text + transcripts)
 
@@ -530,6 +617,11 @@ def get_agent_context_text(product_id: str) -> str:
     facts_text = _effective_facts_text(product_id)
     if facts_text:
         parts.append(facts_text)
+
+    # 1.5 User-confirmed capability record — same trust tier as facts
+    confirmed_text = _confirmed_profile_text(product_id)
+    if confirmed_text:
+        parts.append(confirmed_text)
 
     # 2. ถ้ามี scope (สินค้าที่แยกจาก catalog) → บอก agent ว่านี่คือสินค้าใด
     scope = data.get("scope")
@@ -630,6 +722,11 @@ def get_agent_context(product_id: str) -> dict[str, Any]:
     facts_text = _effective_facts_text(product_id)
     if facts_text:
         text_parts.append(facts_text)
+
+    # 1.5 User-confirmed capability record — same trust tier as facts
+    confirmed_text = _confirmed_profile_text(product_id)
+    if confirmed_text:
+        text_parts.append(confirmed_text)
 
     # 2. ข้อมูลดิบ (raw text + transcripts)
     if record.get("raw_text"):

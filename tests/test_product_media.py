@@ -220,3 +220,71 @@ def test_media_route_cross_brand_blocked(_client, monkeypatch):
     r = other.get("/api/product_media/K2/spec_img_001.png")
     assert r.status_code in (400, 403, 404), (
         f"cross-user access must be rejected, got {r.status_code}")
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/folder_file/{folder} — delete extracted media safely
+# ---------------------------------------------------------------------------
+
+def test_delete_extracted_media_syncs_db_and_keeps_source(_client):
+    """Deleting an extracted media file:
+    - removes the cached image file from disk
+    - removes its entry from product.json["image_descriptions"]
+    - updates metadata (image_count, has_images)
+    - keeps the original source document intact
+    - keeps sibling extracted media intact
+    - makes the deleted image 404 on /api/product_media
+    - excludes it from get_product_image_paths()
+    """
+    from src import product_db
+    from src.workspace_context import WorkspaceContext, set_workspace
+
+    client, brand_root, uid, bid, tmp = _client
+    png = _seed_product_with_media(brand_root, "K2", uid, bid, tmp)
+    # verify initial state
+    set_workspace(WorkspaceContext.for_brand(uid, bid, tmp))
+    try:
+        rec_before = product_db.load("K2")
+        assert len(rec_before.get("image_descriptions", [])) == 2
+        assert len(product_db.get_product_image_paths("K2")) == 2
+    finally:
+        set_workspace(None)
+
+    # Delete spec_img_001.png via DELETE /api/folder_file/{folder}
+    r = client.request("DELETE", "/api/folder_file/K2", json={
+        "folder": "K2",
+        "filepath": "cache/extracted_images/spec_img_001.png",
+    })
+    assert r.status_code == 200
+    assert r.json().get("ok") is True
+
+    # 1. Image on disk is removed
+    assert not png.exists()
+    # 2. Sibling image on disk remains
+    sibling = png.parent / "spec_img_002.png"
+    assert sibling.exists()
+    # 3. Source file in data/ remains intact!
+    source_file = brand_root / "data" / "K2" / "spec.txt"
+    assert source_file.exists()
+
+    # 4. Product DB is synchronized
+    set_workspace(WorkspaceContext.for_brand(uid, bid, tmp))
+    try:
+        rec_after = product_db.load("K2")
+        imgs = rec_after.get("image_descriptions", [])
+        assert len(imgs) == 1
+        assert Path(imgs[0]["path"]).name == "spec_img_002.png"
+        assert rec_after["metadata"]["image_count"] == 1
+        assert rec_after["metadata"]["has_images"] is True
+        # Excluded from get_product_image_paths
+        paths = product_db.get_product_image_paths("K2")
+        assert len(paths) == 1
+        assert Path(paths[0]).name == "spec_img_002.png"
+    finally:
+        set_workspace(None)
+
+    # 5. /api/product_media is now 404 for the deleted image, 200 for sibling
+    r_del = client.get("/api/product_media/K2/spec_img_001.png")
+    assert r_del.status_code == 404
+    r_sib = client.get("/api/product_media/K2/spec_img_002.png")
+    assert r_sib.status_code == 200

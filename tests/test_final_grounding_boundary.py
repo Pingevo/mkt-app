@@ -627,3 +627,240 @@ def test_serialize_post_uses_generic_keys():
     assert "#h" in text
     assert "i" in text
     assert "v" in text
+
+
+# ---------------------------------------------------------------------------
+# Grounding-response boundary: recoverable wrappers, schema validation,
+# provider-abort classification, bounded retry — the real launch failure was
+# a provider mid-generation abort (finish_reason="error") classified as
+# malformed_json, not a model contract violation.
+# ---------------------------------------------------------------------------
+
+def _verifier_agent(llm, config=None):
+    from src.agents.base_agent import BaseAgent
+    agent = BaseAgent.__new__(BaseAgent)
+    agent.agent_name = "test"
+    agent.config = config or {}
+    agent.instructions = {}
+    agent.llm = llm
+    return agent
+
+
+def test_verifier_fenced_json_accepted():
+    """A verdict wrapped in a markdown code fence is a mechanically
+    recoverable wrapper — must parse like canonical JSON."""
+    llm = MagicMock()
+    llm.chat.return_value = '```json\n{"grounded": true, "unsupported_claims": []}\n```'
+    llm.last_finish_reason = "stop"
+    result = _verifier_agent(llm).verify_final_grounding("out", {"product_source": "s"})
+    assert result["grounded"] is True
+    assert "error" not in result
+
+
+def test_verifier_json_with_surrounding_prose_accepted():
+    """Harmless prose around the JSON object is recoverable — the verdict
+    object inside must still be extracted and validated."""
+    llm = MagicMock()
+    llm.chat.return_value = ('Here is the grounding verdict:\n'
+                             '{"grounded": false, "unsupported_claims": ["X"]}\n'
+                             'End of check.')
+    llm.last_finish_reason = "stop"
+    result = _verifier_agent(llm).verify_final_grounding("out", {"product_source": "s"})
+    assert result["grounded"] is False
+    assert result["unsupported_claims"] == ["X"]
+    assert "error" not in result
+
+
+def test_verifier_wrong_schema_fails_closed_no_retry():
+    """Valid JSON without the required contract shape is a deterministic
+    contract violation — fail closed with invalid_schema, no retry."""
+    llm = MagicMock()
+    llm.chat.return_value = '{"verdict": true}'
+    llm.last_finish_reason = "stop"
+    result = _verifier_agent(llm).verify_final_grounding("out", {"product_source": "s"})
+    assert result["grounded"] is False
+    assert result["error"] == "invalid_schema"
+    assert llm.chat.call_count == 1, \
+        "wrong-schema responses are deterministic — must not retry"
+
+
+def test_verifier_malformed_json_retries_bounded_then_fails_closed():
+    """Unrecoverable malformed output stays fail-closed — but a bounded
+    retry is allowed because provider truncation can surface as garbage
+    content.  Retry count comes from config max_retry_limit."""
+    llm = MagicMock()
+    llm.chat.return_value = "not json at all"
+    llm.last_finish_reason = "stop"
+    agent = _verifier_agent(llm, config={"max_retry_limit": 2})
+    result = agent.verify_final_grounding("out", {"product_source": "s"})
+    assert result["grounded"] is False
+    assert result["error"] == "malformed_json"
+    assert llm.chat.call_count == 2, \
+        "malformed content must retry up to the configured bound"
+
+
+def test_verifier_provider_error_finish_retries_and_recovers():
+    """Provider abort mid-generation (finish_reason='error' + partial
+    content) is a transport-class failure — retry within the bound and
+    recover when the retry returns a valid verdict."""
+    llm = MagicMock()
+    llm.last_finish_reason = "error"
+
+    def _chat(*_a, **_kw):
+        if llm.chat.call_count >= 2:
+            llm.last_finish_reason = "stop"
+            return '{"grounded": true, "unsupported_claims": []}'
+        return '{"grounded": tr'  # partial JSON from the aborted stream
+
+    llm.chat.side_effect = _chat
+    agent = _verifier_agent(llm, config={"max_retry_limit": 3})
+    result = agent.verify_final_grounding("out", {"product_source": "s"})
+    assert result["grounded"] is True
+    assert llm.chat.call_count == 2
+
+
+def test_verifier_provider_error_exhausted_fails_closed_with_class():
+    """When every attempt ends with an abnormal provider finish, the
+    failure must be classified as provider_error — not malformed_json —
+    so operators can distinguish transport failure from bad model output."""
+    llm = MagicMock()
+    llm.chat.return_value = '{"grounded": tr'  # partial each time
+    llm.last_finish_reason = "error"
+    agent = _verifier_agent(llm, config={"max_retry_limit": 2})
+    result = agent.verify_final_grounding("out", {"product_source": "s"})
+    assert result["grounded"] is False
+    assert result["error"] == "provider_error"
+    assert llm.chat.call_count == 2
+
+
+def test_verifier_truncated_no_retry():
+    """finish_reason='length' means the token budget was hit — retrying the
+    same request is deterministic waste.  One call, truncated error."""
+    llm = MagicMock()
+    llm.chat.return_value = '{"grounded": tr'
+    llm.last_truncated = True
+    llm.last_finish_reason = "length"
+    result = _verifier_agent(llm).verify_final_grounding("out", {"product_source": "s"})
+    assert result["error"] == "truncated"
+    assert llm.chat.call_count == 1
+
+
+def test_verifier_exception_no_retry():
+    """llm.chat already retries transient errors internally — if it still
+    raises, the failure is persistent.  No extra retry here."""
+    llm = MagicMock()
+    llm.chat.side_effect = RuntimeError("connection reset")
+    llm.last_finish_reason = None
+    result = _verifier_agent(llm).verify_final_grounding("out", {"product_source": "s"})
+    assert result["error"] == "llm_exception"
+    assert llm.chat.call_count == 1
+
+
+def test_verifier_unbalanced_brace_then_valid_object_recovered():
+    """Prose containing a stray unbalanced '{' must not kill the scan — a
+    complete verdict object later in the text is still recoverable."""
+    llm = MagicMock()
+    llm.chat.return_value = ('config: {oops broken\n'
+                             '{"grounded": true, "unsupported_claims": []}')
+    llm.last_finish_reason = "stop"
+    result = _verifier_agent(llm).verify_final_grounding("out", {"product_source": "s"})
+    assert result["grounded"] is True
+    assert "error" not in result
+
+
+def test_verifier_grounded_string_fails_closed():
+    """'{"grounded": "false"}' — a string verdict is a contract violation,
+    not a pass.  Presence-only checks would coerce "false" to True."""
+    llm = MagicMock()
+    llm.chat.return_value = '{"grounded": "false", "unsupported_claims": []}'
+    llm.last_finish_reason = "stop"
+    result = _verifier_agent(llm).verify_final_grounding("out", {"product_source": "s"})
+    assert result["grounded"] is False
+    assert result["error"] == "invalid_schema"
+
+
+def test_verifier_unsupported_claims_non_list_fails_closed():
+    """unsupported_claims must be a list when present — a string/int shape
+    is a contract violation."""
+    llm = MagicMock()
+    llm.chat.return_value = '{"grounded": true, "unsupported_claims": "none"}'
+    llm.last_finish_reason = "stop"
+    result = _verifier_agent(llm).verify_final_grounding("out", {"product_source": "s"})
+    assert result["grounded"] is False
+    assert result["error"] == "invalid_schema"
+
+
+def test_competitor_grounding_receives_agent_verified_evidence(brand_ws, monkeypatch):
+    """Agent 2's finalized web-research evidence must reach the grounding
+    verifier via verified_evidence.  A report built FROM verified evidence
+    can never be grounded by product_source alone — the launch failure was
+    grounding completing but rejecting every web-researched competitor
+    claim as unsupported (semantic_failure, not malformed_json)."""
+    from src.orchestrator import Orchestrator
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.config = {}
+    orch.results = {}
+    orch.brand_context = None
+    orch.brand_reference = None
+    orch.brand_rules = None
+    orch.brand_visual = None
+    orch.product_id = None
+    orch.product_images = []
+    orch.brand_dir = "brand"
+
+    stub = MagicMock()
+    stub.build_prompt.return_value = "prompt"
+    stub.run.return_value = "COMPETITOR REPORT TEXT"
+    stub._grounding_evidence_json = "EVIDENCE_SENTINEL_JSON"
+    stub.last_result = {"output": "COMPETITOR REPORT TEXT"}
+    monkeypatch.setattr(orch, "_make_agent", lambda *a, **k: stub)
+
+    llm = MagicMock()
+    llm.chat.return_value = '{"grounded": true, "unsupported_claims": []}'
+    llm.last_finish_reason = "stop"
+    llm.last_truncated = False
+
+    orch.run_competitor_analysis("", None, llm=llm)
+
+    sent = llm.chat.call_args[0][0]
+    system_msg = sent[0]["content"]
+    assert "EVIDENCE_SENTINEL_JSON" in system_msg, \
+        "agent's finalized evidence must reach the grounding verifier context"
+
+
+def test_competitor_grounding_evidence_combines_with_resource_context(brand_ws, monkeypatch):
+    """User-uploaded run resources are also verified-tier evidence — both
+    channels must reach the verifier, not either/or."""
+    from src.orchestrator import Orchestrator
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.config = {}
+    orch.results = {}
+    orch.brand_context = None
+    orch.brand_reference = None
+    orch.brand_rules = None
+    orch.brand_visual = None
+    orch.product_id = None
+    orch.product_images = []
+    orch.brand_dir = "brand"
+
+    stub = MagicMock()
+    stub.build_prompt.return_value = "prompt"
+    stub.run.return_value = "COMPETITOR REPORT TEXT"
+    stub._grounding_evidence_json = "AGENT_EVIDENCE_SENTINEL"
+    stub.last_result = {"output": "COMPETITOR REPORT TEXT"}
+    monkeypatch.setattr(orch, "_make_agent", lambda *a, **k: stub)
+
+    llm = MagicMock()
+    llm.chat.return_value = '{"grounded": true, "unsupported_claims": []}'
+    llm.last_finish_reason = "stop"
+    llm.last_truncated = False
+
+    orch.run_competitor_analysis("", None, llm=llm,
+                                 resource_context="RESOURCE_SENTINEL")
+
+    sent = llm.chat.call_args[0][0]
+    system_msg = sent[0]["content"]
+    assert "AGENT_EVIDENCE_SENTINEL" in system_msg
+    assert "RESOURCE_SENTINEL" in system_msg

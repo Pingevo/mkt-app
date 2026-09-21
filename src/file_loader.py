@@ -225,7 +225,11 @@ def iter_structured_tables(path: str | Path) -> list[dict]:
                             for row in t.extract()
                         ]
                         if rows:
-                            tables.append({"page": page_num + 1, "rows": rows})
+                            tables.append({
+                                "page": page_num + 1,
+                                "rows": rows,
+                                "row_bboxes": [list(row.bbox) for row in t.rows],
+                            })
             return tables
     except Exception:
         return []

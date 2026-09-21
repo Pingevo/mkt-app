@@ -127,7 +127,10 @@ def test_non_shopee_url_never_touches_apify(monkeypatch):
     monkeypatch.setattr(apify_client, "run_actor_and_get_items",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("apify must not run")))
     monkeypatch.setattr(socket, "getaddrinfo", _dns_map({"shop.example": PUBLIC_IP}))
-    html = b"<html><head><title>T</title></head><body>" + b"<p>product text</p>" * 40 + b"</body></html>"
+    html = (b'<html><head><title>T</title>'
+            b'<script type="application/ld+json">{"@context":"https://schema.org",'
+            b'"@type":"Product","name":"T"}</script></head><body>'
+            + b"<p>product text</p>" * 40 + b"</body></html>")
     page = httpx.Client(transport=httpx.MockTransport(
         lambda r: httpx.Response(200, content=html, headers={"content-type": "text/html"})))
     monkeypatch.setattr(url_import, "_make_client", lambda: page)

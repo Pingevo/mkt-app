@@ -44,6 +44,7 @@ PRODUCT_HTML = f"""<!DOCTYPE html>
 <title>ACME Turbo Blender</title>
 <meta property="og:title" content="{DERIVED_NAME}">
 <meta property="og:description" content="Powerful 900W kitchen blender">
+<script type="application/ld+json">{{"@context":"https://schema.org","@type":"Product","name":"{DERIVED_NAME}"}}</script>
 </head><body>
 <h1>{DERIVED_NAME}</h1>
 <p>Price: 2,590 THB</p>
@@ -252,11 +253,18 @@ def test_url_import_through_real_ui_with_brand_isolation(_url_server):
             # -- open the existing upload modal, paste link, click import --
             page.click(".sidebar-add-btn")
             page.wait_for_selector("#upload-overlay.visible", timeout=10000)
+            page.click("#upload-mode-url")
             page.wait_for_selector("#url-import-block", state="visible", timeout=5000)
             page.fill("#import-url-input", PRODUCT_URL)
             page.click("#import-url-btn")
+            page.wait_for_selector("#staging-preview-modal", state="visible",
+                                   timeout=15000)
+            page.fill("input[data-seg-name='0']", DERIVED_NAME)
+            page.locator(".seg-toggle[data-seg-action='0'] label",
+                         has_text="เพิ่ม").click()
+            page.click("#staging-confirm-btn")
 
-            # modal shows success then closes; product lands in the sidebar
+            # confirmed product lands in the sidebar
             page.wait_for_selector(
                 f".folder-item[data-folder='{DERIVED_NAME}']", timeout=15000
             )

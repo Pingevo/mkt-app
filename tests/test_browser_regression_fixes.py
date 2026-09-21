@@ -248,5 +248,5 @@ class TestUrlStaging:
             assert el.is_visible(), "Staging preview should be visible"
             text = el.text_content()
             assert "2" in text or "Product A" in text
-            assert el.locator("select[data-seg-action]").count() == 2
+            assert el.locator(".seg-toggle[data-seg-action]").count() == 2
             browser.close()

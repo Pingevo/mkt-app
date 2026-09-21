@@ -247,6 +247,7 @@ def _extract_images_from_pdf(file_path: Path, out_dir: Path | None = None) -> li
                             "y0": y0,
                             "width": width,
                             "height": height,
+                            "rects": [[r.x0, r.y0, r.x1, r.y1] for r in rects],
                         })
                     except Exception:
                         continue
@@ -281,6 +282,30 @@ def extract_embedded_media(file_path: Path, dest_cache_dir: Path) -> list[dict]:
             r.setdefault("file", file_path.name)
         return results
     return []
+
+
+def source_media_ownership(
+    media: dict, refs: list[dict], source_file: str,
+) -> bool | None:
+    regions = [
+        ref for ref in refs
+        if ref.get("file") == source_file
+        and isinstance(ref.get("bbox"), list) and len(ref["bbox"]) == 4
+        and (ref.get("page") is None or ref.get("page") == media.get("page"))
+    ]
+    rects = media.get("rects") or []
+    if not regions or not rects:
+        return None
+    for ref in regions:
+        x0, y0, x1, y1 = ref["bbox"]
+        for rect in rects:
+            if len(rect) != 4:
+                continue
+            cx = (rect[0] + rect[2]) / 2
+            cy = (rect[1] + rect[3]) / 2
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                return True
+    return False
 
 
 def _extracted_images_dir(file_path: Path) -> Path:
@@ -483,15 +508,22 @@ def _facts_from_table(
 def extract_source_facts(
     raw_text: str,
     text_extracts: list[dict] | None = None,
+    source_file: str = "",
 ) -> dict[str, dict[str, str]]:
     """Extract verbatim source facts → derived_facts-shaped dict.
 
-    Two deterministic passes, no model:
+    Three deterministic passes, no model:
       1. positioned table rows attached to a text_extract (``tables``) —
          where cell structure still exists;
-      2. literal ``label | value`` lines in ``raw_text`` — two-cell rows
-         only, since flattened text cannot prove wider rows aren't
-         comparison tables.
+      2. literal ``label | value`` lines in ``raw_text`` — two-cell rows,
+         plus wider rows inside a pipe-line block that is provably a
+         sparse section/feature/value hierarchy (the block also contains
+         two-cell continuation rows); uniformly wide blocks stay closed
+         since flattened text cannot prove they aren't comparison
+         tables;
+      3. literal ``label : value`` lines in ``raw_text`` — two-cell rows
+         delimited by space-colon-space on both sides; ``Key:``-style
+         lines and values containing ``:`` never qualify.
 
     Returns ``{machine_key: {label, value, source_file}}``; ``source_file``
     links every structured fact back to its imported evidence ("" when the
@@ -507,26 +539,78 @@ def extract_source_facts(
     for t in extracts:
         for table in (t.get("tables") or []):
             _facts_from_table(table, t.get("file", ""), facts)
-    if not raw_text or "|" not in raw_text:
+    if not raw_text:
         return facts
     texts = [(t.get("file", ""), t.get("text", "")) for t in extracts]
-    for line in raw_text.splitlines():
-        if "|" not in line:
-            continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        cells = [c for c in cells if c]
-        if len(cells) != 2:
-            continue
-        label, value = cells
-        key = _fact_key(label)
-        if not key or key in facts:
-            continue
-        source_file = ""
+
+    def _trace(line: str) -> str:
         for fname, ftext in texts:
             if line in ftext:
-                source_file = fname
-                break
-        _add_fact(facts, label, value, source_file)
+                return fname
+        return source_file
+
+    if "|" in raw_text:
+        # Contiguous pipe-line blocks are classified like positioned
+        # tables: a block mixing two-cell rows (sparse continuations whose
+        # empty leading cell flattened away) with wider rows is a
+        # section/feature/value hierarchy, so a wide row's last cell is
+        # the value and the preceding cells are the label path
+        # (``Display | Type | AMOLED`` → ``Display Type = AMOLED``).  A
+        # block of uniformly wide rows has no hierarchy evidence — it is
+        # a dense comparison grid and still fails closed.
+        block: list[tuple[str, list[str]]] = []
+
+        def _flush_pipe_block() -> None:
+            # Sparse hierarchy ⟹ wide rows (category headers that kept
+            # their section cell) are the MINORITY — the same signal the
+            # positioned-table pass measures as a sparse first column.
+            wide = sum(1 for _, c in block if len(c) > 2)
+            hierarchical = len(block) >= 3 and wide * 2 < len(block)
+            for line, cells in block:
+                if len(cells) == 2:
+                    label, value = cells
+                elif hierarchical and len(cells) > 2:
+                    label, value = " ".join(cells[:-1]), cells[-1]
+                else:
+                    continue
+                key = _fact_key(label)
+                if not key or key in facts:
+                    continue
+                _add_fact(facts, label, value, _trace(line))
+            block.clear()
+
+        for line in raw_text.splitlines():
+            if "|" not in line:
+                _flush_pipe_block()
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            block.append((line, [c for c in cells if c]))
+        _flush_pipe_block()
+
+    # `label : value` rows — the other generic two-cell shape (spec blocks
+    # on product pages/documents).  Space-colon-space on BOTH sides is
+    # required so `Key:` importer metadata, bare URLs and `Word: rest`
+    # prose never match; a `:` inside either side (URL-as-value,
+    # `a : b : c`) is ambiguous → fail closed.  At least two adjacent rows
+    # are required to establish tabular structure; isolated prose stays raw.
+    colon_rows: list[tuple[str, str, str]] = []
+
+    def _flush_colon_rows() -> None:
+        if len(colon_rows) >= 2:
+            for label, value, line in colon_rows:
+                _add_fact(facts, label, value, _trace(line))
+        colon_rows.clear()
+
+    for line in raw_text.splitlines():
+        if line.count(" : ") != 1:
+            _flush_colon_rows()
+            continue
+        label, value = (p.strip() for p in line.split(" : ", 1))
+        if ":" in label or ":" in value or not (_FACT_WORD.search(label) and _FACT_WORD.search(value)):
+            _flush_colon_rows()
+            continue
+        colon_rows.append((label, value, line))
+    _flush_colon_rows()
     return facts
 
 
@@ -769,11 +853,12 @@ def _materialize_split_products(
                     # Dead path — keep provenance (file name, source_url)
                     # but never persist a filesystem path claiming a live file.
                     new_img.pop("path", None)
-                # Multi-product split: an image without deterministic
-                # association metadata (page/y0 from embedded PDF extraction)
-                # cannot be claimed as this product's media — same
-                # unassigned_source_media contract as the staged path.
-                if new_img.get("page") is None:
+                ownership = source_media_ownership(
+                    new_img, seg.get("source_refs", []),
+                    new_img.get("source") or new_img.get("file", ""))
+                if ownership is False:
+                    continue
+                if ownership is None:
                     new_img["unassigned_source_media"] = True
                 copied_images.append(new_img)
 
@@ -1115,6 +1200,9 @@ def ingest_product(
                             "source": f["name"],  # บอกว่ารูปนี้มาจากไฟล์ไหน
                             "page": img.get("page"),
                             "y0": img.get("y0"),
+                            "width": img.get("width"),
+                            "height": img.get("height"),
+                            "rects": img.get("rects", []),
                         }
                     else:
                         img_path = img
@@ -1266,7 +1354,13 @@ def _generate_metadata_summary(product_id: str, llm: LLMClient | None = None) ->
     # usable product facts WITHOUT a model — deterministic, verbatim, with
     # source-file provenance.  This base layer always reflects the current
     # source; the explicit-AI path below may overlay richer derived values.
-    det_facts = extract_source_facts(raw_text, record.get("text_extracts"))
+    source_files = {
+        ref.get("file", "") for ref in (record.get("scope") or {}).get("source_refs", [])
+        if ref.get("file")
+    }
+    scoped_source = next(iter(source_files)) if len(source_files) == 1 else ""
+    det_facts = extract_source_facts(
+        raw_text, record.get("text_extracts"), scoped_source)
 
     # ถ้ามี LLM และมี raw_text → สรุปสั้นๆ + สกัด derived_facts ในครั้งเดียวกัน
     # (ONE model call — extends the existing metadata_summary contract to

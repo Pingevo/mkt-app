@@ -406,11 +406,11 @@ class TestUploadStaging:
             document.getElementById('upload-submit-btn').style.display = 'none';
         }""", {"batch_id": result["batch_id"], "segments": result["segments"], "matches": result["matches"]})
 
-        # Preview renders the single staged product with an action dropdown
+        # Preview renders the single staged product with an action toggle
         preview = page.locator("#staging-preview-modal")
         assert preview.is_visible(), "Staging preview should be visible"
-        selects = preview.locator("select[data-seg-action]").all()
-        assert len(selects) == 1, f"Expected 1 segment dropdown, got {len(selects)}"
+        toggles = preview.locator(".seg-toggle[data-seg-action]").all()
+        assert len(toggles) == 1, f"Expected 1 segment toggle, got {len(toggles)}"
 
         confirm_btn = preview.locator("#staging-confirm-btn")
         assert "1" in confirm_btn.text_content()
@@ -454,6 +454,115 @@ class TestUploadStaging:
         data_dir = brand_root / "data"
         products = [d.name for d in data_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
         assert len(products) == 0, f"Cancel should produce 0 products, got {products}"
+
+
+class TestStagingToggle:
+    """FREE-URL-FACTS-AND-STAGING-TOGGLE-01 — the staging action control is
+    an accessible binary toggle (ข้าม / เพิ่ม), never a <select>."""
+
+    _CATALOG_CSV = ("Model,SKU,Price\n"
+                    "K67,K67-A,10\n"
+                    "K72,K72-A,20\n"
+                    "K52,K52-A,30\n")
+
+    def _stage(self, _browser, page, n=2):
+        """Real upload_stage → real multi-segment preview rendered in the
+        real upload modal."""
+        result = _api(_browser, "/api/upload_stage", method="POST",
+                      files=[("catalog.csv", self._CATALOG_CSV.encode("utf-8"))])
+        assert len(result.get("segments", [])) >= n, result
+        page.click("text=+ เพิ่ม")
+        page.wait_for_selector("#upload-overlay.visible", timeout=5000)
+        page.evaluate("""(data) => {
+            _stagingBatchId = data.batch_id;
+            _stagingSegments = data.segments;
+            _stagingMatches = data.matches;
+            _uploadQueue = [];
+            renderStagingPreview();
+        }""", result)
+        page.wait_for_timeout(300)
+        return result["batch_id"]
+
+    def test_control_is_toggle_not_select(self, _browser):
+        page = _browser["page"]
+        self._stage(_browser, page)
+        preview = page.locator("#staging-preview-modal")
+        assert preview.locator("select[data-seg-action]").count() == 0, \
+            "the old <select> must be gone"
+        toggles = preview.locator(".seg-toggle[data-seg-action]")
+        assert toggles.count() == 3
+        # every toggle exposes both labels as clickable radios
+        for i in range(3):
+            t = toggles.nth(i)
+            assert t.locator("input[type=radio][value='create']").count() == 1
+            assert t.locator("input[type=radio][value='skip']").count() == 1
+            labels = t.locator("label").all_inner_texts()
+            assert labels == ["ข้าม", "เพิ่ม"], labels
+            # default for a new candidate is เพิ่ม (create)
+            assert t.locator("input:checked").get_attribute("value") == "create"
+
+    def test_toggle_switches_and_updates_confirm(self, _browser):
+        page = _browser["page"]
+        self._stage(_browser, page)
+        preview = page.locator("#staging-preview-modal")
+        confirm = preview.locator("#staging-confirm-btn")
+        assert "3" in confirm.text_content()
+
+        # row 0 → ข้าม: count drops, others unaffected
+        preview.locator(
+            ".seg-toggle[data-seg-action='0'] label",
+            has_text="ข้าม").click()
+        assert preview.locator(
+            ".seg-toggle[data-seg-action='0'] input:checked"
+        ).get_attribute("value") == "skip"
+        assert preview.locator(
+            ".seg-toggle[data-seg-action='1'] input:checked"
+        ).get_attribute("value") == "create"
+        assert "2" in confirm.text_content()
+        assert not confirm.is_disabled()
+
+        # all → ข้าม: confirm disabled with the new terminology
+        for i in (1, 2):
+            preview.locator(
+                f".seg-toggle[data-seg-action='{i}'] label",
+                has_text="ข้าม").click()
+        assert confirm.is_disabled()
+
+        # row 1 back → เพิ่ม: re-enabled, count 1
+        preview.locator(
+            ".seg-toggle[data-seg-action='1'] label",
+            has_text="เพิ่ม").click()
+        assert "1" in confirm.text_content()
+        assert not confirm.is_disabled()
+
+    def test_toggle_is_keyboard_accessible(self, _browser):
+        page = _browser["page"]
+        self._stage(_browser, page, n=1)
+        grp = page.locator(".seg-toggle[data-seg-action='0']")
+        assert grp.get_attribute("role") == "radiogroup"
+        # native radio group: focus + arrow key moves the selection
+        grp.locator("input[value='create']").focus()
+        page.keyboard.press("ArrowRight")
+        assert grp.locator("input:checked").get_attribute("value") == "skip"
+        page.keyboard.press("ArrowLeft")
+        assert grp.locator("input:checked").get_attribute("value") == "create"
+
+    def test_commit_creates_only_toggled_on(self, _browser):
+        """Real commit: only candidates left on เพิ่ม are materialized."""
+        page = _browser["page"]
+        self._stage(_browser, page)
+        preview = page.locator("#staging-preview-modal")
+        preview.locator(
+            ".seg-toggle[data-seg-action='2'] label",
+            has_text="ข้าม").click()
+        preview.locator("#staging-confirm-btn").click()
+        page.wait_for_function(
+            "document.querySelector('#upload-modal-status')"
+            ".textContent.includes('บันทึกเรียบร้อย')", timeout=15000)
+        data_dir = _browser["brand_root"] / "data"
+        products = sorted(d.name for d in data_dir.iterdir()
+                          if d.is_dir() and not d.name.startswith("."))
+        assert products == ["K67", "K72"], products
 
 
 class TestUrlGate:

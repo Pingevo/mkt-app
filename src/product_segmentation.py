@@ -530,6 +530,7 @@ def _table_to_segments(fname: str, text: str, table: dict) -> list[dict]:
     base identities make the table multi-product.
     """
     rows = table.get("rows") or []
+    row_bboxes = table.get("row_bboxes") or []
     page = table.get("page")
 
     header_idx = idcol = None
@@ -574,7 +575,7 @@ def _table_to_segments(fname: str, text: str, table: dict) -> list[dict]:
     segments: list[dict] = []
     by_key: dict[str, dict] = {}
     cursor = header_line
-    for row in rows[header_idx + 1:]:
+    for row_idx, row in enumerate(rows[header_idx + 1:], header_idx + 1):
         identity = str(row[idcol]).strip() if idcol < len(row) else ""
         if not identity:
             continue
@@ -582,8 +583,10 @@ def _table_to_segments(fname: str, text: str, table: dict) -> list[dict]:
         ref = {"file": fname, "line_start": start}
         if page is not None:
             ref["page"] = page
+        if row_idx < len(row_bboxes):
+            ref["bbox"] = row_bboxes[row_idx]
         parts = [
-            (f"{str(labels[j]).strip()}: {str(cell).strip()}"
+            (f"{str(labels[j]).strip()} | {str(cell).strip()}"
              if j < len(labels) and str(labels[j]).strip()
              else str(cell).strip())
             for j, cell in enumerate(row) if str(cell).strip()
@@ -609,10 +612,12 @@ def _table_to_segments(fname: str, text: str, table: dict) -> list[dict]:
         seg["source_refs"].append(ref)
         cursor = start + 1  # next row's identity sits after this one
 
-    for seg in segments:
-        refs = seg["source_refs"]
-        for a, b in zip(refs, refs[1:] + [None]):
-            a["line_end"] = (b["line_start"] - 1) if b else hi
+    refs = sorted(
+        (ref for seg in segments for ref in seg["source_refs"]),
+        key=lambda ref: ref["line_start"],
+    )
+    for a, b in zip(refs, refs[1:] + [None]):
+        a["line_end"] = (b["line_start"] - 1) if b else hi
 
     return segments if len(by_key) >= 2 else []
 
